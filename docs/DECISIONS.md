@@ -1,0 +1,26 @@
+# Decision Log
+
+Dates are recorded as **Date not recorded** when the repository or project context does not provide a reliable decision date. Status describes whether the decision is active and how far implementation has progressed.
+
+| Decision | Date | Reason | Impact | Status |
+|---|---|---|---|---|
+| Google Sheets is the production input source for Shopee `raw` data. | Date not recorded | The business source is maintained in the shared tracker spreadsheet. | Local processing starts from the configured spreadsheet ID and raw tab. | ACTIVE; read access verified. |
+| `raw` is read-only. | Date not recorded | Preserve the source of truth and prevent destructive pipeline writes. | The reader uses read-only scope; the writer rejects `raw` and has an explicit output allowlist. | ACTIVE; enforced in code. |
+| Use a service account for unattended access. | Date not recorded | Support local and future scheduled execution without an interactive OAuth session. | A service-account credential source is required for Sheet access. | ACTIVE; local access verified. |
+| Keep credential files outside the repository; never commit `.env` or secrets. | Date not recorded | Protect spreadsheet access and prevent credential leakage. | Configure an external service-account file path; Git ignore rules cover `.env` and common key formats. | ACTIVE. |
+| Default runs are local-output-only; Google Sheets writes require `--write-sheets`. | Date not recorded | Make source processing safe by default and make publication deliberate. | The write scope and guarded writer are reached only through explicit opt-in. | ACTIVE; code and safety tests present, live output write untested. |
+| `TARGET_MASTER` is intended to contain validated laptop configurations. | Date not recorded | Provide a stable target identity for later retailer comparisons. | Later scraping and matching should use reviewed configurations, not unstructured listing titles. | PLANNED; current worksheet was found empty and is not consumed by the code. |
+| Ranking GMV is M-1 GMV plus current MTD GMV. | Date not recorded | Combine the previous full calendar month with current-month activity. | Each model's period GMV is summed before ranking. | ACTIVE; implemented and tested. |
+| Only eligible models present in MTD may rank. | Date not recorded | Keep the target list current and restrict it to laptop candidates. | M-1-only models remain in the model summary but do not qualify. | ACTIVE; implemented and tested. |
+| Rank by ranking GMV descending, then MTD GMV descending, then `model_id` ascending. | Date not recorded | Make ties reproducible. | Repeated runs over the same data use stable order. | ACTIVE; implemented and tested. |
+| Collapse exact duplicate rows under `(period_month, shop_id, item_id, model_id)`; quarantine conflicting duplicates. | Date not recorded | Avoid double-counting exact repeats and avoid guessing when values disagree. | Exact copies retain one row; conflicts require fingerprint-matched `EXCLUDE_KEY` or `KEEP_SOURCE_ROW` decisions. Unresolved duplicate or model-identity conflicts block publication. | ACTIVE; implemented; latest live run has 21 unresolved records. |
+| Select an MTD price; never average prices. | Date not recorded | Price averaging can create a value that was never observed. | One distinct MTD price is selected; multiple distinct prices are flagged and left unselected. | ACTIVE; implemented and tested. |
+| Eligibility is keyword-based with model-level manual `ELIGIBLE` or `EXCLUDED` overrides. | Date not recorded | Provide explainable initial classification and a path for human corrections. | Rules live in `config/eligibility_rules.csv`; local overrides live in `config/eligibility_decisions.csv`; ambiguous or conflicting evidence enters review. | ACTIVE; implemented. |
+| Retailer comparisons require exact configuration matching. | Date not recorded | Similar product names can hide differences in CPU, memory, storage, or other specifications. | Future matcher must reject partial or ambiguous matches instead of treating them as exact. | PLANNED. |
+| Playwright, retailer scraping, and GitHub Actions belong to later phases. | Date not recorded | Complete and validate raw-data ranking and configuration identity before automation. | No scraper or scheduled workflow is part of the current implementation. | PLANNED; no such components exist in the repository. |
+
+## Decision review notes
+
+- Remote rows in `P1_ELIGIBILITY_DECISIONS` are preserved and merged when the explicit writer runs, but current-run classification loads the local decisions CSV before that step. Use the local file for decisions that must affect a run; review this boundary before treating the sheet tab as the source of current-run overrides.
+- `--write-sheets` replaces the generated approved output tabs, updates the manual-decision tab using merge logic, and appends the run log. A write test must use a dedicated test spreadsheet.
+- New decisions should be added to this log with their actual decision date. Do not infer dates from file timestamps or this documentation date.
