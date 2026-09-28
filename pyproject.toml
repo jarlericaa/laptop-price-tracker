@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "laptop-price-tracker"
+version = "0.1.0"
+description = "Read-only Shopee raw-data validation and laptop target generation"
+requires-python = ">=3.11"
+dependencies = [
+  "pandas",
+  "gspread",
+  "google-auth",
+  "python-dotenv",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+addopts = "-ra"
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+extend-exclude = [".venv"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
