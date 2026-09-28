@@ -1,0 +1,33 @@
+rule_type,rule,description
+INCLUDE,laptop,Generic laptop
+INCLUDE,notebook,Notebook computer
+INCLUDE,macbook,Apple MacBook
+INCLUDE,thinkpad,Lenovo ThinkPad
+INCLUDE,ideapad,Lenovo IdeaPad
+INCLUDE,legion,Lenovo Legion
+INCLUDE,vivobook,ASUS VivoBook
+INCLUDE,tuf,ASUS TUF
+INCLUDE,rog,ASUS ROG
+INCLUDE,aspire,Acer Aspire
+INCLUDE,elitebook,HP EliteBook
+INCLUDE,probook,HP ProBook
+INCLUDE,latitude,Dell Latitude
+INCLUDE,vostro,Dell Vostro
+INCLUDE,alienware,Dell Alienware
+INCLUDE,surface laptop,Microsoft Surface Laptop
+INCLUDE,surface pro,Microsoft Surface Pro
+INCLUDE,inbook,Infinix INBook
+INCLUDE,zerobook,Infinix ZEROBOOK
+EXCLUDE,laptop bag,Laptop bag accessory
+EXCLUDE,laptop sleeve,Laptop sleeve accessory
+EXCLUDE,laptop charger,Laptop charger accessory
+EXCLUDE,replacement charger,Replacement charger accessory
+EXCLUDE,desktop,Desktop computer
+EXCLUDE,desktop tower,Desktop tower
+EXCLUDE,monitor,Monitor
+EXCLUDE,printer,Printer
+EXCLUDE,camera,Camera
+EXCLUDE,fishing line,Fishing line
+EXCLUDE,table leg replacement,Table leg replacement
+EXCLUDE,server rack,Server rack
+EXCLUDE,raspberry pi module,Raspberry Pi module
