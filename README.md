@@ -9,7 +9,9 @@ GitHub Actions automation are planned; they are not implemented.
 The latest read-only live dry run completed in 57.49 seconds and generated 100 targets. The
 21 historical conflicting keys had fingerprint-matched `EXCLUDE_KEY` decisions; their source
 rows remain excluded, with no disputed values selected or summed. Business review of the Top
-100 and eligibility reports is still pending. No Google Sheets output writes were run. The
+100 and eligibility reports is still pending. The user reports that the nine approved `P1_*`
+tabs were subsequently created with headers only and verified on 2026-09-29. The Python
+`--write-sheets` path has not been run or tested against a dedicated test spreadsheet. The
 current `TARGET_MASTER` worksheet is empty.
 
 For Phase 5, a proposed `TARGET_MASTER` schema and a local CSV validator are available. The

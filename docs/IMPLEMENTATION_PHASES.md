@@ -11,7 +11,7 @@ The Python implementation and CLI are named “Phase 1” (`run_phase1.py` and `
 | 0. Finalize architecture and operating rules | COMPLETE | This documentation set records the architecture, requirements, safety rules, and decisions based on the repository. |
 | 1. Configure Google access and local environment | COMPLETE | Read-only `raw` and `TARGET_MASTER` access succeeded. Defining and populating the empty `TARGET_MASTER` is Phase 5. |
 | 2. Create repository and project structure | COMPLETE | Four grouped commits cover setup, implementation, tests, and initial docs; follow-up commits record the Phase 5 validator and this status refresh. Local business decisions and outputs remain ignored. |
-| 3. Create Google Sheets output structure | PARTIALLY_COMPLETE | Writer allowlist and tab schemas exist in code; no `P1_*` tabs exist in the real spreadsheet and no writes were tested. |
+| 3. Create Google Sheets output structure | PARTIALLY_COMPLETE | User reported that all nine approved `P1_*` tabs were created with verified headers and blank second rows in the real spreadsheet. The Python writer has not been tested against a dedicated test spreadsheet. |
 | 4. Read raw and generate Top 100 | PARTIALLY_COMPLETE | Live read-only run completed in 57.49 seconds and generated 100 targets after 21 historical keys were explicitly excluded; business review of reports remains pending. |
 | 5. Build and validate `TARGET_MASTER` | PARTIALLY_COMPLETE | Proposed schema, local validator, and CSV check command exist, covered by synthetic tests. The schema still needs business approval. The real tab is still empty and unchanged; no pipeline consumer exists. |
 | 6. Build shared scraping framework | NOT_STARTED | No scraping framework exists. |
@@ -62,7 +62,7 @@ The Python implementation and CLI are named “Phase 1” (`run_phase1.py` and `
 - **Dependencies:** Phases 1 and 2; reviewed output schema.
 - **Validation:** Read tab names and headers; exercise writes only against a dedicated test spreadsheet; confirm `raw` remains unchanged.
 - **Definition of done:** All expected output tabs and headers are verified in the intended destination, with a documented rollback/recovery procedure.
-- **Current status:** `PARTIALLY_COMPLETE`. Code has an allowlist and can create approved tabs, but the real spreadsheet currently has no `P1_*` tabs and no writes have been run.
+- **Current status:** `PARTIALLY_COMPLETE`. The user reported on 2026-09-29 that all nine approved `P1_*` tabs were created in the intended spreadsheet, every header was verified, and the second row was blank. The linked `gid` was `TOP SHOPS`; `raw` is a separate tab. The Python writer still needs a synthetic-data test against a dedicated test spreadsheet, and recovery behavior needs to be documented. No pipeline `--write-sheets` run has been performed.
 
 ### Phase 4 — Read raw and generate Top 100
 

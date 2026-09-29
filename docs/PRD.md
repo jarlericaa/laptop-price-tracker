@@ -57,10 +57,10 @@ Later phases will validate laptop configurations in `TARGET_MASTER`, collect ret
 | FR-04 | Collapse exact duplicates and require a recorded decision for conflicting duplicate keys before publication. | Implemented; the latest live run completed with recorded decisions for its 21 historical conflicts. New, stale, or invalid conflicts still block publication. |
 | FR-05 | Detect the latest month and immediately preceding calendar month dynamically. | Implemented. |
 | FR-06 | Classify eligibility from configured terms, then apply a valid model-level manual decision. | Implemented from local CSV configuration. |
-| FR-07 | Rank eligible models with the defined GMV formula and deterministic tie-breaking. | Implemented and unit-tested; live run reached the ranking stage but did not pass the final conflict gate. |
+| FR-07 | Rank eligible models with the defined GMV formula and deterministic tie-breaking. | Implemented and unit-tested; the 2026-09-28 live run completed after recorded decisions for its historical conflicts. Business review remains pending. |
 | FR-08 | Select one distinct MTD price without averaging; flag conflicting prices. | Implemented. |
 | FR-09 | Save local outputs and diagnostics by default. | Implemented under `data/output/`. |
-| FR-10 | Write only approved output tabs after explicit opt-in; never write `raw`. | Guarded writer implemented; no production output tabs or writes were verified. |
+| FR-10 | Write only approved output tabs after explicit opt-in; never write `raw`. | Guarded writer implemented. The user reported that the nine production output tabs were created header-only and verified on 2026-09-29; the Python writer itself has not been tested against a dedicated test spreadsheet. |
 | FR-11 | Validate `TARGET_MASTER` configurations. | Partially implemented. A local validator and CSV check cover the proposed schema, and synthetic tests pass. The schema still needs business approval. The tab is empty and not consumed by the pipeline. |
 | FR-12 | Scrape retailer offers, match exact configurations, compare prices, and record history. | Planned. |
 | FR-13 | Run and monitor the pipeline in GitHub Actions. | Planned. |
@@ -137,7 +137,7 @@ The default local output directory is `data/output/`:
 | `period_summary.csv` | Period selection and row counts. |
 | `phase1_run_summary.json` | Run-level counts and period metadata. |
 
-The optional Google Sheets writer uses these approved tabs: `P1_TOP_100_TARGETS`, `P1_ELIGIBLE_RANKING`, `P1_EXCLUDED_LISTINGS`, `P1_ELIGIBILITY_REVIEW`, `P1_ELIGIBILITY_DECISIONS`, `P1_CONFLICTING_DUPLICATES`, `P1_VALIDATION_ERRORS`, `P1_PERIOD_SUMMARY`, and `P1_RUN_LOG`. The current production spreadsheet has none of these output tabs. The user must explicitly enable writes with `--write-sheets`; unresolved conflicts stop the run before any sheet output write.
+The optional Google Sheets writer uses these approved tabs: `P1_TOP_100_TARGETS`, `P1_ELIGIBLE_RANKING`, `P1_EXCLUDED_LISTINGS`, `P1_ELIGIBILITY_REVIEW`, `P1_ELIGIBILITY_DECISIONS`, `P1_CONFLICTING_DUPLICATES`, `P1_VALIDATION_ERRORS`, `P1_PERIOD_SUMMARY`, and `P1_RUN_LOG`. The user reported that all nine tabs were created header-only in the production spreadsheet and their headers verified on 2026-09-29. The Python writer has not been tested against a dedicated test spreadsheet. The user must explicitly enable writes with `--write-sheets`; unresolved conflicts stop the run before any sheet output write.
 
 ## Non-functional requirements and security
 
@@ -156,7 +156,7 @@ The optional Google Sheets writer uses these approved tabs: `P1_TOP_100_TARGETS`
 - All unit tests, Ruff checks, and compilation pass.
 - The real `raw` read returns expected headers and string values.
 - A live run completes all validation, classification, aggregation, and ranking without unresolved conflicts and saves local outputs. **Processing met on 2026-09-28:** the read-only run completed in 57.49 seconds and generated 100 targets with the 21 historical conflicting keys excluded by recorded decisions. **Business acceptance remains pending:** review the Top 100 and eligibility reports.
-- Google Sheet output writing is verified only against a dedicated test spreadsheet before any production write. **Not yet met:** no output tabs exist, and no sheet write was run.
+- The nine production output tabs exist with verified headers and blank second rows, according to the user's 2026-09-29 report. **Partially met:** the application writer still needs testing against a dedicated test spreadsheet before it is used to publish pipeline data.
 
 ### Long-term acceptance
 

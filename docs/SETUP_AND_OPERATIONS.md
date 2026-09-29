@@ -64,10 +64,10 @@ SKIP_FRESHNESS_CHECK=false
 
 - **`raw`:** Production source of truth. It must remain read-only for this pipeline.
 - **`TARGET_MASTER`:** Intended future configuration table. It was readable on 2026-09-28 but had no headers or data. No Phase 4 command consumes it.
-- **`P1_*` outputs:** The writer can create approved output tabs when explicitly enabled. None existed in the real spreadsheet during the 2026-09-28 read-only check.
+- **`P1_*` outputs:** The user reported that all nine approved output tabs were created header-only and verified in the real spreadsheet on 2026-09-29. This confirms their structure; the Python writer has not been tested against a dedicated test spreadsheet.
 - **Eligibility and duplicate decisions:** Current run inputs are local CSV files under `config/`. The remote `P1_ELIGIBILITY_DECISIONS` tab is preserved/merged by the optional writer but is not loaded into current-run classification.
 
-Do not create or write production output tabs as part of setup verification. Use a separate test spreadsheet for write testing.
+The production output tabs now exist according to the user's report. Do not use the production spreadsheet for the first application-writer test; use a separate test spreadsheet with synthetic data.
 
 ## Read-only raw smoke test
 

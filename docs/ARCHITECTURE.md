@@ -100,6 +100,8 @@ The writer accepts only these tabs: `P1_TOP_100_TARGETS`, `P1_ELIGIBLE_RANKING`,
 
 Current read-only checks on 2026-09-28 found `TARGET_MASTER` but no rows or header, and found no existing `P1_*` output tabs. No output tab was written during documentation work.
 
+On 2026-09-29, the user reported that all nine approved `P1_*` tabs had since been created in the intended spreadsheet with verified headers and blank second rows. The Python writer integration remains untested; the production tabs are not to be used for its first test.
+
 ## Local execution and outputs
 
 From the repository root in WSL, `python smoke_test.py` checks connectivity and raw headers. `python run_phase1.py --dry-run` reads the source and saves local CSV/JSON files under `data/output/`; running without a write flag has the same local-only write behavior. The reports can contain business data and are ignored by Git.
