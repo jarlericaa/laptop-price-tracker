@@ -17,23 +17,25 @@ ROOT = Path(__file__).resolve().parents[1]
 
 # Synthetic configurations only; no brand, model, or value here describes a real target.
 BASE_ROW = {
-    "target_id": "TM-0001",
+    "target_id": "TGT-000001",
     "status": "ACTIVE",
     "brand": "ExampleBrand",
     "series": "ExampleBook",
-    "model": "EB14",
+    "manufacturer_model_code": "EB14",
     "cpu": "Example CPU 5",
+    "gpu": "Example Integrated Graphics",
     "ram_gb": "16",
-    "storage_gb": "512",
+    "storage_gb": "1000",
     "storage_type": "SSD",
+    "storage_layout": "1x1000GB NVMe SSD",
     "display_size_in": "14",
     "display_resolution": "1920x1080",
-    "gpu": "",
-    "os": "",
+    "refresh_rate_hz": "60",
+    "os_edition": "ExampleOS Home",
     "color": "",
     "variant_notes": "",
     "manufacturer_part_number": "",
-    "source_model_id": "",
+    "source_url": "https://example.com/products/eb14",
     "reviewer": "analyst",
     "reviewed_at": "2026-09-28",
     "notes": "",
@@ -58,11 +60,11 @@ def error_codes(result) -> list[tuple[int, str, str]]:
 
 def test_valid_rows_pass() -> None:
     result = validate_target_master(
-        target_values(target_row(), target_row(target_id="TM-0002", storage_gb="1024"))
+        target_values(target_row(), target_row(target_id="TGT-000002", storage_gb="2000"))
     )
     assert result.is_valid
     assert result.errors.empty
-    assert result.valid_rows["target_id"].tolist() == ["TM-0001", "TM-0002"]
+    assert result.valid_rows["target_id"].tolist() == ["TGT-000001", "TGT-000002"]
     assert result.valid_rows["source_row_number"].tolist() == [2, 3]
 
 
@@ -75,44 +77,47 @@ def test_values_remain_exact_strings() -> None:
     result = validate_target_master(
         target_values(
             target_row(
-                target_id="0007",
-                model="00123",
+                target_id="TGT-000007",
+                manufacturer_model_code="00123",
                 cpu="1.10",
-                source_model_id="000012345678901234",
                 manufacturer_part_number="1E+05",
                 display_size_in="15.60",
+                source_url="https://example.com/specs?id=0007",
                 variant_notes="  keep  spacing  ",
             )
         )
     )
     assert result.is_valid
     row = result.valid_rows.iloc[0]
-    assert row["target_id"] == "0007"
-    assert row["model"] == "00123"
+    assert row["target_id"] == "TGT-000007"
+    assert row["manufacturer_model_code"] == "00123"
     assert row["cpu"] == "1.10"
-    assert row["source_model_id"] == "000012345678901234"
     assert row["manufacturer_part_number"] == "1E+05"
     assert row["display_size_in"] == "15.60"
+    assert row["source_url"] == "https://example.com/specs?id=0007"
     assert row["variant_notes"] == "  keep  spacing  "
 
 
 def test_csv_reader_preserves_strings_and_tolerates_bom(tmp_path: Path) -> None:
     path = tmp_path / "targets.csv"
     with path.open("w", newline="", encoding="utf-8-sig") as handle:
-        csv.writer(handle).writerows(target_values(target_row(source_model_id="0042")))
+        csv.writer(handle).writerows(target_values(target_row()))
     values = read_target_master_csv(path)
     assert values[0][0] == "target_id"
     result = validate_target_master(values)
     assert result.is_valid
-    assert result.valid_rows.loc[0, "source_model_id"] == "0042"
+    assert result.valid_rows.loc[0, "manufacturer_model_code"] == "EB14"
 
 
 def test_missing_required_values_are_reported() -> None:
-    result = validate_target_master(target_values(target_row(brand="", cpu="   ", reviewer="")))
+    result = validate_target_master(
+        target_values(target_row(brand="", cpu="   ", os_edition="", reviewer=""))
+    )
     assert not result.is_valid
     assert error_codes(result) == [
         (2, "brand", "MISSING_VALUE"),
         (2, "cpu", "MISSING_VALUE"),
+        (2, "os_edition", "MISSING_VALUE"),
         (2, "reviewer", "MISSING_VALUE"),
     ]
     assert result.valid_rows.empty
@@ -121,19 +126,21 @@ def test_missing_required_values_are_reported() -> None:
 @pytest.mark.parametrize(
     ("column", "value", "code"),
     [
-        ("target_id", "TM 0001", "INVALID_FORMAT"),
-        ("target_id", "-TM1", "INVALID_FORMAT"),
+        ("target_id", "TGT-1", "INVALID_FORMAT"),
+        ("target_id", "TM-000001", "INVALID_FORMAT"),
         ("status", "active", "INVALID_VALUE"),
         ("ram_gb", "16GB", "INVALID_FORMAT"),
         ("ram_gb", "0", "INVALID_FORMAT"),
         ("ram_gb", "016", "INVALID_FORMAT"),
         ("storage_gb", "1.5", "INVALID_FORMAT"),
         ("storage_gb", "-512", "INVALID_FORMAT"),
+        ("refresh_rate_hz", "60Hz", "INVALID_FORMAT"),
         ("display_size_in", "15,6", "INVALID_FORMAT"),
         ("display_size_in", "14 inch", "INVALID_FORMAT"),
         ("display_resolution", "1920 x 1080", "INVALID_FORMAT"),
         ("display_resolution", "FHD", "INVALID_FORMAT"),
-        ("source_model_id", "12a", "INVALID_FORMAT"),
+        ("source_url", "example.com/product", "INVALID_FORMAT"),
+        ("source_url", "ftp://example.com/product", "INVALID_FORMAT"),
         ("reviewed_at", "2026-02-30", "INVALID_DATE"),
         ("reviewed_at", "28/09/2026", "INVALID_DATE"),
         ("brand", " ExampleBrand", "SURROUNDING_WHITESPACE"),
@@ -150,14 +157,9 @@ def test_malformed_values_are_reported(column: str, value: str, code: str) -> No
 def test_optional_fields_may_be_blank_or_omitted() -> None:
     optional = {
         "series",
-        "storage_type",
-        "display_resolution",
-        "gpu",
-        "os",
         "color",
         "variant_notes",
         "manufacturer_part_number",
-        "source_model_id",
         "notes",
     }
     blank = validate_target_master(target_values(target_row(**dict.fromkeys(optional, ""))))
@@ -168,11 +170,11 @@ def test_optional_fields_may_be_blank_or_omitted() -> None:
         target_values(target_row(required_only), headers=required_only)
     )
     assert omitted.is_valid
-    assert omitted.valid_rows.loc[0, "gpu"] == ""
+    assert omitted.valid_rows.loc[0, "color"] == ""
     assert list(omitted.valid_rows.columns) == ["source_row_number", *TARGET_MASTER_HEADERS]
 
 
-def test_populated_optional_fields_are_still_format_checked() -> None:
+def test_required_fields_are_still_format_checked() -> None:
     result = validate_target_master(target_values(target_row(display_resolution="1920X1080")))
     assert error_codes(result) == [(2, "display_resolution", "INVALID_FORMAT")]
 
@@ -181,12 +183,12 @@ def test_duplicate_configuration_flags_every_row_without_choosing_one() -> None:
     result = validate_target_master(
         target_values(
             target_row(),
-            target_row(target_id="TM-0002", color="Silver", brand="examplebrand"),
-            target_row(target_id="TM-0003", model="EB14  ", notes="unrelated"),
-            target_row(target_id="TM-0004", storage_gb="1024"),
+            target_row(target_id="TGT-000002", color="Silver", brand="examplebrand"),
+            target_row(target_id="TGT-000003", notes="unrelated"),
+            target_row(target_id="TGT-000004", storage_gb="2000"),
         )
     )
-    # Row 4 also carries surrounding whitespace; identity comparison collapses it anyway.
+    # Color, brand casing, and notes are not identity, so rows 2-4 are one configuration.
     duplicates = [entry for entry in error_codes(result) if entry[2] == "DUPLICATE_CONFIGURATION"]
     assert duplicates == [
         (2, "configuration_identity", "DUPLICATE_CONFIGURATION"),
@@ -194,32 +196,39 @@ def test_duplicate_configuration_flags_every_row_without_choosing_one() -> None:
         (4, "configuration_identity", "DUPLICATE_CONFIGURATION"),
     ]
     assert "also on row(s) 3;4" in result.errors.loc[0, "error_message"]
-    assert result.valid_rows["target_id"].tolist() == ["TM-0004"]
+    assert result.valid_rows["target_id"].tolist() == ["TGT-000004"]
 
 
-def test_blank_optional_identity_value_is_distinct_from_populated_value() -> None:
+def test_missing_identity_values_do_not_match_each_other() -> None:
     result = validate_target_master(
-        target_values(target_row(), target_row(target_id="TM-0002", storage_type=""))
+        target_values(
+            target_row(gpu=""),
+            target_row(target_id="TGT-000002", gpu=""),
+        )
     )
-    assert result.is_valid
+    assert not result.is_valid
+    assert result.errors["error_code"].tolist() == ["MISSING_VALUE", "MISSING_VALUE"]
 
 
 def test_duplicate_target_ids_are_rejected_case_insensitively() -> None:
     result = validate_target_master(
-        target_values(target_row(), target_row(target_id="tm-0001", storage_gb="1024"))
+        target_values(target_row(), target_row(target_id="tgt-000001", storage_gb="2000"))
     )
+    # Lowercase IDs also fail the TGT- format, but still collide with the uppercase ID.
     assert error_codes(result) == [
         (2, "target_id", "DUPLICATE_TARGET_ID"),
+        (3, "target_id", "INVALID_FORMAT"),
         (3, "target_id", "DUPLICATE_TARGET_ID"),
     ]
     assert result.valid_rows.empty
 
 
 def test_identity_key_is_configurable_for_an_approved_change() -> None:
-    values = target_values(target_row(), target_row(target_id="TM-0002", color="Silver"))
+    values = target_values(target_row(), target_row(target_id="TGT-000002", color="Silver"))
     assert not validate_target_master(values).is_valid
     with_color = validate_target_master(
-        values, identity_columns=("brand", "series", "model", "cpu", "color")
+        values,
+        identity_columns=("brand", "manufacturer_model_code", "cpu", "gpu", "color"),
     )
     assert with_color.is_valid
     with pytest.raises(ValueError, match="Unknown identity columns"):
@@ -231,7 +240,7 @@ def test_blank_rows_are_ignored_and_extra_cells_are_reported() -> None:
         target_values(
             target_row(),
             ["", " "],
-            [*target_row(target_id="TM-0002", storage_gb="1024"), "stray"],
+            [*target_row(target_id="TGT-000002", storage_gb="2000"), "stray"],
         )
     )
     assert error_codes(result) == [(4, "", "EXTRA_CELLS")]
@@ -277,12 +286,12 @@ def write_csv(path: Path, rows: list[list[str]]) -> Path:
 
 
 def test_cli_passing_check_writes_exact_validated_copy(tmp_path: Path, capsys) -> None:
-    source = write_csv(tmp_path / "in.csv", target_values(target_row(target_id="0007")))
+    source = write_csv(tmp_path / "in.csv", target_values(target_row(target_id="TGT-000007")))
     out = tmp_path / "out"
     assert load_cli().main([str(source), "--output-dir", str(out)]) == 0
     validated = read_target_master_csv(out / "target_master_validated.csv")
     assert validated[0] == ["source_row_number", *TARGET_MASTER_HEADERS]
-    assert validated[1][1] == "0007"
+    assert validated[1][1] == "TGT-000007"
     assert (out / "target_master_validation_errors.csv").is_file()
     assert "ExampleBrand" not in capsys.readouterr().out
 
@@ -303,7 +312,7 @@ def test_cli_failing_check_reports_counts_only_and_removes_stale_copy(
     assert "EXAMPLEBRAND" not in captured.out + captured.err
     assert not (out / "target_master_validated.csv").exists()
     report = read_target_master_csv(out / "target_master_validation_errors.csv")
-    assert len(report) == 3
+    assert len(report) == 4  # header, two duplicate rows, and the TM-0002 format error
 
 
 def test_cli_schema_error_fails_safely(tmp_path: Path, capsys) -> None:

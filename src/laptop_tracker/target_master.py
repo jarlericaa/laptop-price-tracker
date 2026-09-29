@@ -1,9 +1,8 @@
-"""Proposed TARGET_MASTER schema and a local, credential-free configuration validator.
+"""Approved TARGET_MASTER schema and local, credential-free configuration validator.
 
-The column set, required fields, and configuration identity key below are a PROPOSAL pending
-business approval (see docs/TARGET_MASTER_SCHEMA.md). They are defined as data so an approved
-change is a one-place edit. Values are never coerced: every cell stays the exact string that was
-read, and comparison-only normalization is used solely to detect duplicate identities.
+Schema decisions are documented in docs/TARGET_MASTER_SCHEMA.md. Values are never coerced: every
+cell stays the exact string that was read, and comparison-only normalization is used solely to
+detect duplicate identities.
 """
 
 from __future__ import annotations
@@ -14,6 +13,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
+from urllib.parse import urlsplit
 
 import pandas as pd
 
@@ -28,34 +28,49 @@ class TargetColumn:
     allowed: tuple[str, ...] = ()
     free_text: bool = False
     is_date: bool = False
+    is_url: bool = False
 
 
-TARGET_ID_PATTERN = r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}"
+TARGET_ID_PATTERN = r"TGT-[0-9]{6}"
 POSITIVE_INTEGER_PATTERN = r"[1-9][0-9]*"
 
-# Order is the proposed worksheet header order (config/target_master_template.csv).
+# Order is the approved worksheet header order (config/target_master_template.csv).
 TARGET_MASTER_COLUMNS: tuple[TargetColumn, ...] = (
     TargetColumn(
         "target_id",
         True,
-        "Stable configuration identifier.",
+        "Stable configuration identifier; never reused after retirement.",
         TARGET_ID_PATTERN,
-        "1-64 letters, digits, '.', '_' or '-', starting with a letter or digit",
+        "TGT- followed by exactly six digits, for example TGT-000001",
     ),
     TargetColumn(
         "status", True, "Whether the configuration is tracked.", allowed=("ACTIVE", "INACTIVE")
     ),
     TargetColumn("brand", True, "Manufacturer brand."),
-    TargetColumn("series", False, "Product line or series."),
-    TargetColumn("model", True, "Model name or number."),
-    TargetColumn("cpu", True, "Processor as the manufacturer names it."),
+    TargetColumn(
+        "manufacturer_model_code", True, "Exact manufacturer model code."
+    ),
+    TargetColumn("series", False, "Product line or series; descriptive, not identity."),
+    TargetColumn("cpu", True, "Exact processor model, including suffix."),
+    TargetColumn(
+        "gpu", True, "Exact graphics configuration; use an explicit integrated/no-GPU value."
+    ),
     TargetColumn(
         "ram_gb", True, "Installed memory in GB.", POSITIVE_INTEGER_PATTERN, "positive integer"
     ),
     TargetColumn(
-        "storage_gb", True, "Total storage in GB.", POSITIVE_INTEGER_PATTERN, "positive integer"
+        "storage_gb",
+        True,
+        "Total storage capacity in decimal GB (1 TB = 1000 GB).",
+        POSITIVE_INTEGER_PATTERN,
+        "positive integer",
     ),
-    TargetColumn("storage_type", False, "Storage technology."),
+    TargetColumn("storage_type", True, "Storage technology or combination, as verified."),
+    TargetColumn(
+        "storage_layout",
+        True,
+        "Per-drive capacities and types, for example 1x512GB SSD + 1x1000GB HDD.",
+    ),
     TargetColumn(
         "display_size_in",
         True,
@@ -65,24 +80,35 @@ TARGET_MASTER_COLUMNS: tuple[TargetColumn, ...] = (
     ),
     TargetColumn(
         "display_resolution",
-        False,
+        True,
         "Native resolution.",
         r"[1-9][0-9]{2,4}x[1-9][0-9]{2,4}",
         "WIDTHxHEIGHT such as 1920x1080",
     ),
-    TargetColumn("gpu", False, "Discrete or named graphics, if a distinguishing variant."),
-    TargetColumn("os", False, "Preinstalled operating system."),
+    TargetColumn(
+        "refresh_rate_hz",
+        True,
+        "Display refresh rate in Hz.",
+        POSITIVE_INTEGER_PATTERN,
+        "positive integer",
+    ),
+    TargetColumn(
+        "os_edition",
+        True,
+        "Exact preinstalled operating system edition; use an explicit value such as No OS.",
+    ),
     TargetColumn("color", False, "Color variant."),
-    TargetColumn("variant_notes", False, "Other distinguishing variant details.", free_text=True),
+    TargetColumn("variant_notes", False, "Other descriptive variant details.", free_text=True),
     TargetColumn("manufacturer_part_number", False, "Manufacturer SKU or part number."),
     TargetColumn(
-        "source_model_id",
-        False,
-        "Shopee model_id from the reviewed Phase 4 targets.",
-        r"[0-9]+",
-        "digits only",
+        "source_url",
+        True,
+        "Evidence URL a reviewer can use to verify this configuration.",
+        is_url=True,
     ),
-    TargetColumn("reviewer", True, "Person who approved the row."),
+    TargetColumn(
+        "reviewer", True, "Named manager or category owner who approved the row."
+    ),
     TargetColumn("reviewed_at", True, "Approval date.", format_hint="YYYY-MM-DD", is_date=True),
     TargetColumn("notes", False, "Free-text notes.", free_text=True),
 )
@@ -90,20 +116,22 @@ TARGET_MASTER_COLUMNS: tuple[TargetColumn, ...] = (
 TARGET_MASTER_HEADERS = [column.name for column in TARGET_MASTER_COLUMNS]
 REQUIRED_TARGET_COLUMNS = [column.name for column in TARGET_MASTER_COLUMNS if column.required]
 
-# Proposed exact-configuration identity: attributes that distinguish a separately priced
-# configuration. Color, OS, part number, status, and review fields are deliberately excluded
-# pending business approval.
-PROPOSED_IDENTITY_COLUMNS: tuple[str, ...] = (
+# Exact-configuration identity approved for this project. Color, series, notes, and part number
+# are descriptive/evidence fields. Missing identity values are invalid and are never grouped as
+# a matching identity.
+TARGET_IDENTITY_COLUMNS: tuple[str, ...] = (
     "brand",
-    "series",
-    "model",
+    "manufacturer_model_code",
     "cpu",
+    "gpu",
     "ram_gb",
     "storage_gb",
     "storage_type",
+    "storage_layout",
     "display_size_in",
     "display_resolution",
-    "gpu",
+    "refresh_rate_hz",
+    "os_edition",
 )
 
 TARGET_ERROR_COLUMNS = [
@@ -161,7 +189,7 @@ def validate_target_headers(headers: Sequence[object]) -> list[str]:
 
 def validate_target_master(
     values: Sequence[Sequence[object]],
-    identity_columns: Sequence[str] = PROPOSED_IDENTITY_COLUMNS,
+    identity_columns: Sequence[str] = TARGET_IDENTITY_COLUMNS,
 ) -> TargetMasterResult:
     """Validate worksheet-shaped values (header row first), e.g. ``get_all_values`` or a CSV.
 
@@ -213,50 +241,7 @@ def validate_target_master(
     for record in records:
         row_number = int(record["source_row_number"])  # type: ignore[arg-type]
         for column in TARGET_MASTER_COLUMNS:
-            raw = str(record[column.name])
-            if raw.strip() == "":
-                if column.required:
-                    add_error(
-                        row_number,
-                        column.name,
-                        raw,
-                        "MISSING_VALUE",
-                        f"{column.name} is required.",
-                    )
-                continue
-            if not column.free_text and raw != raw.strip():
-                add_error(
-                    row_number,
-                    column.name,
-                    raw,
-                    "SURROUNDING_WHITESPACE",
-                    f"{column.name} has leading or trailing whitespace; values are not trimmed.",
-                )
-                continue
-            if column.allowed and raw not in column.allowed:
-                add_error(
-                    row_number,
-                    column.name,
-                    raw,
-                    "INVALID_VALUE",
-                    f"{column.name} must be one of: {', '.join(column.allowed)}.",
-                )
-            if column.pattern and not re.fullmatch(column.pattern, raw):
-                add_error(
-                    row_number,
-                    column.name,
-                    raw,
-                    "INVALID_FORMAT",
-                    f"{column.name} must be {column.format_hint}.",
-                )
-            if column.is_date and not _is_iso_date(raw):
-                add_error(
-                    row_number,
-                    column.name,
-                    raw,
-                    "INVALID_DATE",
-                    f"{column.name} must be a valid {column.format_hint} date.",
-                )
+            check_cell(row_number, column, str(record[column.name]), add_error)
 
     _add_duplicate_errors(
         records,
@@ -301,6 +286,58 @@ def validate_target_master(
     return TargetMasterResult(rows=rows, valid_rows=valid_rows, errors=error_frame)
 
 
+def check_cell(row_number: int, column: TargetColumn, raw: str, add_error) -> None:
+    """Report blank-required, whitespace, allowed-value, format, date, and URL errors.
+
+    Shared with the supporting-table validators so nonblank values use identical formats.
+    """
+    if raw.strip() == "":
+        if column.required:
+            add_error(row_number, column.name, raw, "MISSING_VALUE", f"{column.name} is required.")
+        return
+    if not column.free_text and raw != raw.strip():
+        add_error(
+            row_number,
+            column.name,
+            raw,
+            "SURROUNDING_WHITESPACE",
+            f"{column.name} has leading or trailing whitespace; values are not trimmed.",
+        )
+        return
+    if column.allowed and raw not in column.allowed:
+        add_error(
+            row_number,
+            column.name,
+            raw,
+            "INVALID_VALUE",
+            f"{column.name} must be one of: {', '.join(column.allowed)}.",
+        )
+    if column.pattern and not re.fullmatch(column.pattern, raw):
+        add_error(
+            row_number,
+            column.name,
+            raw,
+            "INVALID_FORMAT",
+            f"{column.name} must be {column.format_hint}.",
+        )
+    if column.is_date and not _is_iso_date(raw):
+        add_error(
+            row_number,
+            column.name,
+            raw,
+            "INVALID_DATE",
+            f"{column.name} must be a valid {column.format_hint} date.",
+        )
+    if column.is_url and not _is_http_url(raw):
+        add_error(
+            row_number,
+            column.name,
+            raw,
+            "INVALID_FORMAT",
+            f"{column.name} must be an absolute HTTP or HTTPS URL.",
+        )
+
+
 def _is_iso_date(value: str) -> bool:
     if not re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}", value):
         return False
@@ -309,6 +346,16 @@ def _is_iso_date(value: str) -> bool:
     except ValueError:
         return False
     return True
+
+
+def _is_http_url(value: str) -> bool:
+    if any(character.isspace() for character in value):
+        return False
+    try:
+        parsed = urlsplit(value)
+    except ValueError:
+        return False
+    return parsed.scheme in {"http", "https"} and bool(parsed.netloc)
 
 
 def _add_duplicate_errors(
@@ -321,17 +368,13 @@ def _add_duplicate_errors(
 ) -> None:
     """Flag every row of a duplicate group; no row is chosen over another.
 
-    Rows missing a required key value are skipped here because they already fail validation.
-    Blank optional key values participate as blanks, so "blank" and "SSD" are distinct.
+    Rows missing any key value are skipped because incomplete identity must go to review, not
+    match another incomplete row. Values are normalized for comparison only.
     """
-    required = set(REQUIRED_TARGET_COLUMNS)
     groups: dict[tuple[str, ...], list[int]] = {}
     for record in records:
         values = [str(record[column]) for column in key_columns]
-        if any(
-            column in required and value.strip() == ""
-            for column, value in zip(key_columns, values, strict=True)
-        ):
+        if any(value.strip() == "" for value in values):
             continue
         key = tuple(identity_text(value) for value in values)
         groups.setdefault(key, []).append(int(record["source_row_number"]))  # type: ignore[arg-type]
