@@ -35,8 +35,8 @@ ROOT = Path(__file__).resolve().parents[1]
 TARGETS = validate_target_master(
     target_values(
         target_row(),
-        target_row(target_id="TGT-000002", storage_gb="2000", status="INACTIVE"),
-        target_row(target_id="TGT-000003", storage_gb="4000", cpu=""),
+        target_row(target_id="TGT-000002", storage_capacity_gb="2000", status="INACTIVE"),
+        target_row(target_id="TGT-000003", storage_capacity_gb="4000", gpu_model=""),
     )
 )
 
@@ -208,13 +208,13 @@ def test_review_accepts_only_approved_statuses(status: str) -> None:
 @pytest.mark.parametrize(
     ("column", "value", "code"),
     [
-        ("ram_gb", "16GB", "INVALID_FORMAT"),
-        ("storage_gb", "1TB", "INVALID_FORMAT"),
-        ("display_size_in", "15,6", "INVALID_FORMAT"),
-        ("display_resolution", "FHD", "INVALID_FORMAT"),
+        ("ram_capacity_gb", "16GB", "INVALID_FORMAT"),
+        ("storage_capacity_gb", "1TB", "INVALID_FORMAT"),
+        ("screen_size_in", "15,6", "INVALID_FORMAT"),
+        ("resolution", "FHD", "INVALID_FORMAT"),
         ("refresh_rate_hz", "144Hz", "INVALID_FORMAT"),
         ("source_url", "example.com/p", "INVALID_FORMAT"),
-        ("cpu", "Example CPU ", "SURROUNDING_WHITESPACE"),
+        ("cpu_series", "Example Series ", "SURROUNDING_WHITESPACE"),
         ("source_model_id", "abc", "INVALID_FORMAT"),
         ("reviewed_at", "29/09/2026", "INVALID_DATE"),
     ],
@@ -314,17 +314,16 @@ def test_seed_creates_one_new_candidate_per_distinct_model_without_guessing() ->
     guessed = [
         "review_id",
         "brand",
-        "manufacturer_model_code",
-        "cpu",
-        "gpu",
-        "ram_gb",
-        "storage_gb",
-        "storage_type",
-        "storage_layout",
-        "display_size_in",
-        "display_resolution",
+        "model",
+        "screen_size_in",
+        "resolution",
+        "display_type",
         "refresh_rate_hz",
-        "os_edition",
+        "cpu_series",
+        "ram_capacity_gb",
+        "storage_capacity_gb",
+        "gpu_model",
+        "os",
         "source_url",
         "prepared_by",
         "reviewer",

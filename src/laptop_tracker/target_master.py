@@ -46,57 +46,71 @@ TARGET_MASTER_COLUMNS: tuple[TargetColumn, ...] = (
     TargetColumn(
         "status", True, "Whether the configuration is tracked.", allowed=("ACTIVE", "INACTIVE")
     ),
-    TargetColumn("brand", True, "Manufacturer brand."),
+    TargetColumn("brand", True, "Manufacturer brand; descriptive, not part of the 1:1 key."),
+    TargetColumn("model", True, "Exact product model name/code; part of the 1:1 key."),
     TargetColumn(
-        "manufacturer_model_code", True, "Exact manufacturer model code."
-    ),
-    TargetColumn("series", False, "Product line or series; descriptive, not identity."),
-    TargetColumn("cpu", True, "Exact processor model, including suffix."),
-    TargetColumn(
-        "gpu", True, "Exact graphics configuration; use an explicit integrated/no-GPU value."
-    ),
-    TargetColumn(
-        "ram_gb", True, "Installed memory in GB.", POSITIVE_INTEGER_PATTERN, "positive integer"
-    ),
-    TargetColumn(
-        "storage_gb",
+        "screen_size_in",
         True,
-        "Total storage capacity in decimal GB (1 TB = 1000 GB).",
-        POSITIVE_INTEGER_PATTERN,
-        "positive integer",
-    ),
-    TargetColumn("storage_type", True, "Storage technology or combination, as verified."),
-    TargetColumn(
-        "storage_layout",
-        True,
-        "Per-drive capacities and types, for example 1x512GB SSD + 1x1000GB HDD.",
-    ),
-    TargetColumn(
-        "display_size_in",
-        True,
-        "Diagonal display size in inches.",
+        "Diagonal display size in inches; part of the 1:1 key.",
         r"[1-9][0-9]?(\.[0-9]{1,2})?",
         "positive number such as 14 or 15.6",
     ),
     TargetColumn(
-        "display_resolution",
+        "resolution",
         True,
-        "Native resolution.",
+        "Native display resolution; part of the 1:1 key.",
         r"[1-9][0-9]{2,4}x[1-9][0-9]{2,4}",
         "WIDTHxHEIGHT such as 1920x1080",
     ),
+    TargetColumn("display_type", True, "Display panel type; part of the 1:1 key."),
     TargetColumn(
         "refresh_rate_hz",
         True,
-        "Display refresh rate in Hz.",
+        "Display refresh rate in Hz; part of the 1:1 key.",
+        POSITIVE_INTEGER_PATTERN,
+        "positive integer",
+    ),
+    TargetColumn("cpu_brand", False, "CPU manufacturer/brand."),
+    TargetColumn("cpu_series", True, "Exact CPU series; part of the 1:1 key."),
+    TargetColumn("cpu_generation", False, "CPU generation, if verified."),
+    TargetColumn(
+        "cpu_cores",
+        False,
+        "CPU core count, if verified.",
         POSITIVE_INTEGER_PATTERN,
         "positive integer",
     ),
     TargetColumn(
-        "os_edition",
+        "ram_capacity_gb",
         True,
-        "Exact preinstalled operating system edition; use an explicit value such as No OS.",
+        "Installed memory capacity in GB; part of the 1:1 key.",
+        POSITIVE_INTEGER_PATTERN,
+        "positive integer",
     ),
+    TargetColumn("ram_type", False, "Memory type as shown by the product evidence."),
+    TargetColumn(
+        "storage_capacity_gb",
+        True,
+        "Total storage capacity in decimal GB (1 TB = 1000 GB); part of the 1:1 key.",
+        POSITIVE_INTEGER_PATTERN,
+        "positive integer",
+    ),
+    TargetColumn("storage_type", False, "Storage technology or combination, as verified."),
+    TargetColumn(
+        "storage_layout",
+        False,
+        "Per-drive capacities and types, for example 1x512GB SSD + 1x1000GB HDD.",
+    ),
+    TargetColumn("gpu_type", False, "Graphics type, if verified."),
+    TargetColumn("gpu_brand", False, "GPU brand, if verified."),
+    TargetColumn("gpu_model", True, "Exact GPU model; part of the 1:1 key."),
+    TargetColumn("vram", False, "GPU memory amount/type as stated by the evidence."),
+    TargetColumn("os", True, "Exact preinstalled operating system edition; part of the 1:1 key."),
+    TargetColumn("battery_capacity", False, "Battery capacity as stated by the evidence."),
+    TargetColumn("build_material", False, "Chassis/build material as stated by the evidence."),
+    TargetColumn("manufacturer_model_code", False, "Manufacturer model code/SKU, useful evidence."),
+    TargetColumn("series", False, "Product line or series; descriptive, not identity."),
+    TargetColumn("cpu_model", False, "Full CPU model string, including suffix, if available."),
     TargetColumn("color", False, "Color variant."),
     TargetColumn("variant_notes", False, "Other descriptive variant details.", free_text=True),
     TargetColumn("manufacturer_part_number", False, "Manufacturer SKU or part number."),
@@ -115,23 +129,28 @@ TARGET_MASTER_COLUMNS: tuple[TargetColumn, ...] = (
 
 TARGET_MASTER_HEADERS = [column.name for column in TARGET_MASTER_COLUMNS]
 REQUIRED_TARGET_COLUMNS = [column.name for column in TARGET_MASTER_COLUMNS if column.required]
+TARGET_PRODUCT_REQUIRED_COLUMNS = [
+    column.name
+    for column in TARGET_MASTER_COLUMNS
+    if column.required
+    and column.name
+    not in {"target_id", "status", "source_url", "reviewer", "reviewed_at"}
+]
 
-# Exact-configuration identity approved for this project. Color, series, notes, and part number
-# are descriptive/evidence fields. Missing identity values are invalid and are never grouped as
-# a matching identity.
+# Exact-configuration identity revised to the user's 1:1 matching fields on 2026-09-29. Brand is
+# retained as a required descriptive field but is not part of this key. Missing key values are
+# invalid and are never grouped as a matching identity.
 TARGET_IDENTITY_COLUMNS: tuple[str, ...] = (
-    "brand",
-    "manufacturer_model_code",
-    "cpu",
-    "gpu",
-    "ram_gb",
-    "storage_gb",
-    "storage_type",
-    "storage_layout",
-    "display_size_in",
-    "display_resolution",
+    "model",
+    "screen_size_in",
+    "resolution",
+    "display_type",
     "refresh_rate_hz",
-    "os_edition",
+    "cpu_series",
+    "ram_capacity_gb",
+    "storage_capacity_gb",
+    "gpu_model",
+    "os",
 )
 
 TARGET_ERROR_COLUMNS = [

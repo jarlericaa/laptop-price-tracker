@@ -1,12 +1,12 @@
 # `TARGET_MASTER` Schema and Review Workflow
 
-**Status:** The user approved the business choices in this document on 2026-09-29. The `TARGET_MASTER` validator and header template reflect them. Local validators for `SOURCE_MODEL_MAP` and `MATCH_REVIEW`, a read-only Google Sheets reader for all three tabs, and a Top 100 candidate seeding command are implemented; Claude reported 129 passing tests on 2026-09-29. No real configurations or mappings have been entered, and no approver is named. A read-only production check on 2026-09-29 found no `TARGET_MASTER` header and found both supporting tabs missing.
+**Status:** On 2026-09-29, the user revised the Phase 5 configuration identity to use the fields marked 1:1 in [PRICE_TRACKING_OUTPUT_SCHEMA.md](PRICE_TRACKING_OUTPUT_SCHEMA.md). The local validator and templates now reflect that revised key. The current master Google Sheet header has not been changed as part of this local schema update. No approver is named.
 
 ## Purpose and authority
 
 `TARGET_MASTER` contains only complete, reviewed laptop configurations that are candidates for future retailer price comparisons. It does not contain unreviewed Shopee titles or partial specifications. The Google Sheet is the master copy; local CSV exports are validation snapshots.
 
-The approved identity is the exact product specification composed of brand, manufacturer model code, exact CPU including suffix, GPU, RAM, total storage, storage type and layout, display size, resolution and refresh rate, and OS edition. Color and notes are descriptive. A manufacturer part number is useful evidence, but it is never the only identity rule.
+The revised 1:1 identity key is `model`, `screen_size_in`, `resolution`, `display_type`, `refresh_rate_hz`, `cpu_series`, `ram_capacity_gb`, `storage_capacity_gb`, `gpu_model`, and `os`. `brand` remains required product context, but is not part of the key because it was not bolded in the user's matching-field list. Other requested specifications are retained as fields for description and downstream output; they are not part of the identity key unless listed above.
 
 ## Approved `TARGET_MASTER` columns
 
@@ -16,19 +16,31 @@ The header order matches `config/target_master_template.csv`. Headers are exact 
 |---|---:|---|---:|
 | `target_id` | Yes | Stable ID exactly like `TGT-000001`. Never derive it from specs or reuse it. | No; unique ID |
 | `status` | Yes | `ACTIVE` or `INACTIVE` (uppercase). Retire configurations by setting `INACTIVE`; do not delete rows. | No |
-| `brand` | Yes | Exact manufacturer brand. | Yes |
-| `manufacturer_model_code` | Yes | Exact manufacturer model code. | Yes |
-| `series` | No | Product series; descriptive, not identity. | No |
-| `cpu` | Yes | Exact CPU model, including suffix. | Yes |
-| `gpu` | Yes | Exact GPU. Enter an explicit value for integrated graphics or no discrete GPU; do not leave unknown specs blank. | Yes |
-| `ram_gb` | Yes | Positive integer in GB. | Yes |
-| `storage_gb` | Yes | Total capacity in decimal GB: `1 TB = 1000 GB`. | Yes |
-| `storage_type` | Yes | Verified storage type or combination, such as `NVMe SSD` or `SSD+HDD`. | Yes |
-| `storage_layout` | Yes | Per-drive layout, for example `1x512GB SSD + 1x1000GB HDD`. | Yes |
-| `display_size_in` | Yes | Positive display diagonal in inches, up to two decimal places. | Yes |
-| `display_resolution` | Yes | `WIDTHxHEIGHT` with lowercase `x`, for example `1920x1080`. | Yes |
+| `brand` | Yes | Manufacturer brand. Required context; not part of the 1:1 key. | No |
+| `model` | Yes | Exact product model name/code as verified from product evidence. | Yes |
+| `screen_size_in` | Yes | Positive diagonal display size in inches, up to two decimal places. | Yes |
+| `resolution` | Yes | `WIDTHxHEIGHT` with lowercase `x`, for example `1920x1080`. | Yes |
+| `display_type` | Yes | Exact display type, such as the manufacturer-stated panel technology. | Yes |
 | `refresh_rate_hz` | Yes | Positive integer in Hz. | Yes |
-| `os_edition` | Yes | Exact preinstalled OS edition. Use an explicit value such as `No OS`, rather than leaving it blank. | Yes |
+| `cpu_brand` | No | CPU manufacturer/brand. | No |
+| `cpu_series` | Yes | Exact CPU series, as stated in product evidence. | Yes |
+| `cpu_generation` | No | CPU generation, if verified. | No |
+| `cpu_cores` | No | Positive integer core count, if verified. | No |
+| `ram_capacity_gb` | Yes | Positive integer in GB. | Yes |
+| `ram_type` | No | Memory type as stated in product evidence. | No |
+| `storage_capacity_gb` | Yes | Total capacity in decimal GB: `1 TB = 1000 GB`. | Yes |
+| `storage_type` | No | Storage technology or combination, as verified. | No |
+| `storage_layout` | No | Per-drive layout, for example `1x512GB SSD + 1x1000GB HDD`. | No |
+| `gpu_type` | No | Graphics type, if verified. | No |
+| `gpu_brand` | No | GPU brand, if verified. | No |
+| `gpu_model` | Yes | Exact GPU model; enter the verified integrated GPU where applicable. | Yes |
+| `vram` | No | VRAM detail as stated by the evidence. | No |
+| `os` | Yes | Exact preinstalled OS/edition. Use an explicit value such as `No OS`, rather than leaving it blank. | Yes |
+| `battery_capacity` | No | Battery capacity as stated in the evidence. | No |
+| `build_material` | No | Build material as stated in the evidence. | No |
+| `manufacturer_model_code` | No | Manufacturer model code/SKU; useful evidence, not the identity key. | No |
+| `series` | No | Product line or series; descriptive, not identity. | No |
+| `cpu_model` | No | Full CPU model string, including suffix, if available. | No |
 | `color` | No | Descriptive color variant. | No |
 | `variant_notes` | No | Descriptive variant details. | No |
 | `manufacturer_part_number` | No | Manufacturer part number or SKU; evidence only, not a stand-alone identity rule. | No |
@@ -37,11 +49,11 @@ The header order matches `config/target_master_template.csv`. Headers are exact 
 | `reviewed_at` | Yes | Actual approval date in `YYYY-MM-DD` format. | No |
 | `notes` | No | Descriptive free text. | No |
 
-The uniqueness key is the identity fields marked **Yes** above. A missing identity specification is an error; it must not make two incomplete rows appear to match. Incomplete candidates stay in `MATCH_REVIEW` until evidence fills the required fields.
+The uniqueness key is the identity fields marked **Yes** above, excluding the stable ID and required non-identity `brand`. A missing identity specification is an error; it must not make two incomplete rows appear to match. Incomplete candidates stay in `MATCH_REVIEW` until the required fields and evidence are complete.
 
 For duplicate detection, the validator compares identity text case-insensitively and collapses whitespace; it does not rewrite the stored text. This retains the existing validator's comparison convention. `ACTIVE` and `INACTIVE` rows both participate in uniqueness checks. Keep inactive rows so retired `target_id` values cannot be reused.
 
-Hardware specification fields have no controlled vocabulary beyond the formats above. Preserve manufacturer wording, especially the exact CPU suffix and OS edition. Record storage capacity as total decimal GB and put the individual drives and capacities in `storage_layout`.
+Specification fields have no controlled vocabulary beyond the formats above. Preserve source wording; do not infer absent specifications. Store RAM and storage capacities as integer GB, using decimal units (`1 TB = 1000 GB`). Keep full CPU model, RAM/storage types, and storage layout as additional evidence where available; these are not part of the revised identity key.
 
 ## Shopee source mapping
 

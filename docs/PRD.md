@@ -1,6 +1,6 @@
 # Laptop Price Tracker: Product Requirements
 
-**Status:** Phase 4 (the raw-data and ranking pipeline) is implemented in code, and the user accepted the current generated CSV reports on 2026-09-29. The latest read-only live run completed after fingerprint-matched decisions excluded 21 historical conflicting keys. The user approved the Phase 5 `TARGET_MASTER` schema choices on 2026-09-29. Local validators for `TARGET_MASTER`, `SOURCE_MODEL_MAP`, and `MATCH_REVIEW` are implemented, as are a read-only sheet reader for those tabs and a Top 100 candidate seeding command. No configurations or mappings have been populated, and no approver has been named. Phase 5 remains partially complete. Retailer scraping and price comparison are future work.
+**Status:** Phase 4 (the raw-data and ranking pipeline) is implemented in code, and the user accepted the current generated CSV reports on 2026-09-29. The latest read-only live run completed after fingerprint-matched decisions excluded 21 historical conflicting keys. The user revised the Phase 5 `TARGET_MASTER` identity key on 2026-09-29 to match the bolded fields in the downstream output requirements. Local validators for `TARGET_MASTER`, `SOURCE_MODEL_MAP`, and `MATCH_REVIEW` are implemented, as are a read-only sheet reader and Top 100 candidate seeder. The master Sheet headers need to be updated to the revised local templates. No configurations or mappings have been populated, and no approver has been named. Phase 5 remains partially complete. Retailer scraping and price comparison are future work.
 
 ## Purpose and business problem
 
@@ -31,7 +31,7 @@ The current problem is to produce a repeatable Top 100 candidate list without co
 
 - Retailer scraping, Playwright browser automation, retailer adapters, or price history. The shared, retailer-neutral framework those adapters will use exists and is tested offline, but it makes no live requests.
 - Exact matching of scraped offers to `TARGET_MASTER` configurations.
-- Real configuration rows or pipeline consumption of `TARGET_MASTER`. Its schema is approved, and validators plus a read-only reader exist for it and its supporting tables. See [TARGET_MASTER_SCHEMA.md](TARGET_MASTER_SCHEMA.md).
+- Real configuration rows or pipeline consumption of `TARGET_MASTER`. Its revised identity schema and validators exist locally, and a read-only reader covers it and its supporting tables. The Sheet header still needs to be updated. See [TARGET_MASTER_SCHEMA.md](TARGET_MASTER_SCHEMA.md).
 - Automatic promotion of review candidates, automatic source-to-target mapping, or inferring specifications from Shopee titles.
 - GitHub Actions scheduling or production monitoring.
 - Writing to `raw` or automatically resolving a human-review conflict.
@@ -62,7 +62,7 @@ Remaining work includes researching the seeded candidates, preparing and approvi
 | FR-08 | Select one distinct MTD price without averaging; flag conflicting prices. | Implemented. |
 | FR-09 | Save local outputs and diagnostics by default. | Implemented under `data/output/`. |
 | FR-10 | Write only approved output tabs after explicit opt-in; never write `raw`. | Guarded writer implemented and tested with synthetic data against a dedicated test spreadsheet; a read-only report confirmed its nine output tabs and expected synthetic rows. No production write occurred. |
-| FR-11 | Validate `TARGET_MASTER` configurations. | Partially implemented. The approved schema and header template are in place. Local CSV validators exist for `TARGET_MASTER`, `SOURCE_MODEL_MAP`, and `MATCH_REVIEW`. A read-only reader and `check_target_tables.py --from-sheets` handle the three tabs. Claude reported a passing test suite on 2026-09-29. A live read-only check found no `TARGET_MASTER` header and found the supporting tabs missing. No real configurations or mappings have been added, no approver is named, and there is no downstream consumer yet. |
+| FR-11 | Validate `TARGET_MASTER` configurations. | Partially implemented. The revised schema and local templates are in place. Local CSV validators exist for `TARGET_MASTER`, `SOURCE_MODEL_MAP`, and `MATCH_REVIEW`; a read-only reader and `check_target_tables.py --from-sheets` handle the three tabs. The user reported the tabs had headers and no data rows; the `TARGET_MASTER` and `MATCH_REVIEW` sheet headers now need to be updated to the revised templates. No real configurations or mappings have been added, no approver is named, and there is no downstream consumer yet. |
 | FR-11a | Seed the Phase 4 Top 100 as `MATCH_REVIEW` candidates without guessing specifications. | Implemented (`seed_match_review.py`). On 2026-09-29 it produced 100 `NEW` local candidates from the accepted Top 100. The file is local and ignored; nothing was written to Sheets. |
 | FR-12 | Scrape retailer offers, match exact configurations, compare prices, and record history. | Partially implemented. The shared scraping framework is implemented and tested offline (overall Phase 6; see [SCRAPING_FRAMEWORK.md](SCRAPING_FRAMEWORK.md)). Retailer adapters, live collection, exact matching, comparisons, and history are planned. |
 | FR-13 | Run and monitor the pipeline in GitHub Actions. | Planned. |
@@ -81,9 +81,9 @@ The code validates `grass_date`, the three ID fields (`shopid`, `itemid`, `model
 
 Internal names map the source fields to `period_date`, `shop_id`, `item_id`, `model_id`, `shopee_model_name`, `shopee_current_price_php`, and `total_gmv_usd`. Identifiers and names remain strings, including values with leading zeroes or numeric-looking text.
 
-`TARGET_MASTER` is intended to hold validated laptop configurations. The read-only check on 2026-09-28 found the worksheet but no header row or data rows.
+`TARGET_MASTER` is intended to hold validated laptop configurations. An earlier read-only check found no header row or data. The user later reported that the Phase 5 tabs had headers and no data rows; the local header has since been revised and must be synchronized.
 
-The approved schema is described in [TARGET_MASTER_SCHEMA.md](TARGET_MASTER_SCHEMA.md). It requires exact configuration identity fields, a source URL, stable IDs, and approval details; Shopee source IDs belong in a separate mapping table, and incomplete candidates belong in `MATCH_REVIEW`. The full accepted Top 100 is in scope: every distinct configuration with verified specs should be tracked, while several source IDs may point to one configuration. `check_target_master.py` validates a local CSV export against the schema. `check_target_tables.py` validates snapshots of all three tables, or with `--from-sheets` reads the three tabs using the read-only scope. No code feeds validated configurations into the ranking pipeline or a matcher yet.
+The revised schema is described in [TARGET_MASTER_SCHEMA.md](TARGET_MASTER_SCHEMA.md). It requires the ten user-designated 1:1 identity fields, brand context, a source URL, stable IDs, and approval details; Shopee source IDs belong in a separate mapping table, and incomplete candidates belong in `MATCH_REVIEW`. The full accepted Top 100 is in scope: every distinct configuration with verified specs should be tracked, while several source IDs may point to one configuration. `check_target_master.py` validates a local CSV export against the schema. `check_target_tables.py` validates snapshots of all three tables, or with `--from-sheets` reads the three tabs using the read-only scope. No code feeds validated configurations into the ranking pipeline or a matcher yet.
 
 ## Eligibility rules
 
@@ -141,6 +141,8 @@ The default local output directory is `data/output/`:
 
 The optional Google Sheets writer uses these approved tabs: `P1_TOP_100_TARGETS`, `P1_ELIGIBLE_RANKING`, `P1_EXCLUDED_LISTINGS`, `P1_ELIGIBILITY_REVIEW`, `P1_ELIGIBILITY_DECISIONS`, `P1_CONFLICTING_DUPLICATES`, `P1_VALIDATION_ERRORS`, `P1_PERIOD_SUMMARY`, and `P1_RUN_LOG`. The user reported that all nine tabs were created header-only in the production spreadsheet and their headers verified on 2026-09-29. A synthetic-data writer test against a dedicated test spreadsheet completed, and a user-provided read-only report confirmed the expected tabs, headers, synthetic output rows, and run-log count. No production write or `run_phase1.py --write-sheets` run has occurred. The user must explicitly enable writes with `--write-sheets`; unresolved conflicts stop the run before any sheet output write.
 
+The planned downstream product and comparison fields are recorded in [PRICE_TRACKING_OUTPUT_SCHEMA.md](PRICE_TRACKING_OUTPUT_SCHEMA.md). The Phase 5 `TARGET_MASTER` identity key has been revised to the user's bolded 1:1 fields; Phase 8 matching and Phase 9 comparison outputs are not implemented yet. This does not change current Phase 1 outputs or the Phase 6 offer observation model.
+
 ## Non-functional requirements and security
 
 - Preserve the source worksheet as read-only.
@@ -170,7 +172,7 @@ The optional Google Sheets writer uses these approved tabs: `P1_TOP_100_TARGETS`
 ## Known limitations and future enhancements
 
 - The latest successful live run took 57.49 seconds; stage timings were not captured. The synthetic 12,000-model aggregation test passes its under-10-second assertion, which does not establish end-to-end runtime.
-- A read-only check on 2026-09-29 found no `TARGET_MASTER` header and found `SOURCE_MODEL_MAP` and `MATCH_REVIEW` missing. The schema is approved. Validators and a read-only reader exist for all three tables, but there is no pipeline integration. Several behaviors not covered by the approved decisions use documented conservative defaults; see [TARGET_MASTER_SCHEMA.md](TARGET_MASTER_SCHEMA.md#unspecified-behaviors-and-chosen-defaults).
+- An earlier read-only check found no Phase 5 headers or supporting tabs. The user later reported all three tabs were created with headers and no rows. The local `TARGET_MASTER` and `MATCH_REVIEW` templates have since been revised; the sheet still needs to reflect those changes. Validators and a read-only reader exist for all three tables, but there is no pipeline integration. Several behaviors not covered by the approved decisions use documented conservative defaults; see [TARGET_MASTER_SCHEMA.md](TARGET_MASTER_SCHEMA.md#unspecified-behaviors-and-chosen-defaults).
 - Eligibility is keyword-based and should be reviewed against real listings; ambiguous cases go to human review.
 - The optional remote eligibility-decision tab is not read into the same run's classification.
 - No retailer scraper, Playwright dependency, exact matcher, price-history store, GitHub Actions workflow, or production output-tab setup exists in the repository.

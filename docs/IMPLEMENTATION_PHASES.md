@@ -13,7 +13,7 @@ The Python implementation and CLI are named “Phase 1” (`run_phase1.py` and `
 | 2. Create repository and project structure | COMPLETE | Four grouped commits cover setup, implementation, tests, and initial docs; follow-up commits record the Phase 5 validator and this status refresh. Local business decisions and outputs remain ignored. |
 | 3. Create Google Sheets output structure | COMPLETE | User-reported verification confirms the nine production output tabs and headers. A read-only report for the dedicated test spreadsheet confirmed all nine test tabs and headers, expected synthetic output rows, and `top_100_count=1`. The sequential-write recovery procedure is documented. The test report did not list or inspect `raw`; no production write occurred. |
 | 4. Read raw and generate Top 100 | COMPLETE | The 2026-09-28 read-only run completed in 57.49 seconds and generated 100 targets after 21 historical keys were explicitly excluded. The user accepted the current CSV reports on 2026-09-29; no production Sheets write was made. |
-| 5. Build and validate `TARGET_MASTER` | PARTIALLY_COMPLETE | Schema approved on 2026-09-29. Validators exist for all three tables, with a read-only sheet reader and a Top 100 candidate seeder; Claude reported 129 passing tests. A live read-only check found no `TARGET_MASTER` header and found the supporting tabs missing. No real configurations or mappings have been entered, and no approver is named. |
+| 5. Build and validate `TARGET_MASTER` | PARTIALLY_COMPLETE | The user later reported all three tabs created with verified headers and no data rows. The local `TARGET_MASTER` and `MATCH_REVIEW` templates have since been revised to the new 1:1 identity key and still need to be reflected in the Sheet. Validators exist for all three tables, with a read-only reader and Top 100 candidate seeder. No real configurations or mappings have been entered, and no approver is named. |
 | 6. Build shared scraping framework | COMPLETE | The retailer-neutral framework (`offers.py`, `scraping.py`) and an offline example-adapter harness were added on 2026-09-29. 203 tests, Ruff, and `compileall` passed. No live request was made. The framework does not read Sheets or match offers to targets. |
 | 7. Implement retailer adapters | NOT_STARTED | No retailer adapters exist. Retailer selection and the data-use review are still required before any live request. |
 | 8. Normalize and perform exact matching | NOT_STARTED | No offer normalization or exact configuration matcher exists. |
@@ -84,7 +84,7 @@ The Python implementation and CLI are named “Phase 1” (`run_phase1.py` and `
 - **Validation:** Required-field and exact-identity checks, duplicate-ID and mapping checks, review-state checks, and representative manual approval review.
 - **Definition of done:** The master and supporting tables contain approved, validated records; local CSV snapshots can be checked repeatably; downstream code can read the authoritative sheet tables without fuzzy identity assumptions.
 - **Current status:** `PARTIALLY_COMPLETE`.
-  - **Done:** The user approved the schema choices on 2026-09-29. [TARGET_MASTER_SCHEMA.md](TARGET_MASTER_SCHEMA.md), `config/target_master_template.csv`, and the local validator reflect the approved identity fields, required specifications, decimal storage units, source URL, stable IDs, and human approval fields.
+  - **Done:** The user revised the 1:1 identity key on 2026-09-29 to the bolded fields in [PRICE_TRACKING_OUTPUT_SCHEMA.md](PRICE_TRACKING_OUTPUT_SCHEMA.md). [TARGET_MASTER_SCHEMA.md](TARGET_MASTER_SCHEMA.md), both local templates, and the validators now reflect those fields, required brand context, decimal storage units, source URL, stable IDs, and human approval fields.
     - `supporting_tables.py` validates `SOURCE_MODEL_MAP` and `MATCH_REVIEW` against their exact templates.
     - `check_target_tables.py` checks local CSV snapshots of all three tables, or reads the tabs with the read-only scope using `--from-sheets`.
     - `seed_match_review.py` produced 100 local `NEW` candidates from the accepted Top 100, with all specifications, URLs, and approvals blank.
@@ -92,8 +92,8 @@ The Python implementation and CLI are named “Phase 1” (`run_phase1.py` and `
     - 129 tests, Ruff, and `compileall` passed on 2026-09-29.
   - **Not done:**
     - The designated manager or category owner has not been named.
-    - No candidate has been researched, approved, or mapped. `TARGET_MASTER` and `SOURCE_MODEL_MAP` contain no real rows, and the live `TARGET_MASTER` worksheet was last reported empty on 2026-09-28.
-    - A live read-only `--from-sheets` run found no `TARGET_MASTER` header and found `SOURCE_MODEL_MAP` and `MATCH_REVIEW` missing. Their approved headers must be added before the tables can pass validation.
+    - No candidate has been researched, approved, or mapped. The user reported the Phase 5 tabs had no data rows.
+    - Update the existing master Google Sheet's `TARGET_MASTER` and `MATCH_REVIEW` headers to the revised local templates; this repository change did not write to Sheets. The user previously reported that the three Phase 5 tabs had headers and no data rows.
     - The conservative defaults for unspecified behaviors (listed in the schema doc) need owner confirmation.
     - No downstream consumer interface or automatic full Top 100 source-ID coverage check exists.
 
@@ -128,7 +128,7 @@ The Python implementation and CLI are named “Phase 1” (`run_phase1.py` and `
 ### Phase 8 — Normalize and perform exact matching
 
 - **Objective:** Match retailer offers only to the correct target configuration.
-- **Tasks:** Normalize attributes; compare required configuration dimensions; classify exact, unmatched, and ambiguous offers.
+- **Tasks:** Normalize attributes; compare the user-designated 1:1 fields in [PRICE_TRACKING_OUTPUT_SCHEMA.md](PRICE_TRACKING_OUTPUT_SCHEMA.md), as represented by `TARGET_IDENTITY_COLUMNS`; classify exact, unmatched, and ambiguous offers. Define normalization and missing-value behavior before coding the matcher.
 - **Deliverables:** Normalization rules, exact matcher, match evidence, and review queue.
 - **Dependencies:** Phases 5 and 6; retailer observations from Phase 7.
 - **Validation:** Positive, negative, near-match, and ambiguous fixtures; require exact outcomes for all reviewed test cases.
@@ -138,7 +138,7 @@ The Python implementation and CLI are named “Phase 1” (`run_phase1.py` and `
 ### Phase 9 — Generate comparisons and price history
 
 - **Objective:** Report retailer prices against target configurations over time.
-- **Tasks:** Define comparison cadence, currency and availability policy, observation identity, history retention, and output schemas.
+- **Tasks:** Define comparison cadence, currency and availability policy, observation identity, history retention, and implement the requested fields in [PRICE_TRACKING_OUTPUT_SCHEMA.md](PRICE_TRACKING_OUTPUT_SCHEMA.md). Confirm retailer codes, units, precision, and missing-price representation.
 - **Deliverables:** Weekly comparison and historical price outputs.
 - **Dependencies:** Validated `TARGET_MASTER`, adapter observations, and exact matches.
 - **Validation:** Reconcile sample comparisons to source observations; test missing offers, price changes, duplicates, and reruns.

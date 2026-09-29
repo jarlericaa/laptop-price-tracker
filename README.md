@@ -15,15 +15,17 @@ production tabs were created with headers only and verified on 2026-09-29. A syn
 writer test completed on a dedicated test spreadsheet; a read-only report confirmed the nine
 tabs and headers, expected synthetic rows, and a run-log count of 1. The full
 `run_phase1.py --write-sheets` command has not been run, and no production sheet write has
-occurred. A read-only production check on 2026-09-29 found no `TARGET_MASTER` header and found the
-`SOURCE_MODEL_MAP` and `MATCH_REVIEW` tabs missing.
+occurred. The user later reported the three Phase 5 tabs have header rows and no data. The local
+`TARGET_MASTER` and `MATCH_REVIEW` headers have since changed to the revised identity schema and
+need to be copied to the Sheet.
 
-Phase 5 is PARTIALLY_COMPLETE. The `TARGET_MASTER` schema decisions are approved. Local
-validators exist for `TARGET_MASTER`, `SOURCE_MODEL_MAP`, and `MATCH_REVIEW`, along with a
+Phase 5 is PARTIALLY_COMPLETE. The user revised the `TARGET_MASTER` identity key on 2026-09-29
+to match the requested 1:1 product fields. Local validators exist for `TARGET_MASTER`,
+`SOURCE_MODEL_MAP`, and `MATCH_REVIEW`, along with a
 read-only Google Sheets reader for those tabs. A command seeds the Top 100 into a local
 `MATCH_REVIEW` candidate file. No real configurations or mappings have been entered, no approver
-has been named. The new reader reached the production spreadsheet and reported the missing Phase 5
-headers and tabs. See
+has been named. The current local templates need to be reflected in the master Sheet before the
+read-only validator will accept its `TARGET_MASTER` and `MATCH_REVIEW` headers. See
 [docs/TARGET_MASTER_SCHEMA.md](docs/TARGET_MASTER_SCHEMA.md).
 
 Phase 6 is COMPLETE as a framework. `src/laptop_tracker/offers.py` and

@@ -17,6 +17,7 @@ from .target_master import (
     TARGET_ID_PATTERN,
     TARGET_IDENTITY_COLUMNS,
     TARGET_MASTER_COLUMNS,
+    TARGET_PRODUCT_REQUIRED_COLUMNS,
     TargetColumn,
     TargetMasterResult,
     TargetMasterSchemaError,
@@ -51,9 +52,15 @@ MATCH_REVIEW_STATUSES = ("NEW", "INCOMPLETE", "REVIEW_REQUIRED", "REJECTED")
 
 _TARGET_COLUMNS_BY_NAME = {column.name: column for column in TARGET_MASTER_COLUMNS}
 # Identity specs and source_url reuse the TARGET_MASTER formats but may be blank during research.
+_REVIEW_PRODUCT_COLUMNS = tuple(
+    replace(column, required=False)
+    for column in TARGET_MASTER_COLUMNS
+    if column.name
+    not in {"target_id", "status", "source_url", "reviewer", "reviewed_at", "notes"}
+)
 _REVIEW_EVIDENCE_COLUMNS = tuple(
     replace(_TARGET_COLUMNS_BY_NAME[name], required=False)
-    for name in (*TARGET_IDENTITY_COLUMNS, "source_url")
+    for name in (*TARGET_PRODUCT_REQUIRED_COLUMNS, "source_url")
 )
 
 MATCH_REVIEW_COLUMNS: tuple[TargetColumn, ...] = (
@@ -68,7 +75,8 @@ MATCH_REVIEW_COLUMNS: tuple[TargetColumn, ...] = (
         "digits only",
     ),
     TargetColumn("candidate_name", False, "Source listing or model description.", free_text=True),
-    *_REVIEW_EVIDENCE_COLUMNS,
+    *_REVIEW_PRODUCT_COLUMNS,
+    replace(_TARGET_COLUMNS_BY_NAME["source_url"], required=False),
     TargetColumn("review_reason", False, "Why the candidate is under review.", free_text=True),
     TargetColumn("prepared_by", False, "Person who prepared the candidate."),
     TargetColumn("reviewer", False, "Person who recorded the review decision."),

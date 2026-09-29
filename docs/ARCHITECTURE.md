@@ -93,7 +93,7 @@ The current and planned portions are different deliverables. The shared scraping
 | `offers.py` | Retailer-neutral `OfferObservation` with `Decimal` price, ISO currency, availability evidence, and retrieval metadata, but no `target_id`. Also holds deterministic helpers for price parsing, text cleanup, and URL redaction. Uses no network or Google access. |
 | `scraping.py` | Shared adapter contract (`RetailerAdapter`, `ParsedOffer`), `Fetcher` with timeouts, bounded retries, and per-retailer throttling, injectable `Transport`/`Clock`, the `scrape()` runner, stage-specific failures, and redacted logging. The default transport is the standard-library `urllib`. See [SCRAPING_FRAMEWORK.md](SCRAPING_FRAMEWORK.md). |
 
-Validation runs on local CSV exports or on read-only sheet reads; nothing writes the three Phase 5 tabs. The schema is approved; see [TARGET_MASTER_SCHEMA.md](TARGET_MASTER_SCHEMA.md). Header templates for `TARGET_MASTER`, `SOURCE_MODEL_MAP`, and `MATCH_REVIEW` live under `config/`. No downstream consumer, retailer adapter, exact matcher, comparison-history, or approval-workflow module exists. The Phase 6 scraping framework does not read these tables. Promotion from review to master is a manual, human-approved step.
+Validation runs on local CSV exports or on read-only sheet reads; nothing writes the three Phase 5 tabs. The current `TARGET_MASTER` identity key is documented in [TARGET_MASTER_SCHEMA.md](TARGET_MASTER_SCHEMA.md) and aligned with the requested downstream fields in [PRICE_TRACKING_OUTPUT_SCHEMA.md](PRICE_TRACKING_OUTPUT_SCHEMA.md). Header templates for `TARGET_MASTER`, `SOURCE_MODEL_MAP`, and `MATCH_REVIEW` live under `config/`. No downstream consumer, retailer adapter, exact matcher, comparison-history, or approval-workflow module exists. The Phase 6 scraping framework does not read these tables. Promotion from review to master is a manual, human-approved step.
 
 ## Data-processing flow
 
@@ -146,7 +146,7 @@ The shared framework (overall Phase 6) exists; retailer adapters (Phase 7) do no
 2. *(Implemented)* `scrape()` takes a `ScrapeRequest` (retailer ID and URL) and fetches through the shared `Fetcher`. The adapter parses the page into `ParsedOffer` values. Nothing changes any sheet.
 3. *(Implemented)* The framework returns `OfferObservation` values with retailer, offer URL, UTC retrieval time, raw product and configuration text, `Decimal` price, ISO currency, availability evidence, and retrieval metadata, plus stage-specific `ScrapeFailure` records.
 4. *(Planned, Phase 8)* Pass normalized observations to a shared exact-configuration matcher. Ambiguous or partial matches must be review cases, not silent matches. Observations carry no `target_id`.
-5. *(Planned, Phase 9)* Send confirmed comparisons to the future weekly comparison and price-history outputs.
+5. *(Planned, Phase 9)* Send confirmed comparisons to the future weekly comparison and price-history outputs defined by [PRICE_TRACKING_OUTPUT_SCHEMA.md](PRICE_TRACKING_OUTPUT_SCHEMA.md).
 
 ```mermaid
 flowchart LR
