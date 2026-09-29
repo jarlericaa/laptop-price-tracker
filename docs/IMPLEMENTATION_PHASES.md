@@ -12,7 +12,7 @@ The Python implementation and CLI are named “Phase 1” (`run_phase1.py` and `
 | 1. Configure Google access and local environment | COMPLETE | Read-only `raw` and `TARGET_MASTER` access succeeded. Defining and populating the empty `TARGET_MASTER` is Phase 5. |
 | 2. Create repository and project structure | COMPLETE | Four grouped commits cover setup, implementation, tests, and initial docs; follow-up commits record the Phase 5 validator and this status refresh. Local business decisions and outputs remain ignored. |
 | 3. Create Google Sheets output structure | COMPLETE | User-reported verification confirms the nine production output tabs and headers. A read-only report for the dedicated test spreadsheet confirmed all nine test tabs and headers, expected synthetic output rows, and `top_100_count=1`. The sequential-write recovery procedure is documented. The test report did not list or inspect `raw`; no production write occurred. |
-| 4. Read raw and generate Top 100 | PARTIALLY_COMPLETE | Live read-only run completed in 57.49 seconds and generated 100 targets after 21 historical keys were explicitly excluded; business review of reports remains pending. |
+| 4. Read raw and generate Top 100 | COMPLETE | The 2026-09-28 read-only run completed in 57.49 seconds and generated 100 targets after 21 historical keys were explicitly excluded. The user accepted the current CSV reports on 2026-09-29; no production Sheets write was made. |
 | 5. Build and validate `TARGET_MASTER` | PARTIALLY_COMPLETE | Proposed schema, local validator, and CSV check command exist, covered by synthetic tests. The schema still needs business approval. The real tab is still empty and unchanged; no pipeline consumer exists. |
 | 6. Build shared scraping framework | NOT_STARTED | No scraping framework exists. |
 | 7. Implement retailer adapters | NOT_STARTED | No retailer adapters exist. |
@@ -72,7 +72,7 @@ The Python implementation and CLI are named “Phase 1” (`run_phase1.py` and `
 - **Dependencies:** Phases 1 and 2; reviewed eligibility and duplicate decisions.
 - **Validation:** Unit tests, static checks, raw smoke test, and a complete live local-only run with no unresolved conflicts.
 - **Definition of done:** A live run completes and produces reviewed outputs; any optional sheet write is separately verified and explicitly opted into.
-- **Current status:** `PARTIALLY_COMPLETE`. The 2026-09-28 read-only run completed in 57.49 seconds and generated 100 targets. All 21 historical conflicting keys had fingerprint-matched `EXCLUDE_KEY` decisions, so their source rows remained excluded without selecting or summing disputed values. Review of the ranking and eligibility reports is still pending. No Google Sheets writes were run. The synthetic 12,000-model aggregation test passed its under-10-second assertion.
+- **Current status:** `COMPLETE`. The 2026-09-28 read-only run completed in 57.49 seconds and generated 100 targets. All 21 historical conflicting keys had fingerprint-matched `EXCLUDE_KEY` decisions, so their source rows remained excluded without selecting or summing disputed values. The user accepted the generated CSV reports on 2026-09-29; no changes were requested. The synthetic 12,000-model aggregation test passed its under-10-second assertion. No production Google Sheets write or `run_phase1.py --write-sheets` run occurred.
 
 ### Phase 5 — Build and validate `TARGET_MASTER`
 
@@ -84,7 +84,7 @@ The Python implementation and CLI are named “Phase 1” (`run_phase1.py` and `
 - **Definition of done:** The tab has approved headers and configurations that pass validation; downstream code can consume it without fuzzy identity assumptions.
 - **Current status:** `PARTIALLY_COMPLETE`.
   - **Done:** A proposed schema is documented in [TARGET_MASTER_SCHEMA.md](TARGET_MASTER_SCHEMA.md), with a header-only template at `config/target_master_template.csv`. `src/laptop_tracker/target_master.py` validates headers, required fields, formats, allowed values, and dates. It also flags duplicate `target_id` values and duplicate configuration identities, keeps every value as an exact string, and never picks between duplicates. `check_target_master.py` checks a local CSV export without Google access and writes local reports only. Synthetic unit tests cover valid, invalid, duplicate, optional-field, and exact-string cases.
-  - **Not done:** The column set, mandatory fields, identity key, and conventions are proposals awaiting business approval; the open questions are listed in the schema doc. No real configurations have been defined. The real `TARGET_MASTER` worksheet was not written and remains empty. There is no read-only sheet check for the tab, and no pipeline consumer. Phase 4 report review, which this phase depends on, is still pending.
+  - **Not done:** The column set, mandatory fields, identity key, and conventions are proposals awaiting business approval; the open questions are listed in the schema doc. No real configurations have been defined. The real `TARGET_MASTER` worksheet was not written and remains empty. There is no read-only sheet check for the tab, and no pipeline consumer. Phase 4 report review was accepted by the user on 2026-09-29.
 
 ### Phase 6 — Build shared scraping framework
 

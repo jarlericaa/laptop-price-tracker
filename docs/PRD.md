@@ -1,6 +1,6 @@
 # Laptop Price Tracker: Product Requirements
 
-**Status:** Phase 4 (the raw-data and ranking pipeline) is implemented in code. The latest read-only live run completed after fingerprint-matched decisions excluded 21 historical conflicting keys; business review of the generated reports remains pending. Phase 5 has a proposed `TARGET_MASTER` schema and a local validator, and the schema awaits business approval. Retailer scraping and price comparison are future work.
+**Status:** Phase 4 (the raw-data and ranking pipeline) is implemented in code, and the user accepted the current generated CSV reports on 2026-09-29. The latest read-only live run completed after fingerprint-matched decisions excluded 21 historical conflicting keys. Phase 5 has a proposed `TARGET_MASTER` schema and a local validator, and the schema awaits business approval. Retailer scraping and price comparison are future work.
 
 ## Purpose and business problem
 
@@ -57,10 +57,10 @@ Later phases will validate laptop configurations in `TARGET_MASTER`, collect ret
 | FR-04 | Collapse exact duplicates and require a recorded decision for conflicting duplicate keys before publication. | Implemented; the latest live run completed with recorded decisions for its 21 historical conflicts. New, stale, or invalid conflicts still block publication. |
 | FR-05 | Detect the latest month and immediately preceding calendar month dynamically. | Implemented. |
 | FR-06 | Classify eligibility from configured terms, then apply a valid model-level manual decision. | Implemented from local CSV configuration. |
-| FR-07 | Rank eligible models with the defined GMV formula and deterministic tie-breaking. | Implemented and unit-tested; the 2026-09-28 live run completed after recorded decisions for its historical conflicts. Business review remains pending. |
+| FR-07 | Rank eligible models with the defined GMV formula and deterministic tie-breaking. | Implemented and unit-tested; the 2026-09-28 live run completed after recorded decisions for its historical conflicts. The user accepted the current output reports on 2026-09-29. |
 | FR-08 | Select one distinct MTD price without averaging; flag conflicting prices. | Implemented. |
 | FR-09 | Save local outputs and diagnostics by default. | Implemented under `data/output/`. |
-| FR-10 | Write only approved output tabs after explicit opt-in; never write `raw`. | Guarded writer implemented. The user reported that the nine production output tabs were created header-only and verified on 2026-09-29; the Python writer itself has not been tested against a dedicated test spreadsheet. |
+| FR-10 | Write only approved output tabs after explicit opt-in; never write `raw`. | Guarded writer implemented and tested with synthetic data against a dedicated test spreadsheet; a read-only report confirmed its nine output tabs and expected synthetic rows. No production write occurred. |
 | FR-11 | Validate `TARGET_MASTER` configurations. | Partially implemented. A local validator and CSV check cover the proposed schema, and synthetic tests pass. The schema still needs business approval. The tab is empty and not consumed by the pipeline. |
 | FR-12 | Scrape retailer offers, match exact configurations, compare prices, and record history. | Planned. |
 | FR-13 | Run and monitor the pipeline in GitHub Actions. | Planned. |
@@ -155,8 +155,8 @@ The optional Google Sheets writer uses these approved tabs: `P1_TOP_100_TARGETS`
 
 - All unit tests, Ruff checks, and compilation pass.
 - The real `raw` read returns expected headers and string values.
-- A live run completes all validation, classification, aggregation, and ranking without unresolved conflicts and saves local outputs. **Processing met on 2026-09-28:** the read-only run completed in 57.49 seconds and generated 100 targets with the 21 historical conflicting keys excluded by recorded decisions. **Business acceptance remains pending:** review the Top 100 and eligibility reports.
-- The nine production output tabs exist with verified headers and blank second rows, according to the user's 2026-09-29 report. **Partially met:** the application writer still needs testing against a dedicated test spreadsheet before it is used to publish pipeline data.
+- A live run completes all validation, classification, aggregation, and ranking without unresolved conflicts and saves local outputs. **Met on 2026-09-28:** the read-only run completed in 57.49 seconds and generated 100 targets with the 21 historical conflicting keys excluded by recorded decisions. **Business acceptance met on 2026-09-29:** the user accepted the current CSV reports.
+- The nine production output tabs exist with verified headers and blank second rows, according to the user's 2026-09-29 report. **Test-writer criterion met:** the guarded writer completed against a dedicated test spreadsheet with synthetic data, and a read-only report confirmed the expected output tabs, headers, and rows. No production write occurred.
 
 ### Long-term acceptance
 

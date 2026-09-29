@@ -4,7 +4,7 @@ Append new dated rows as work is verified. Keep earlier rows as historical evide
 
 ## Current status summary
 
-- **Overall status:** The read-only live raw-to-local-output pipeline completed successfully on 2026-09-28. A separate synthetic-data writer test completed against a dedicated test spreadsheet on 2026-09-29; no production Sheets write or `run_phase1.py --write-sheets` run has occurred. The Top 100 and related outputs still need business review.
+- **Overall status:** The read-only live raw-to-local-output pipeline completed successfully on 2026-09-28. The user accepted the current Top 100 and related CSV reports on 2026-09-29, completing Phase 4 business review. Phase 3's synthetic-data writer test completed against a dedicated test spreadsheet. No production Sheets write or `run_phase1.py --write-sheets` run has occurred.
 - **Performance:** The synthetic test for 12,000 models passes its under-10-second aggregation assertion. The latest live dry run took 57.49 seconds. Individual pipeline stages have not been timed.
 - **Google access:** Read-only `raw` and `TARGET_MASTER` checks succeeded. On 2026-09-28, `raw` had 23,544 data rows and expected headers; `TARGET_MASTER` had no headers or data rows.
 - **Duplicate review:** 21 historical conflicting duplicate keys have fingerprint-matched `EXCLUDE_KEY` decisions in `config/duplicate_decisions.csv`. The source rows remain quarantined; no conflicting values were selected or summed.
@@ -21,7 +21,7 @@ Append new dated rows as work is verified. Keep earlier rows as historical evide
 | 1. Google access and local environment | COMPLETE | Read-only `raw` and `TARGET_MASTER` access succeeded; defining and populating `TARGET_MASTER` belongs to Phase 5. |
 | 2. Repository and project structure | COMPLETE | Four grouped commits cover setup, implementation, tests, and initial docs; follow-up commits record the Phase 5 validator and status refresh. Private local files remain ignored. |
 | 3. Sheets output structure | COMPLETE | User-reported production-tab verification plus a read-only test-sheet report confirmed all nine output tabs and schemas, the synthetic laptop and excluded charger, and `top_100_count=1`. The sequential-write recovery procedure is documented. The test report did not list or inspect `raw`; no production write occurred. |
-| 4. Raw processing and Top 100 | PARTIALLY_COMPLETE | Tests pass; live read-only dry run completed and generated 100 targets. Review outputs before accepting them. The live run did not write to Sheets; a separate synthetic test-sheet writer check is recorded under Phase 3. |
+| 4. Raw processing and Top 100 | COMPLETE | Tests and static checks passed; the 2026-09-28 live read-only run completed and generated 100 targets after the 21 historical conflict keys were excluded by recorded decisions. The user accepted the current CSV reports on 2026-09-29. The live run did not write to Sheets. |
 | 5. `TARGET_MASTER` | PARTIALLY_COMPLETE | Proposed schema, validator, and local CSV check are implemented and tested with synthetic data. Next: business approval of the schema questions in [TARGET_MASTER_SCHEMA.md](TARGET_MASTER_SCHEMA.md), then populate reviewed configurations. The worksheet is still empty. |
 | 6. Shared scraping framework | NOT_STARTED | No framework exists. |
 | 7. Retailer adapters | NOT_STARTED | No adapters exist. |
@@ -50,26 +50,25 @@ Append new dated rows as work is verified. Keep earlier rows as historical evide
 | 2026-09-29 | 3 | Sheets output structure | Create and verify the nine approved output tabs | PARTIALLY_COMPLETE | User reported that all nine `P1_*` tabs were missing, then created them with the specified headers and confirmed every header plus a blank second row. The linked gid was `TOP SHOPS`; `raw` is separate. `P1_ACCESS_TEST` was left untouched. | User-reported Google Sheets verification for `Laptops Brand Tracker`; no repository command or pipeline writer was used. | No raw rows were read or shown; `raw` and `TARGET_MASTER` were not modified; no business data was added. The report is user-provided and was not independently rechecked in this turn. This confirms the live tab structure, not the Python writer integration. | Test the guarded writer only against a dedicated test spreadsheet using synthetic data; document recovery behavior before considering Phase 3 complete. |
 | 2026-09-29 | 3 | Sheet output integration | Run the guarded writer on a dedicated test spreadsheet with synthetic data | PARTIALLY_COMPLETE | User reported the script completed and printed `Test write completed. Synthetic eligible targets: 1`. The print occurs after `write_phase1_outputs()` returns, so all writer API calls in that script completed without raising an error. The test tabs were not independently read back. | User-run inline Python fixture calling `process_raw_values()` and `write_phase1_outputs()` against the test spreadsheet | The writer first stopped on a decision-tab header mismatch; after the headers were corrected, the synthetic write completed. No production spreadsheet was targeted, and no raw worksheet rows were used. This was a direct writer integration check, not a `run_phase1.py --write-sheets` run. Recovery behavior is documented in `SETUP_AND_OPERATIONS.md`. | Inspect the resulting test tabs; then Phase 3 can be assessed for completion. |
 | 2026-09-29 | 3 | Test spreadsheet inspection | Read back and review the synthetic writer outputs | COMPLETE | User-provided inspection report confirmed all nine expected tabs and headers. Data rows: top targets 1, eligible ranking 1, excluded listings 1, eligibility review 0, decisions 0, conflicts 0, validation errors 0, period summary 1, run log 1. The synthetic laptop appeared in top targets, the charger in excluded listings, and the run-log `top_100_count` was 1. | User-provided read-only report for `Laptop Tracker Phase 3 Test`; no repository read-back command was run. | `Sheet1` was left untouched. The report did not list or inspect `raw`, so no claim is made about its state. The prior production-tab check and this synthetic test-sheet inspection, together with the documented recovery procedure, complete Phase 3. | Continue with Phase 4 output business review and Phase 5 schema approval. |
+| 2026-09-29 | 4 | Live output review | Accept the generated Phase 4 CSV reports | COMPLETE | The user said the current CSV reports looked good after their purposes were explained. No requested corrections were identified. The accepted snapshot is run `20260928T112328+0800` for M-1 2026-08 and MTD 2026-09: 100 Top 100 rows, 1,379 eligible ranking rows, 169 excluded rows, 1,417 review rows, 21 conflict keys, and 0 validation errors. | User acceptance of the current local reports under `data/output/`; aggregate row counts and run summary were checked locally. Listing-level business values are not reproduced here. | The 21 fingerprint-matched `EXCLUDE_KEY` decisions remain conservative; ambiguous eligibility records remain in the review queue. No production sheet write or CLI `--write-sheets` run was performed. | Continue Phase 5 schema approval and configuration review. |
 
 ## Current blockers
 
-1. The generated Top 100 and eligibility outputs still need business review and acceptance.
-2. `TARGET_MASTER` has no headers or rows. A proposed schema and a local validator exist, but the schema is not approved, no configurations are defined, and no pipeline consumer exists.
-3. The latest full read-only run took 57.49 seconds. Stage-level timings are unavailable if runtime needs further optimization.
+1. `TARGET_MASTER` has no headers or rows. A proposed schema and a local validator exist, but the schema is not approved, no configurations are defined, and no pipeline consumer exists.
+2. The latest full read-only run took 57.49 seconds. Stage-level timings are unavailable if runtime needs further optimization.
 
 ## Facts not reverified
 
 - The earlier snapshot diagnostics for unique model IDs, item IDs, shop IDs, and duplicate keys were not recomputed. The current smoke test reports worksheet rows and headers only; its row count is now 23,544 rather than the earlier approximate 23,338.
 - The earlier unresolved-conflict run took about 90 seconds and stopped at the conflict gate. The latest successful run took 57.49 seconds; neither run recorded per-stage timings, so the share of runtime spent in validation, duplicate handling, eligibility, or aggregation is unknown.
-- The latest run's output file presence, Top 100 count, and conflict resolution-status counts were checked. Business-row contents were not printed or included in this log.
+- The latest run's output file presence, counts, and conflict-resolution status were checked locally. The user accepted the current CSV set; listing-level values are not reproduced in this log.
 
 ## Recommended next actions
 
-1. Review `data/output/top_100_targets.csv`, `eligible_model_ranking.csv`, `excluded_listings.csv`, and `eligibility_review.csv` locally. These files contain private business data. Confirm the conservative duplicate exclusions are acceptable for the intended use.
-2. Continue Phase 5:
+1. Continue Phase 5:
    - Get business answers to the open questions in [TARGET_MASTER_SCHEMA.md](TARGET_MASTER_SCHEMA.md), especially the identity key, mandatory fields, and the `source_model_id` link.
    - Update the validator if any answer changes the proposal.
    - Populate reviewed configurations, then run `python check_target_master.py <export.csv>` on a local export.
    - The current tab is empty and is not consumed by the pipeline.
-3. If the 57-second runtime is too long for operations, add temporary stage timings for validation, duplicate handling, eligibility, and aggregation before making further performance changes.
-4. Keep local decisions, credentials, and generated business-data outputs out of commits; they remain ignored by Git.
+2. If the 57-second runtime is too long for operations, add temporary stage timings for validation, duplicate handling, eligibility, and aggregation before making further performance changes.
+3. Keep local decisions, credentials, and generated business-data outputs out of commits; they remain ignored by Git.

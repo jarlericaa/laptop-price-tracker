@@ -8,8 +8,8 @@ GitHub Actions automation are planned; they are not implemented.
 
 The latest read-only live dry run completed in 57.49 seconds and generated 100 targets. The
 21 historical conflicting keys had fingerprint-matched `EXCLUDE_KEY` decisions; their source
-rows remain excluded, with no disputed values selected or summed. Business review of the Top
-100 and eligibility reports is still pending. The user reports that the nine approved `P1_*`
+rows remain excluded, with no disputed values selected or summed. The user accepted the current
+Top 100 and eligibility CSV reports on 2026-09-29. The user reports that the nine approved `P1_*`
 production tabs were created with headers only and verified on 2026-09-29. A synthetic-data
 writer test completed on a dedicated test spreadsheet; a read-only report confirmed the nine
 tabs and headers, expected synthetic rows, and a run-log count of 1. The full
