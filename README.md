@@ -6,10 +6,15 @@ of laptop models for future retailer price tracking. The current Python pipeline
 and review files. Retailer scraping, exact configuration matching, price comparison, and
 GitHub Actions automation are planned; they are not implemented.
 
-The current code and tests are present, but the latest live dry run stopped safely after
-ranking because 21 duplicate or model-identity records have no human decision. A synthetic
-12,000-model aggregation test passes its under-10-second check; a complete live run has not yet
-finished successfully. The current `TARGET_MASTER` worksheet is empty.
+The latest read-only live dry run completed in 57.49 seconds and generated 100 targets. The
+21 historical conflicting keys had fingerprint-matched `EXCLUDE_KEY` decisions; their source
+rows remain excluded, with no disputed values selected or summed. Business review of the Top
+100 and eligibility reports is still pending. No Google Sheets output writes were run. The
+current `TARGET_MASTER` worksheet is empty.
+
+For Phase 5, a proposed `TARGET_MASTER` schema and a local CSV validator are available. The
+schema is pending business approval; see
+[docs/TARGET_MASTER_SCHEMA.md](docs/TARGET_MASTER_SCHEMA.md).
 
 The script is named `run_phase1.py` for historical reasons. Its raw-data and Top 100 work maps
 mainly to **overall Phase 4** in the revised plan. Google access is overall Phase 1.
@@ -45,11 +50,18 @@ The command defaults to local-output-only behavior even when `--dry-run` is omit
 reads use a read-only Google Sheets OAuth scope; the write scope is requested only after the
 explicit `--write-sheets` option is supplied.
 
+```bash
+python check_target_master.py path/to/target_master_export.csv
+```
+
+This validates a local `TARGET_MASTER` CSV (header template: `config/target_master_template.csv`)
+without Google access. It writes reports under `data/output/` and prints counts only.
+
 ## Conflicting duplicates
 
 Exact duplicate rows for a `period_month`/`shop_id`/`item_id`/`model_id` key are kept once.
-Rows sharing a key but differing in any field are quarantined, reported in
-`conflicting_duplicates.csv`, and block publication until a human records a decision. Each
+Rows sharing a key but differing in any field are quarantined and reported in
+`conflicting_duplicates.csv`; publication is blocked until a valid decision is recorded. Each
 run writes a local, redacted `data/output/duplicate_review.csv` (keys, source row numbers,
 differing field names, and a `conflict_fingerprint`; no GMV, prices, or names). To record a
 decision, copy the row into `config/duplicate_decisions.csv` and fill in `decision`,
@@ -66,7 +78,7 @@ Generated local CSV and JSON outputs live under `data/output/` and are intention
 by Git. If intentionally processing an older snapshot, set `SKIP_FRESHNESS_CHECK=true`.
 
 Do not run `--write-sheets` against the production spreadsheet during setup or verification.
-The latest live dry run took about 90 seconds and stopped before any Google Sheets write.
+The latest live dry run took 57.49 seconds and did not write to any Google Sheets output tab.
 
 ## Documentation
 
@@ -76,13 +88,14 @@ The latest live dry run took about 90 seconds and stopped before any Google Shee
 - [Progress log](docs/PROGRESS_LOG.md)
 - [Decision log](docs/DECISIONS.md)
 - [Setup and operations](docs/SETUP_AND_OPERATIONS.md)
+- [TARGET_MASTER schema (proposed)](docs/TARGET_MASTER_SCHEMA.md)
 
 ## Local verification
 
 ```bash
 python -m pytest -q
 python -m ruff check .
-python -m compileall src run_phase1.py smoke_test.py
+python -m compileall src run_phase1.py smoke_test.py check_target_master.py
 python smoke_test.py
 python run_phase1.py --dry-run
 ```

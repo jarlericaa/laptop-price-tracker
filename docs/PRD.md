@@ -1,6 +1,6 @@
 # Laptop Price Tracker: Product Requirements
 
-**Status:** Phase 4 (the raw-data and ranking pipeline) is implemented in code, but its live dry run is currently blocked by unresolved source conflicts. Retailer scraping and price comparison are future work.
+**Status:** Phase 4 (the raw-data and ranking pipeline) is implemented in code. The latest read-only live run completed after fingerprint-matched decisions excluded 21 historical conflicting keys; business review of the generated reports remains pending. Phase 5 has a proposed `TARGET_MASTER` schema and a local validator, and the schema awaits business approval. Retailer scraping and price comparison are future work.
 
 ## Purpose and business problem
 
@@ -31,7 +31,7 @@ The current problem is to produce a repeatable Top 100 candidate list without co
 
 - Retailer scraping, Playwright browser automation, retailer adapters, or price history.
 - Exact matching of scraped offers to `TARGET_MASTER` configurations.
-- A validated `TARGET_MASTER` schema or configuration-ingestion module.
+- An *approved* `TARGET_MASTER` schema, real configuration rows, or pipeline consumption of `TARGET_MASTER`. A proposed schema and a local validator exist; see [TARGET_MASTER_SCHEMA.md](TARGET_MASTER_SCHEMA.md).
 - GitHub Actions scheduling or production monitoring.
 - Writing to `raw` or automatically resolving a human-review conflict.
 
@@ -54,14 +54,14 @@ Later phases will validate laptop configurations in `TARGET_MASTER`, collect ret
 | FR-01 | Read Google Sheets `raw` as strings without numeric coercion. | Implemented; read-only smoke test passes. |
 | FR-02 | Require the Phase 4 raw columns listed below and reject missing or repeated headers. | Implemented. |
 | FR-03 | Quarantine invalid rows and stop if validation errors exceed `MAX_VALIDATION_ERRORS`. | Implemented. |
-| FR-04 | Collapse exact duplicates and require a recorded decision for conflicting duplicate keys before publication. | Implemented; the current live run found unresolved conflicts. |
+| FR-04 | Collapse exact duplicates and require a recorded decision for conflicting duplicate keys before publication. | Implemented; the latest live run completed with recorded decisions for its 21 historical conflicts. New, stale, or invalid conflicts still block publication. |
 | FR-05 | Detect the latest month and immediately preceding calendar month dynamically. | Implemented. |
 | FR-06 | Classify eligibility from configured terms, then apply a valid model-level manual decision. | Implemented from local CSV configuration. |
 | FR-07 | Rank eligible models with the defined GMV formula and deterministic tie-breaking. | Implemented and unit-tested; live run reached the ranking stage but did not pass the final conflict gate. |
 | FR-08 | Select one distinct MTD price without averaging; flag conflicting prices. | Implemented. |
 | FR-09 | Save local outputs and diagnostics by default. | Implemented under `data/output/`. |
 | FR-10 | Write only approved output tabs after explicit opt-in; never write `raw`. | Guarded writer implemented; no production output tabs or writes were verified. |
-| FR-11 | Validate `TARGET_MASTER` configurations. | Planned; current tab is empty and is not consumed by the pipeline. |
+| FR-11 | Validate `TARGET_MASTER` configurations. | Partially implemented. A local validator and CSV check cover the proposed schema, and synthetic tests pass. The schema still needs business approval. The tab is empty and not consumed by the pipeline. |
 | FR-12 | Scrape retailer offers, match exact configurations, compare prices, and record history. | Planned. |
 | FR-13 | Run and monitor the pipeline in GitHub Actions. | Planned. |
 
@@ -79,7 +79,9 @@ The code validates `grass_date`, the three ID fields (`shopid`, `itemid`, `model
 
 Internal names map the source fields to `period_date`, `shop_id`, `item_id`, `model_id`, `shopee_model_name`, `shopee_current_price_php`, and `total_gmv_usd`. Identifiers and names remain strings, including values with leading zeroes or numeric-looking text.
 
-`TARGET_MASTER` is intended to hold validated laptop configurations. The read-only check on 2026-09-28 found the worksheet but no header row or data rows. No current code validates or reads its configurations.
+`TARGET_MASTER` is intended to hold validated laptop configurations. The read-only check on 2026-09-28 found the worksheet but no header row or data rows.
+
+A proposed schema is described in [TARGET_MASTER_SCHEMA.md](TARGET_MASTER_SCHEMA.md). It covers identity, brand, series/model, CPU, memory, storage, display, variants, and review fields. The document separates what earlier docs established from choices that still need approval. `check_target_master.py` validates a local CSV export against the proposal. No code reads the worksheet's configurations or feeds them into the pipeline.
 
 ## Eligibility rules
 
@@ -153,7 +155,7 @@ The optional Google Sheets writer uses these approved tabs: `P1_TOP_100_TARGETS`
 
 - All unit tests, Ruff checks, and compilation pass.
 - The real `raw` read returns expected headers and string values.
-- A live run completes all validation, classification, aggregation, and ranking without unresolved conflicts and saves local outputs. **Not yet met:** the latest live run reached ranking but blocked on 21 unresolved duplicate or model-identity records.
+- A live run completes all validation, classification, aggregation, and ranking without unresolved conflicts and saves local outputs. **Processing met on 2026-09-28:** the read-only run completed in 57.49 seconds and generated 100 targets with the 21 historical conflicting keys excluded by recorded decisions. **Business acceptance remains pending:** review the Top 100 and eligibility reports.
 - Google Sheet output writing is verified only against a dedicated test spreadsheet before any production write. **Not yet met:** no output tabs exist, and no sheet write was run.
 
 ### Long-term acceptance
@@ -165,9 +167,9 @@ The optional Google Sheets writer uses these approved tabs: `P1_TOP_100_TARGETS`
 
 ## Known limitations and future enhancements
 
-- The current live run takes about 90 seconds and then blocks at the conflict gate. The synthetic 12,000-model aggregation test passes its under-10-second assertion; this does not establish end-to-end live runtime or remove the need to resolve the current conflicts.
-- `TARGET_MASTER` is empty and has no implemented validation or pipeline integration.
+- The latest successful live run took 57.49 seconds; stage timings were not captured. The synthetic 12,000-model aggregation test passes its under-10-second assertion, which does not establish end-to-end runtime.
+- `TARGET_MASTER` is empty. Its proposed schema needs business approval, and there is no pipeline integration. Only a local CSV validator exists.
 - Eligibility is keyword-based and should be reviewed against real listings; ambiguous cases go to human review.
 - The optional remote eligibility-decision tab is not read into the same run's classification.
 - No retailer scraper, Playwright dependency, exact matcher, price-history store, GitHub Actions workflow, or production output-tab setup exists in the repository.
-- Future work should add reviewed `TARGET_MASTER` validation, retailer-specific adapters, exact configuration matching, price-history outputs, controlled pilot tests, and scheduled operations.
+- Future work should approve the `TARGET_MASTER` schema, populate reviewed configurations, and add retailer-specific adapters, exact configuration matching, price-history outputs, controlled pilot tests, and scheduled operations.

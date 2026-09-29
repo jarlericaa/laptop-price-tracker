@@ -103,6 +103,21 @@ PY
 
 The latest read-only check found the tab empty. This command confirms access only; it does not validate a schema.
 
+## Local `TARGET_MASTER` CSV check
+
+This check validates a local CSV against the **proposed** schema in [TARGET_MASTER_SCHEMA.md](TARGET_MASTER_SCHEMA.md). It needs no credentials and makes no Google calls. Start from the header-only `config/target_master_template.csv`. Keep real exports outside Git, for example under the ignored `data/review/` folder.
+
+```bash
+python check_target_master.py data/review/target_master_export.csv
+```
+
+- **Always writes:** `data/output/target_master_validation_errors.csv`. It is ignored by Git and can contain cell values.
+- **On a full pass only:** also writes `data/output/target_master_validated.csv`.
+- **Console output:** counts and error codes only.
+- **Exit code:** `0` means the check passed; `1` means it failed.
+
+The template alone fails with `NO_DATA_ROWS`, as expected. This command never reads or writes the worksheet.
+
 ## Safe test-tab write
 
 The application has no standalone arbitrary test-tab writer. The writer accepts only named `P1_*` tabs, and there is no `P1_TEST` destination. **Do not use the production spreadsheet for a write test.**
@@ -126,7 +141,7 @@ The default command is local-output-only. `--dry-run` makes that intent explicit
 python run_phase1.py --dry-run
 ```
 
-It reads `raw`, validates and ranks data, and writes files under `data/output/`. A run with unresolved duplicate or model-identity conflicts writes local diagnostics and exits safely without writing Sheets. The current live attempt took about 90 seconds and stopped because 21 records lacked human decisions. Its temporary verification outputs were removed; run the command above to generate a fresh local review file.
+It reads `raw`, validates and ranks data, and writes files under `data/output/`. A run with unresolved duplicate or model-identity conflicts writes local diagnostics and exits safely without writing Sheets. The latest read-only live run completed in 57.49 seconds after fingerprint-matched decisions excluded 21 historical conflicting keys. It generated the expected local reports; review them before treating the ranking as business-approved. No Sheets output was written.
 
 Expected files are `top_100_targets.csv`, `eligible_model_ranking.csv`, `excluded_listings.csv`, `eligibility_review.csv`, `conflicting_duplicates.csv`, `duplicate_review.csv`, `validation_errors.csv`, `period_summary.csv`, and `phase1_run_summary.json`. These are local business data and must not be committed or shared casually.
 
@@ -152,7 +167,8 @@ This reads the same raw source, completes local processing first, then requests 
 | Stale source month | Confirm the source includes current Manila-month data. Disable freshness only for intentional historical test fixtures. |
 | Too many validation errors | Review the private `validation_errors.csv`; fix the source or reviewed data-quality issue before increasing the threshold. |
 | Unresolved duplicate/model-identity conflicts | Review the private conflict report and redacted `duplicate_review.csv`; record an authorized decision in `config/duplicate_decisions.csv`. Stale fingerprints require a new review. |
-| `TARGET_MASTER` read succeeds but returns no rows | The tab is currently empty; configuration schema and ingestion are Phase 5 work. |
+| `TARGET_MASTER` read succeeds but returns no rows | The tab is currently empty. The schema is proposed but not approved, and configurations have not been populated (Phase 5). |
+| `check_target_master.py` reports header or row errors | Compare the header with `config/target_master_template.csv`, then review the local `target_master_validation_errors.csv`. Duplicates are never resolved automatically; correct or remove rows in the source. |
 | Pipeline appears slow | Unit aggregation performance does not represent total runtime. Time each processing stage on a safe local-only run before changing the implementation. |
 | Write-enabled run does not create outputs | Check for a pipeline safety failure first; unresolved conflicts stop before Sheets writes. Confirm service-account Editor access only for the intended test spreadsheet. |
 

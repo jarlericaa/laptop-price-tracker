@@ -16,8 +16,10 @@ flowchart LR
     A --> L[local CSV and JSON outputs]
     A -. explicit --write-sheets only .-> W[guarded P1_* writer]
     W --> O[approved output tabs]
-    T[TARGET_MASTER] -. read-only check only; not consumed .-> F[future configuration validation]
-    F -. planned .-> X[future retailer adapters, exact matching, comparison]
+    T[TARGET_MASTER] -. manual local CSV export .-> C[check_target_master.py]
+    C --> TM[target_master validator]
+    TM --> TL[local error report and validated copy]
+    TM -. planned; schema pending approval .-> X[future retailer adapters, exact matching, comparison]
 ```
 
 The current and planned portions are different deliverables. Retailer scraping, exact configuration matching, price history, and GitHub Actions are not implemented.
@@ -29,7 +31,8 @@ The current and planned portions are different deliverables. Retailer scraping, 
 ├── config/
 │   ├── duplicate_decisions.csv       # Human decisions for duplicate conflicts
 │   ├── eligibility_decisions.csv     # Model-level ELIGIBLE/EXCLUDED overrides
-│   └── eligibility_rules.csv         # Keyword inclusion and exclusion rules
+│   ├── eligibility_rules.csv         # Keyword inclusion and exclusion rules
+│   └── target_master_template.csv    # Header-only proposed TARGET_MASTER layout
 ├── data/
 │   ├── output/                       # Ignored local reports and target files
 │   └── review/                       # Reserved local review area
@@ -43,15 +46,17 @@ The current and planned portions are different deliverables. Retailer scraping, 
 │   ├── ranking.py
 │   ├── schema.py
 │   ├── sheets_source.py
-│   └── sheets_writer.py
+│   ├── sheets_writer.py
+│   └── target_master.py
 ├── tests/
+├── check_target_master.py            # Local TARGET_MASTER CSV check (overall Phase 5)
 ├── run_phase1.py                     # Legacy Phase 1 command name; overall Phase 4 work
 ├── smoke_test.py
 ├── pyproject.toml
 └── requirements.txt
 ```
 
-`data/output/` and local credential/data files are ignored by Git. The current Git state has the application files and README changes in the working tree without commits; see [the progress log](PROGRESS_LOG.md).
+`data/output/`, credentials, and local decision CSVs are ignored by Git. The project setup, implementation, tests, and initial docs are recorded in four purpose-based commits; the Phase 5 validator and this status refresh are recorded in follow-up feature and documentation commits. Generated reports and local decisions remain ignored; see [the progress log](PROGRESS_LOG.md).
 
 ## Current components
 
@@ -68,8 +73,10 @@ The current and planned portions are different deliverables. Retailer scraping, 
 | `sheets_writer.py` | Enforces the `P1_*` tab allowlist, prevents `raw` from being a destination, preserves the remote decision tab, replaces approved outputs, and appends run logs. |
 | `run_phase1.py` | CLI entry point. Local output is the default; `--write-sheets` opts into the writer. |
 | `smoke_test.py` | Read-only check for spreadsheet access, raw headers, and string-valued sample cells. |
+| `target_master.py` | Holds the proposed `TARGET_MASTER` column definitions and identity key. Validates worksheet-shaped values (header row first) for headers, required fields, formats, dates, and duplicate `target_id` or configuration identity, keeping exact strings. Uses no Google access. |
+| `check_target_master.py` | Local CLI that validates a CSV export. Writes a local error report and, only on a full pass, a validated copy. Prints counts only. |
 
-No module currently reads or validates the `TARGET_MASTER` configuration rows. No retailer-adapter, exact-matching, comparison-history, or workflow module exists.
+The `TARGET_MASTER` validator runs only on local CSV exports; no module reads the worksheet's configuration rows. The schema is a proposal pending business approval; see [TARGET_MASTER_SCHEMA.md](TARGET_MASTER_SCHEMA.md). No retailer-adapter, exact-matching, comparison-history, or workflow module exists.
 
 ## Data-processing flow
 
@@ -116,7 +123,7 @@ There is no workflow in the repository today. Once the controlled pilot passes, 
 
 Retailer adapters are future components. The intended boundary is:
 
-1. Read only validated laptop configurations from `TARGET_MASTER`.
+1. Read only validated laptop configurations from `TARGET_MASTER`, meaning rows that pass `validate_target_master` under the approved schema.
 2. Query or browse retailer-specific sources without changing the source sheet.
 3. Return normalized offer observations with retailer, URL, retrieval time, raw configuration text, price, and availability evidence.
 4. Pass normalized observations to a shared exact-configuration matcher. Ambiguous or partial matches must be review cases, not silent matches.

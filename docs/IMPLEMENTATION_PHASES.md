@@ -9,16 +9,16 @@ The Python implementation and CLI are named “Phase 1” (`run_phase1.py` and `
 | Overall phase | Status | Current evidence |
 |---|---|---|
 | 0. Finalize architecture and operating rules | COMPLETE | This documentation set records the architecture, requirements, safety rules, and decisions based on the repository. |
-| 1. Configure Google access and local environment | PARTIALLY_COMPLETE | Read-only `raw` and `TARGET_MASTER` access succeeded; `TARGET_MASTER` is empty. |
-| 2. Create repository and project structure | NEEDS_REVIEW | Code, tests, and configuration exist and checks pass, but current application files are untracked and README is modified. |
+| 1. Configure Google access and local environment | COMPLETE | Read-only `raw` and `TARGET_MASTER` access succeeded. Defining and populating the empty `TARGET_MASTER` is Phase 5. |
+| 2. Create repository and project structure | COMPLETE | Four grouped commits cover setup, implementation, tests, and initial docs; follow-up commits record the Phase 5 validator and this status refresh. Local business decisions and outputs remain ignored. |
 | 3. Create Google Sheets output structure | PARTIALLY_COMPLETE | Writer allowlist and tab schemas exist in code; no `P1_*` tabs exist in the real spreadsheet and no writes were tested. |
-| 4. Read raw and generate Top 100 | PARTIALLY_COMPLETE | Pipeline and tests exist; live run reached ranking but blocked by 21 unresolved conflict records. |
-| 5. Build and validate `TARGET_MASTER` | NOT_STARTED | Tab exists but has no headers or rows; no validator or consumer exists. |
+| 4. Read raw and generate Top 100 | PARTIALLY_COMPLETE | Live read-only run completed in 57.49 seconds and generated 100 targets after 21 historical keys were explicitly excluded; business review of reports remains pending. |
+| 5. Build and validate `TARGET_MASTER` | PARTIALLY_COMPLETE | Proposed schema, local validator, and CSV check command exist, covered by synthetic tests. The schema still needs business approval. The real tab is still empty and unchanged; no pipeline consumer exists. |
 | 6. Build shared scraping framework | NOT_STARTED | No scraping framework exists. |
 | 7. Implement retailer adapters | NOT_STARTED | No retailer adapters exist. |
 | 8. Normalize and perform exact matching | NOT_STARTED | No offer normalization or exact configuration matcher exists. |
 | 9. Generate comparisons and price history | NOT_STARTED | No comparison or history outputs exist. |
-| 10. Test and run a controlled pilot | BLOCKED | Requires a successful Phase 4 run and validated configurations/adapters first. |
+| 10. Test and run a controlled pilot | BLOCKED | Requires accepted Phase 4 outputs, approved and populated `TARGET_MASTER` configurations, and adapters first. |
 | 11. Add GitHub Actions automation | NOT_STARTED | No workflow exists; this follows a passing controlled pilot. |
 | 12. Production operation and maintenance | NOT_STARTED | Operational automation and ownership are future work. |
 
@@ -42,7 +42,7 @@ The Python implementation and CLI are named “Phase 1” (`run_phase1.py` and `
 - **Dependencies:** Google Cloud project, Sheets API, spreadsheet ID, and service-account sharing.
 - **Validation:** `python smoke_test.py`; read-only `TARGET_MASTER` check; verify headers and string values.
 - **Definition of done:** A documented local setup can read the source and required tabs with no write scope.
-- **Current status:** `PARTIALLY_COMPLETE`. Read access worked on 2026-09-28; `TARGET_MASTER` currently has no header or data rows.
+- **Current status:** `COMPLETE`. Read-only access to `raw` and `TARGET_MASTER` worked on 2026-09-28. `TARGET_MASTER` has no header or data rows; its schema and contents are Phase 5 work.
 
 ### Phase 2 — Create repository and project structure
 
@@ -52,7 +52,7 @@ The Python implementation and CLI are named “Phase 1” (`run_phase1.py` and `
 - **Dependencies:** Phase 0 decisions and a local Python environment.
 - **Validation:** `pytest -q`, `ruff check .`, `compileall`, and `git status --short`.
 - **Definition of done:** Project files are reviewed, tracked appropriately, and no credentials or generated private data are staged.
-- **Current status:** `NEEDS_REVIEW`. Files exist and checks pass, but the current Git state has the application files untracked and README modified. No commit was made.
+- **Current status:** `COMPLETE`. Four purpose-based commits cover project setup, implementation, tests, and the initial docs. Follow-up commits record the Phase 5 validator and current status refresh; private local decision files and generated outputs remain ignored.
 
 ### Phase 3 — Create Google Sheets output structure
 
@@ -72,7 +72,7 @@ The Python implementation and CLI are named “Phase 1” (`run_phase1.py` and `
 - **Dependencies:** Phases 1 and 2; reviewed eligibility and duplicate decisions.
 - **Validation:** Unit tests, static checks, raw smoke test, and a complete live local-only run with no unresolved conflicts.
 - **Definition of done:** A live run completes and produces reviewed outputs; any optional sheet write is separately verified and explicitly opted into.
-- **Current status:** `PARTIALLY_COMPLETE`. The code and tests pass. The 2026-09-28 live run reached ranking and then blocked on 21 unresolved duplicate or model-identity records. It took about 90 seconds. The synthetic 12,000-model aggregation test passed its under-10-second assertion.
+- **Current status:** `PARTIALLY_COMPLETE`. The 2026-09-28 read-only run completed in 57.49 seconds and generated 100 targets. All 21 historical conflicting keys had fingerprint-matched `EXCLUDE_KEY` decisions, so their source rows remained excluded without selecting or summing disputed values. Review of the ranking and eligibility reports is still pending. No Google Sheets writes were run. The synthetic 12,000-model aggregation test passed its under-10-second assertion.
 
 ### Phase 5 — Build and validate `TARGET_MASTER`
 
@@ -82,7 +82,9 @@ The Python implementation and CLI are named “Phase 1” (`run_phase1.py` and `
 - **Dependencies:** Phase 4 target review and business agreement on exact configuration identity.
 - **Validation:** Required-field, duplicate-configuration, and representative manual-review checks.
 - **Definition of done:** The tab has approved headers and configurations that pass validation; downstream code can consume it without fuzzy identity assumptions.
-- **Current status:** `NOT_STARTED`. The tab was readable but empty; no schema or validation implementation exists.
+- **Current status:** `PARTIALLY_COMPLETE`.
+  - **Done:** A proposed schema is documented in [TARGET_MASTER_SCHEMA.md](TARGET_MASTER_SCHEMA.md), with a header-only template at `config/target_master_template.csv`. `src/laptop_tracker/target_master.py` validates headers, required fields, formats, allowed values, and dates. It also flags duplicate `target_id` values and duplicate configuration identities, keeps every value as an exact string, and never picks between duplicates. `check_target_master.py` checks a local CSV export without Google access and writes local reports only. Synthetic unit tests cover valid, invalid, duplicate, optional-field, and exact-string cases.
+  - **Not done:** The column set, mandatory fields, identity key, and conventions are proposals awaiting business approval; the open questions are listed in the schema doc. No real configurations have been defined. The real `TARGET_MASTER` worksheet was not written and remains empty. There is no read-only sheet check for the tab, and no pipeline consumer. Phase 4 report review, which this phase depends on, is still pending.
 
 ### Phase 6 — Build shared scraping framework
 
@@ -132,7 +134,7 @@ The Python implementation and CLI are named “Phase 1” (`run_phase1.py` and `
 - **Dependencies:** Phases 4-9 complete enough for an end-to-end pilot.
 - **Validation:** Reconcile target, source offers, matches, comparisons, and output tabs with human reviewers.
 - **Definition of done:** Stakeholders accept the pilot results and residual risks before automation.
-- **Current status:** `BLOCKED` by incomplete Phase 4 and unstarted Phases 5-9.
+- **Current status:** `BLOCKED` by incomplete Phases 4 and 5 and unstarted Phases 6-9.
 
 ### Phase 11 — Add GitHub Actions automation
 
