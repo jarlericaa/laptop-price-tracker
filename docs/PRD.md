@@ -137,7 +137,7 @@ The default local output directory is `data/output/`:
 | `period_summary.csv` | Period selection and row counts. |
 | `phase1_run_summary.json` | Run-level counts and period metadata. |
 
-The optional Google Sheets writer uses these approved tabs: `P1_TOP_100_TARGETS`, `P1_ELIGIBLE_RANKING`, `P1_EXCLUDED_LISTINGS`, `P1_ELIGIBILITY_REVIEW`, `P1_ELIGIBILITY_DECISIONS`, `P1_CONFLICTING_DUPLICATES`, `P1_VALIDATION_ERRORS`, `P1_PERIOD_SUMMARY`, and `P1_RUN_LOG`. The user reported that all nine tabs were created header-only in the production spreadsheet and their headers verified on 2026-09-29. The Python writer has not been tested against a dedicated test spreadsheet. The user must explicitly enable writes with `--write-sheets`; unresolved conflicts stop the run before any sheet output write.
+The optional Google Sheets writer uses these approved tabs: `P1_TOP_100_TARGETS`, `P1_ELIGIBLE_RANKING`, `P1_EXCLUDED_LISTINGS`, `P1_ELIGIBILITY_REVIEW`, `P1_ELIGIBILITY_DECISIONS`, `P1_CONFLICTING_DUPLICATES`, `P1_VALIDATION_ERRORS`, `P1_PERIOD_SUMMARY`, and `P1_RUN_LOG`. The user reported that all nine tabs were created header-only in the production spreadsheet and their headers verified on 2026-09-29. A synthetic-data writer test against a dedicated test spreadsheet completed, and a user-provided read-only report confirmed the expected tabs, headers, synthetic output rows, and run-log count. No production write or `run_phase1.py --write-sheets` run has occurred. The user must explicitly enable writes with `--write-sheets`; unresolved conflicts stop the run before any sheet output write.
 
 ## Non-functional requirements and security
 

@@ -64,10 +64,10 @@ SKIP_FRESHNESS_CHECK=false
 
 - **`raw`:** Production source of truth. It must remain read-only for this pipeline.
 - **`TARGET_MASTER`:** Intended future configuration table. It was readable on 2026-09-28 but had no headers or data. No Phase 4 command consumes it.
-- **`P1_*` outputs:** The user reported that all nine approved output tabs were created header-only and verified in the real spreadsheet on 2026-09-29. This confirms their structure; the Python writer has not been tested against a dedicated test spreadsheet.
+- **`P1_*` outputs:** The user reported that all nine approved output tabs were created header-only and verified in the real spreadsheet on 2026-09-29. A separate synthetic writer test completed, and a user-provided read-only report confirmed all nine test tabs and headers, one synthetic laptop in the target outputs, the charger in excluded listings, and a run-log `top_100_count` of 1. The report did not list or inspect `raw`.
 - **Eligibility and duplicate decisions:** Current run inputs are local CSV files under `config/`. The remote `P1_ELIGIBILITY_DECISIONS` tab is preserved/merged by the optional writer but is not loaded into current-run classification.
 
-The production output tabs now exist according to the user's report. Do not use the production spreadsheet for the first application-writer test; use a separate test spreadsheet with synthetic data.
+The production output tabs now exist according to the user's report. The first application-writer test completed against a separate test spreadsheet with synthetic data. Continue to use a dedicated test spreadsheet for any further write testing; do not test the writer on production tabs.
 
 ## Read-only raw smoke test
 
@@ -122,7 +122,7 @@ The template alone fails with `NO_DATA_ROWS`, as expected. This command never re
 
 The application has no standalone arbitrary test-tab writer. The writer accepts only named `P1_*` tabs, and there is no `P1_TEST` destination. **Do not use the production spreadsheet for a write test.**
 
-For a future write test:
+For a future full-pipeline write test using `run_phase1.py --write-sheets`:
 
 1. Create a separate test spreadsheet with a small, reviewed `raw` fixture and the required headers.
 2. Configure the service account as an editor on that test spreadsheet only.
@@ -131,7 +131,16 @@ For a future write test:
 5. Review local outputs, then run `python run_phase1.py --write-sheets` against the test spreadsheet. This replaces only approved `P1_*` outputs, updates the decision tab with merge behavior, and appends the run log. It cannot target `raw`.
 6. Confirm the test outputs and restore the normal local environment.
 
-This write procedure was documented but not executed. Do not use `--write-sheets` as a verification command against the real spreadsheet.
+On 2026-09-29, a direct synthetic-data integration test of `write_phase1_outputs()` completed against a separate test spreadsheet. A user-provided read-only inspection report confirmed the expected output tabs, headers, synthetic rows, and run-log count. The test was not run through `run_phase1.py --write-sheets`. Do not use `--write-sheets` as a verification command against the real spreadsheet.
+
+### Writer failure and recovery
+
+The Sheets writer is sequential, not transactional. It reads and rewrites `P1_ELIGIBILITY_DECISIONS` first, replaces generated output tabs one at a time, and appends to `P1_RUN_LOG` last. If an API call fails midway, earlier tabs may already contain new data while later tabs still contain old data. A successful log entry is not guaranteed for a partial run. Retrying can append another run-log row; output tabs are replaced, while remote decision rows are merged and retained.
+
+- If the decision-tab header check fails, it stops before clearing or writing any output tab.
+- If a later write fails, stop and inspect the test spreadsheet before retrying. For a disposable synthetic test sheet, discard it and repeat with a fresh test spreadsheet if its state is unclear.
+- Before any future production write, make a separate backup copy of the spreadsheet. If a write fails, restore the affected approved `P1_*` tabs from that copy, including `P1_ELIGIBILITY_DECISIONS` if it changed. Do not restore or edit `raw`.
+- After recovery, fix the reported cause and verify the tabs before retrying. Expect a retry to append an additional run-log row.
 
 ## Local dry run
 

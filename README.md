@@ -10,9 +10,11 @@ The latest read-only live dry run completed in 57.49 seconds and generated 100 t
 21 historical conflicting keys had fingerprint-matched `EXCLUDE_KEY` decisions; their source
 rows remain excluded, with no disputed values selected or summed. Business review of the Top
 100 and eligibility reports is still pending. The user reports that the nine approved `P1_*`
-tabs were subsequently created with headers only and verified on 2026-09-29. The Python
-`--write-sheets` path has not been run or tested against a dedicated test spreadsheet. The
-current `TARGET_MASTER` worksheet is empty.
+production tabs were created with headers only and verified on 2026-09-29. A synthetic-data
+writer test completed on a dedicated test spreadsheet; a read-only report confirmed the nine
+tabs and headers, expected synthetic rows, and a run-log count of 1. The full
+`run_phase1.py --write-sheets` command has not been run, and no production sheet write has
+occurred. The current `TARGET_MASTER` worksheet is empty.
 
 For Phase 5, a proposed `TARGET_MASTER` schema and a local CSV validator are available. The
 schema is pending business approval; see

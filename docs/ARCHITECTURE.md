@@ -100,7 +100,7 @@ The writer accepts only these tabs: `P1_TOP_100_TARGETS`, `P1_ELIGIBLE_RANKING`,
 
 Current read-only checks on 2026-09-28 found `TARGET_MASTER` but no rows or header, and found no existing `P1_*` output tabs. No output tab was written during documentation work.
 
-On 2026-09-29, the user reported that all nine approved `P1_*` tabs had since been created in the intended spreadsheet with verified headers and blank second rows. The Python writer integration remains untested; the production tabs are not to be used for its first test.
+On 2026-09-29, the user reported that all nine approved `P1_*` tabs had been created in the intended spreadsheet with verified headers and blank second rows. A synthetic-data writer test then completed against a dedicated test spreadsheet, and a user-provided read-only report confirmed all nine test tabs and headers, the expected synthetic rows, and a run-log count of 1. No production write or `run_phase1.py --write-sheets` run has occurred. The raw worksheet was not listed in the test-spreadsheet inspection report.
 
 ## Local execution and outputs
 
