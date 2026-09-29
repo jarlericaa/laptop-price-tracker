@@ -15,7 +15,7 @@ The Python implementation and CLI are named “Phase 1” (`run_phase1.py` and `
 | 4. Read raw and generate Top 100 | COMPLETE | The 2026-09-28 read-only run completed in 57.49 seconds and generated 100 targets after 21 historical keys were explicitly excluded. The user accepted the current CSV reports on 2026-09-29; no production Sheets write was made. |
 | 5. Build and validate `TARGET_MASTER` | PARTIALLY_COMPLETE | The user later reported all three tabs created with verified headers and no data rows. The local `TARGET_MASTER` and `MATCH_REVIEW` templates have since been revised to the new 1:1 identity key and still need to be reflected in the Sheet. Validators exist for all three tables, with a read-only reader and Top 100 candidate seeder. No real configurations or mappings have been entered, and no approver is named. |
 | 6. Build shared scraping framework | COMPLETE | The retailer-neutral framework (`offers.py`, `scraping.py`) and an offline example-adapter harness were added on 2026-09-29. 203 tests, Ruff, and `compileall` passed. No live request was made. The framework does not read Sheets or match offers to targets. |
-| 7. Implement retailer adapters | NOT_STARTED | No retailer adapters exist. Retailer selection and the data-use review are still required before any live request. |
+| 7. Implement retailer adapters | PARTIALLY_COMPLETE | The pilot Laptop Factory (LF) adapter is implemented and tested offline (2026-09-29). Project-owner policy authorizes internal collection, and the adapter has `live_use_approved = True`; retailer permission itself remains unverified. No live scraper request has been made. A controlled spot check, named adapter maintainer, and other retailer adapters remain. The framework checks redirect hosts before sending. 273 tests passed before the owner-policy change. |
 | 8. Normalize and perform exact matching | NOT_STARTED | No offer normalization or exact configuration matcher exists. |
 | 9. Generate comparisons and price history | NOT_STARTED | No comparison or history outputs exist. |
 | 10. Test and run a controlled pilot | BLOCKED | Requires accepted Phase 4 outputs, approved and populated `TARGET_MASTER` configurations, and adapters first. |
@@ -113,7 +113,7 @@ The Python implementation and CLI are named “Phase 1” (`run_phase1.py` and `
     - Retryable fetch failures are kept separate from non-retried parse and validation failures, and host allowlists cover requests, redirects, and offer links.
     - Redacted structured logs.
     - An offline example adapter with synthetic fixtures and 74 new tests.
-  - **Not done (later phases):** No retailer-specific adapter, live request, browser automation, data-use review, observation storage, or target matching. The retrieval defaults are conservative implementation choices that need per-retailer confirmation in Phase 7.
+  - **Not done (later phases):** No live request, browser automation, observation storage, or target matching. The retrieval defaults are conservative implementation choices that need per-retailer confirmation in Phase 7. The first retailer adapter and data-use review were added in Phase 7.
 
 ### Phase 7 — Implement retailer adapters
 
@@ -123,7 +123,17 @@ The Python implementation and CLI are named “Phase 1” (`run_phase1.py` and `
 - **Dependencies:** Phase 6 framework and Phase 5 configuration schema.
 - **Validation:** Fixture tests, controlled manual spot checks, and documented adapter failures.
 - **Definition of done:** Each approved adapter meets the shared contract and has an owner and maintenance notes.
-- **Current status:** `NOT_STARTED`. Retailer scraping and Playwright are not in the repository. Adapters must implement the Phase 6 contract in [SCRAPING_FRAMEWORK.md](SCRAPING_FRAMEWORK.md). Each retailer's terms, robots.txt, and rate limits must be reviewed and approved before its first live request.
+- **Current status:** `PARTIALLY_COMPLETE`. The offline adapter is done and enabled for live use under the project-wide owner policy; no live integration check has been run. Adapters implement the Phase 6 contract in [SCRAPING_FRAMEWORK.md](SCRAPING_FRAMEWORK.md). Configure each retailer's host allowlist and request interval before use; the owner policy is an assumption, not verified retailer permission.
+  - **Done (Laptop Factory, 2026-09-29):**
+    - **Data-use review:** recorded in [RETAILER_DATA_USE_REVIEW.md](RETAILER_DATA_USE_REVIEW.md). External-policy finding UNKNOWN: robots.txt does not exclude product pages; the only "terms" page is a warranty policy, and the privacy policy is a template. Project status OWNER_APPROVED under the user's internal-use assumption in [DECISIONS.md](DECISIONS.md); this does not verify retailer permission.
+    - **Adapter:** [`adapters/laptop_factory.py`](adapters/LAPTOP_FACTORY.md) parses one fetched product page. It prefers JSON-LD and falls back to visible content and the Tech Specs table. It separates sale and regular prices and fails on unclear prices. It combines stock wording, JSON-LD availability, and Add to Cart state, and gives `UNKNOWN` on conflict. It flags bundles with evidence without dropping them, and preserves raw specs without inferring refresh rate or other values.
+    - **Framework:** optional `OfferDetails` (backward-compatible; `to_record()` unchanged). Redirects are followed by the `Fetcher` only after the target host is checked; `urllib` previously followed them first. A fail-closed live-use gate.
+    - **Tests:** minimal fixtures and 70 new offline tests, 273 in total. Ruff (changed files) and `compileall` passed.
+  - **Not done:**
+    - Controlled manual spot check with the live scraper has not been run.
+    - A named adapter maintainer.
+    - Adapters for DBZ, PCX, PCC, and OCT.
+    - Search or category discovery, which is out of scope for the product-page adapter.
 
 ### Phase 8 — Normalize and perform exact matching
 

@@ -121,13 +121,15 @@ python seed_match_review.py
 
 This writes `data/review/match_review_candidates.csv` with one `NEW` row per distinct Top 100 model ID. All specifications, URLs, and approvals are blank. The command refuses to overwrite an existing file and stops without writing if `data/output/top_100_targets.csv` is missing; run `python run_phase1.py --dry-run` first. It never touches Google Sheets or creates `TARGET_MASTER` or mapping rows.
 
-## Offline scraping framework tests (overall Phase 6)
+## Offline scraping framework and adapter tests (overall Phases 6-7)
 
 ```bash
-python -m pytest -q tests/test_offers.py tests/test_scraping.py
+python -m pytest -q tests/test_offers.py tests/test_scraping.py tests/test_laptop_factory.py
 ```
 
-These tests use synthetic fixtures under `tests/scraping_fixtures/`, a fake transport, and a fake clock. They need no credentials and no network; any socket connection fails the test. There is no scraping command or CLI. No retailer adapter exists, and nothing should make live retailer requests until Phase 7 retailer selection and data-use review are approved. The retrieval defaults (20 s timeout, 3 attempts, 5/10 s backoff capped at 60 s, and at least 10 s between requests per retailer) are documented in [SCRAPING_FRAMEWORK.md](SCRAPING_FRAMEWORK.md#retrieval-defaults). Scraping log lines use the `laptop_tracker.scraping` logger and contain redacted URLs and error codes only.
+These tests use fixtures under `tests/scraping_fixtures/`, a fake transport, and a fake clock. They need no credentials and no network; any socket connection fails the test. There is no scraping command or CLI.
+
+Laptop Factory live use is enabled under the project-owner policy in [DECISIONS.md](DECISIONS.md). Its external-policy finding remains UNKNOWN, so this is not a claim that retailer permission was verified. No live scraper request has been made. There is no scraping CLI: a Python call using `scrape(..., Fetcher())` can send live requests. Maintenance notes are in [adapters/LAPTOP_FACTORY.md](adapters/LAPTOP_FACTORY.md). The retrieval defaults (20 s timeout, 3 attempts, 5/10 s backoff capped at 60 s, and at least 10 s between requests per retailer) are documented in [SCRAPING_FRAMEWORK.md](SCRAPING_FRAMEWORK.md#retrieval-defaults). Scraping log lines use the `laptop_tracker.scraping` logger and contain redacted URLs and error codes only.
 
 ## Safe test-tab write
 

@@ -29,7 +29,7 @@ The current problem is to produce a repeatable Top 100 candidate list without co
 
 ## Non-goals for the current implementation
 
-- Retailer scraping, Playwright browser automation, retailer adapters, or price history. The shared, retailer-neutral framework those adapters will use exists and is tested offline, but it makes no live requests.
+- Automated production collection, Playwright browser automation, or price history. The shared framework and Laptop Factory adapter are tested offline; the adapter is enabled for live use under project-owner policy, but no live collection has been run.
 - Exact matching of scraped offers to `TARGET_MASTER` configurations.
 - Real configuration rows or pipeline consumption of `TARGET_MASTER`. Its revised identity schema and validators exist locally, and a read-only reader covers it and its supporting tables. The Sheet header still needs to be updated. See [TARGET_MASTER_SCHEMA.md](TARGET_MASTER_SCHEMA.md).
 - Automatic promotion of review candidates, automatic source-to-target mapping, or inferring specifications from Shopee titles.
@@ -64,7 +64,7 @@ Remaining work includes researching the seeded candidates, preparing and approvi
 | FR-10 | Write only approved output tabs after explicit opt-in; never write `raw`. | Guarded writer implemented and tested with synthetic data against a dedicated test spreadsheet; a read-only report confirmed its nine output tabs and expected synthetic rows. No production write occurred. |
 | FR-11 | Validate `TARGET_MASTER` configurations. | Partially implemented. The revised schema and local templates are in place. Local CSV validators exist for `TARGET_MASTER`, `SOURCE_MODEL_MAP`, and `MATCH_REVIEW`; a read-only reader and `check_target_tables.py --from-sheets` handle the three tabs. The user reported the tabs had headers and no data rows; the `TARGET_MASTER` and `MATCH_REVIEW` sheet headers now need to be updated to the revised templates. No real configurations or mappings have been added, no approver is named, and there is no downstream consumer yet. |
 | FR-11a | Seed the Phase 4 Top 100 as `MATCH_REVIEW` candidates without guessing specifications. | Implemented (`seed_match_review.py`). On 2026-09-29 it produced 100 `NEW` local candidates from the accepted Top 100. The file is local and ignored; nothing was written to Sheets. |
-| FR-12 | Scrape retailer offers, match exact configurations, compare prices, and record history. | Partially implemented. The shared scraping framework is implemented and tested offline (overall Phase 6; see [SCRAPING_FRAMEWORK.md](SCRAPING_FRAMEWORK.md)). Retailer adapters, live collection, exact matching, comparisons, and history are planned. |
+| FR-12 | Scrape retailer offers, match exact configurations, compare prices, and record history. | Partially implemented. The shared scraping framework (overall Phase 6; see [SCRAPING_FRAMEWORK.md](SCRAPING_FRAMEWORK.md)) and the offline-tested Laptop Factory adapter (Phase 7; see [adapters/LAPTOP_FACTORY.md](adapters/LAPTOP_FACTORY.md)) are implemented. Live use is enabled under project-owner policy, although retailer permission remains unverified and no live collection has been run. Other retailer adapters, exact matching, comparisons, and history are planned. |
 | FR-13 | Run and monitor the pipeline in GitHub Actions. | Planned. |
 
 ## Input data

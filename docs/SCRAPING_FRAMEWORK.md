@@ -1,15 +1,22 @@
 # Shared Scraping Framework (overall Phase 6)
 
-**Status:** Implemented and tested offline on 2026-09-29. Phase 6 establishes the shared, retailer-neutral framework only. **No retailer adapter exists, no live request has been made, and the data-use review for any real retailer has not happened.** Those are Phase 7 work. Nothing in the framework reads or writes Google Sheets, reads `TARGET_MASTER`, assigns a `target_id`, or matches offers to configurations (Phase 8).
+**Status:** Implemented and tested offline on 2026-09-29 (Phase 6). Phase 7 then added three framework changes, which are backward-compatible for existing adapters and records:
+- checked redirect following, which fixes a gap where `urllib` could follow a redirect before its host was checked
+- a fail-closed [live-use gate](#live-use-gate)
+- optional [offer details](#optional-offer-details)
+
+The first adapter is [Laptop Factory](adapters/LAPTOP_FACTORY.md). Its external-policy finding is UNKNOWN, but project-owner policy authorizes internal collection and its live-use flag is enabled. **No live scrape request has been made.** Nothing in the framework reads or writes Google Sheets, reads `TARGET_MASTER`, assigns a `target_id`, or matches offers to configurations (Phase 8).
 
 ## Modules
 
 | Module | Responsibility |
 |---|---|
-| `src/laptop_tracker/offers.py` | `OfferObservation` model, `RetrievalMetadata`, `Availability`, and deterministic helpers: `parse_price`, `clean_text`, `redact_url`, `is_http_url`. |
-| `src/laptop_tracker/scraping.py` | Adapter contract (`RetailerAdapter`, `ParsedOffer`), `ScrapeRequest`, `Fetcher` (timeouts, retries, throttling), injectable `Transport` and `Clock`, the `scrape()` runner, error types, and structured logging. |
+| `src/laptop_tracker/offers.py` | `OfferObservation` model, optional `OfferDetails`, `RetrievalMetadata`, `Availability`, `PriceType`, and deterministic helpers: `parse_price`, `clean_text`, `redact_url`, `is_http_url`. |
+| `src/laptop_tracker/scraping.py` | Adapter contract (`RetailerAdapter`, `ParsedOffer`), `ScrapeRequest`, `Fetcher` (timeouts, retries, throttling, checked redirects), injectable `Transport` and `Clock`, the live-use gate, the `scrape()` runner, error types, and structured logging. |
+| `src/laptop_tracker/adapters/` | Retailer adapters (Phase 7). Currently only `laptop_factory.py`. |
 | `tests/example_adapter.py` | Offline example adapter for synthetic fixtures. It demonstrates the contract; it is not a retailer integration. |
-| `tests/scraping_fixtures/*.html` | Synthetic pages on the reserved `shop.example.test` host. |
+| `tests/scraping_fakes.py` | Shared fake transport, fake clock, and no-network guard. |
+| `tests/scraping_fixtures/` | Synthetic pages on the reserved `shop.example.test` host, plus minimal retailer fixtures in per-retailer folders. |
 
 No dependency was added. The default transport uses the Python standard library (`urllib`).
 
@@ -17,9 +24,9 @@ No dependency was added. The default transport uses the Python standard library 
 
 ```mermaid
 flowchart LR
-    Q[ScrapeRequest: retailer_id + URL] --> G{host in adapter.allowed_hosts?}
-    G -- no --> F1[failure: stage=request]
-    G -- yes --> T[Fetcher: throttle, timeout, bounded retries]
+    Q[ScrapeRequest: retailer_id + URL] --> G{host allowed and live use approved or offline?}
+    G -- no --> F1[failure: stage=request, nothing sent]
+    G -- yes --> T[Fetcher: throttle, timeout, bounded retries, redirects checked before sending]
     T -- exhausted or non-retryable --> F2[failure: stage=fetch]
     T --> P[FetchedPage: body, final URL, status, UTC time, attempts]
     P --> A[adapter.parse -> ParsedOffer list]
@@ -38,6 +45,7 @@ class MyRetailerAdapter:
     retailer_id = "my_retailer"              # lowercase letters, digits, underscores
     adapter_version = "1"                    # bump when parsing rules change
     allowed_hosts = frozenset({"www.my-retailer.example"})
+    live_use_approved = False                # True only after documented project-owner approval
 
     def parse(self, page: FetchedPage) -> Sequence[ParsedOffer]:
         ...                                  # page.text(), page.final_url
@@ -47,6 +55,7 @@ class MyRetailerAdapter:
 - **Output:** zero or more `ParsedOffer` values. Each holds raw strings: title, optional configuration text, `price_text`, an ISO `currency`, an `Availability` mapped from the retailer's wording, the wording itself as `availability_evidence`, and an optional `offer_url` (relative URLs resolve against the page's final URL).
 - **Failure:** raise `ParseError(code, message)` when the page cannot be understood, for example `NO_OFFERS_FOUND` after a layout change. Messages must not quote page content. Any other exception becomes a failure with code `ADAPTER_ERROR` and only the exception type.
 - **Hosts:** requests, redirect targets, and offer links must use a host in `allowed_hosts` (exact, case-insensitive match; no subdomain wildcards).
+- **Details:** an optional `ParsedOffer.details` (`OfferDetails`) carries retailer evidence; see [below](#optional-offer-details).
 
 The framework, not the adapter, sets the retailer ID, URLs, retrieval time, attempt count, content hash, and adapter version, so adapters cannot produce unattributed observations.
 
@@ -76,6 +85,22 @@ Each `ScrapeResult` has `observations`, `failures`, and `ok`. One failed request
 
 `to_record()` returns a flat string record in `OBSERVATION_COLUMNS` order. Prices keep their exact decimal text (`49999.00` stays `49999.00`), and times use ISO 8601 with a `Z` suffix. Identical inputs always produce identical records. The body hash identifies the exact page without storing it; response bodies are not retained.
 
+### Optional offer details
+
+`OfferObservation.details` is `None` unless the adapter supplies an `OfferDetails`. `to_record()` and `OBSERVATION_COLUMNS` are unchanged. `to_full_record()` appends `OFFER_DETAIL_COLUMNS`, which are blank when details are absent.
+
+| Field | Meaning |
+|---|---|
+| `retailer_product_id`, `retailer_sku` | Retailer identifiers, kept as text. |
+| `brand`, `manufacturer_part_number` | Only when the page states them; never guessed. |
+| `price_type` | `SALE` (a higher regular price is shown), `REGULAR`, or blank. |
+| `regular_price`, `regular_price_text`, `sale_price`, `sale_price_text` | `Decimal` values plus the shown text. Validated against `price`: for `SALE`, the sale price equals `price` and the regular price is higher; for `REGULAR`, there is no sale price. |
+| `raw_specifications` | `(label, value)` pairs as shown, serialized as compact JSON. |
+| `raw_categories` | Retailer categories as shown. |
+| `bundle_flag`, `bundle_evidence` | `TRUE` with the matched evidence when a listing looks like a bundle; blank when the adapter does not check. Flagged offers are never dropped. |
+
+Details text is normalized with `clean_text` on construction. None of these values are verified specifications or target matches.
+
 `parse_price` accepts exactly one number with the declared decimal separator (`.` default, or `,`) and standard three-digit grouping. It rejects ranges, several prices, negative or zero values, and malformed grouping instead of guessing. Lakh-style grouping (`1,00,000`) is not supported.
 
 ## Retrieval defaults
@@ -92,12 +117,26 @@ All values are fields of `FetchConfig` and can be overridden. They are conservat
 | `retry_statuses` | 408, 429, 500, 502, 503, 504 | Retried HTTP statuses. Other non-2xx statuses fail at once. |
 | `Retry-After` | honored | Integer seconds are used when longer than the backoff. A value above `backoff_max_seconds` stops with `RETRY_AFTER_TOO_LONG` instead of waiting. The HTTP-date form is ignored. |
 | `max_response_bytes` | 5,000,000 | Larger bodies fail with `RESPONSE_TOO_LARGE`. |
+| `max_redirects` | 5 | Redirect hops per attempt (range 0-10). Each hop is throttled. |
 | `user_agent` | `laptop-price-tracker/0.1` | Identifying User-Agent. |
 | `extra_headers` | none | Sent to the transport; never logged and hidden from `repr`. |
 
 Timeouts and connection errors are retryable. HTTP statuses are retryable only when listed. Parse and validation failures are never retried, because refetching the same page would not fix them.
 
-`Transport` (one GET per call) and `Clock` (`now`, `monotonic`, `sleep`) are protocols. `UrllibTransport` and `SystemClock` are the defaults; tests inject fakes. `UrllibTransport` has no cookie jar. It keeps only the `Content-Type` and `Retry-After` response headers, drops `Set-Cookie`, and refuses non-HTTP(S) URLs.
+`Transport` (one GET per call) and `Clock` (`now`, `monotonic`, `sleep`) are protocols. `UrllibTransport` and `SystemClock` are the defaults; tests inject fakes. `UrllibTransport` has no cookie jar. It keeps only the `Content-Type`, `Retry-After`, and `Location` response headers, drops `Set-Cookie`, and refuses non-HTTP(S) URLs.
+
+### Redirects
+
+Transports must not follow redirects. `UrllibTransport` installs a handler that stops `urllib` from doing so. The `Fetcher` handles each 301, 302, 303, 307, or 308 response itself:
+1. It resolves `Location` against the current URL.
+2. It rejects the target if it isn't a credential-free HTTP(S) URL (`INVALID_REDIRECT`) or its host isn't allowed (`REDIRECT_HOST_NOT_ALLOWED`).
+3. Only then does it send the next, throttled request.
+
+The disallowed request is never sent. `scrape()` passes the adapter's `allowed_hosts`; a direct `Fetcher.fetch()` call defaults to the request's own host. Loops stop at `max_redirects` with `TOO_MANY_REDIRECTS`. A 3xx without `Location` is an `HTTP_STATUS` failure. `scrape()` also re-checks the final URL, in case a transport reports a different final URL. Before Phase 7, the default `UrllibTransport` followed redirects inside `urllib`, so a redirect to another host would have been requested before the final-URL check. That gap is fixed and tested with fakes.
+
+### Live-use gate
+
+`scrape()` refuses to send any request through a live transport unless the adapter sets `live_use_approved = True`. It returns `LIVE_USE_NOT_APPROVED` at the `request` stage. A transport counts as live unless it declares `live = False`, which only offline fakes should do. A missing adapter attribute counts as not approved. This flag records project-owner authorization. It does not assert that retailer terms or written permission were verified; document that distinction in [RETAILER_DATA_USE_REVIEW.md](RETAILER_DATA_USE_REVIEW.md) and [DECISIONS.md](DECISIONS.md).
 
 ## Failures and logging
 
@@ -105,8 +144,8 @@ A `ScrapeFailure` records `retailer_id`, a redacted `url`, `stage` (`request`, `
 
 | Stage | Codes |
 |---|---|
-| `request` | `RETAILER_MISMATCH`, `HOST_NOT_ALLOWED` (no network call is made). |
-| `fetch` | `TIMEOUT`, `CONNECTION_ERROR`, `HTTP_STATUS`, `RETRY_AFTER_TOO_LONG`, `RESPONSE_TOO_LARGE`, `INVALID_URL`, `REDIRECT_HOST_NOT_ALLOWED`. |
+| `request` | `RETAILER_MISMATCH`, `HOST_NOT_ALLOWED`, `LIVE_USE_NOT_APPROVED` (no network call is made). |
+| `fetch` | `TIMEOUT`, `CONNECTION_ERROR`, `HTTP_STATUS`, `RETRY_AFTER_TOO_LONG`, `RESPONSE_TOO_LARGE`, `INVALID_URL`, `INVALID_REDIRECT`, `REDIRECT_HOST_NOT_ALLOWED`, `TOO_MANY_REDIRECTS`. |
 | `parse` | Adapter `ParseError` codes, or `ADAPTER_ERROR`. |
 | `validate` | `INVALID_OFFER`; the message names the field and rule, never the value. |
 
@@ -115,14 +154,23 @@ Logs go to the `laptop_tracker.scraping` logger as `event key=value ...`. The sa
 ## Offline tests
 
 ```bash
-python -m pytest -q tests/test_offers.py tests/test_scraping.py
+python -m pytest -q tests/test_offers.py tests/test_scraping.py tests/test_laptop_factory.py
 ```
 
-The tests use a fake transport and a fake clock, so no real time passes. An autouse fixture makes any socket connection fail the test. They cover normalization and determinism, attribution, retry and backoff, `Retry-After`, per-retailer throttling, timeouts, non-retryable statuses, parse failures, per-offer validation, host guards, redirects, and log redaction.
+The tests use a fake transport and a fake clock, so no real time passes. A no-network fixture makes any socket connection fail the test. They cover:
+- normalization, determinism, and attribution
+- retry and backoff, `Retry-After`, per-retailer throttling, timeouts, and non-retryable statuses
+- parse failures and per-offer validation
+- host guards, checked redirects, and the live-use gate
+- offer details and log redaction
 
 ## Left for later phases
 
-- **Phase 7:** Select retailers, then complete the data-use review for each: terms of service, robots.txt, rate limits, and permission. Then write each adapter with real (reviewed, non-sensitive) fixtures, an owner, and maintenance notes, and confirm or tune these defaults per retailer. Decide whether `UrllibTransport` is sufficient or whether browser automation is needed and approved. No browser automation exists.
+- **Phase 7 (remaining):**
+  - Run a controlled manual spot check for Laptop Factory under the current owner policy.
+  - Add further retailers (DBZ, PCX, PCC, OCT), each with its own host allowlist, adapter, fixtures, and maintenance owner. The project-wide owner policy is recorded in [DECISIONS.md](DECISIONS.md).
+  - Confirm or tune the retrieval defaults per retailer.
+  - Decide whether `UrllibTransport` is sufficient or whether browser automation is needed and approved. No browser automation exists.
 - **Phase 7 or 8:** Decide how scrape requests are built, for example from `TARGET_MASTER` search terms or retailer URLs, without assuming the table is populated.
 - **Phase 8:** Exact configuration matching of observations to `target_id`s. Observations deliberately carry no target.
 - **Phase 9:** Observation storage, output schema, and history. No observations are persisted today.

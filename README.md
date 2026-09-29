@@ -3,9 +3,11 @@
 This project processes Shopee Electronics data from Google Sheets and produces a ranked list
 of laptop models for future retailer price tracking. The current Python pipeline reads the
 `raw` worksheet, validates and classifies data, detects M-1 and MTD, and generates local ranking
-and review files. A shared, retailer-neutral scraping framework (overall Phase 6) is implemented
-and tested offline only. Retailer adapters, live scraping, exact configuration matching, price
-comparison, and GitHub Actions automation are planned; they are not implemented.
+and review files. A shared, retailer-neutral scraping framework (overall Phase 6) and one
+offline-tested retailer adapter, Laptop Factory (Phase 7), are implemented. Live use is enabled
+under the project-owner policy; retailer permission remains unverified, and no live scraper
+request has been made. Exact configuration matching, price comparison, and GitHub Actions
+automation are planned; they are not implemented.
 
 The latest read-only live dry run completed in 57.49 seconds and generated 100 targets. The
 21 historical conflicting keys had fingerprint-matched `EXCLUDE_KEY` decisions; their source
@@ -32,9 +34,14 @@ Phase 6 is COMPLETE as a framework. `src/laptop_tracker/offers.py` and
 `src/laptop_tracker/scraping.py` define the adapter contract and the normalized offer
 observation (`Decimal` price, ISO currency, UTC retrieval time, no `target_id`). They also
 provide timeouts, bounded retries, and per-retailer throttling. An offline example adapter
-under `tests/` exercises them with synthetic fixtures. No real retailer adapter exists, and no live
-request has been made; retailer selection and the data-use review are Phase 7 work. See
+under `tests/` exercises them with synthetic fixtures. See
 [docs/SCRAPING_FRAMEWORK.md](docs/SCRAPING_FRAMEWORK.md).
+
+Phase 7 is PARTIALLY_COMPLETE. `src/laptop_tracker/adapters/laptop_factory.py` parses fetched
+Laptop Factory product pages offline, tested against minimal local fixtures. Project-owner
+policy enables its live-use flag; external retailer permission remains unverified. No project
+scraper request has been made to the retailer. See
+[docs/adapters/LAPTOP_FACTORY.md](docs/adapters/LAPTOP_FACTORY.md).
 
 The script is named `run_phase1.py` for historical reasons. Its raw-data and Top 100 work maps
 mainly to **overall Phase 4** in the revised plan. Google access is overall Phase 1.
@@ -126,6 +133,8 @@ The latest live dry run took 57.49 seconds and did not write to any Google Sheet
 - [Setup and operations](docs/SETUP_AND_OPERATIONS.md)
 - [TARGET_MASTER schema (approved)](docs/TARGET_MASTER_SCHEMA.md)
 - [Shared scraping framework (Phase 6)](docs/SCRAPING_FRAMEWORK.md)
+- [Retailer data-use review](docs/RETAILER_DATA_USE_REVIEW.md)
+- [Laptop Factory adapter (Phase 7)](docs/adapters/LAPTOP_FACTORY.md)
 
 ## Local verification
 
