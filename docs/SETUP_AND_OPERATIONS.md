@@ -63,7 +63,8 @@ SKIP_FRESHNESS_CHECK=false
 ## Required and future worksheet tabs
 
 - **`raw`:** Production source of truth. It must remain read-only for this pipeline.
-- **`TARGET_MASTER`:** Intended future configuration table. It was readable on 2026-09-28 but had no headers or data. No Phase 4 command consumes it.
+- **`TARGET_MASTER`:** Master copy of approved configurations. It was readable on 2026-09-28 but had no headers or data. No Phase 4 command consumes it.
+- **`SOURCE_MODEL_MAP` and `MATCH_REVIEW`:** Supporting Phase 5 tabs. A read-only production check on 2026-09-29 found both missing. Create them manually from the `config/` templates. `check_target_tables.py --from-sheets` reads them but never creates them.
 - **`P1_*` outputs:** The user reported that all nine approved output tabs were created header-only and verified in the real spreadsheet on 2026-09-29. A separate synthetic writer test completed, and a user-provided read-only report confirmed all nine test tabs and headers, one synthetic laptop in the target outputs, the charger in excluded listings, and a run-log `top_100_count` of 1. The report did not list or inspect `raw`.
 - **Eligibility and duplicate decisions:** Current run inputs are local CSV files under `config/`. The remote `P1_ELIGIBILITY_DECISIONS` tab is preserved/merged by the optional writer but is not loaded into current-run classification.
 
@@ -79,33 +80,17 @@ python smoke_test.py
 
 The command reads the configured raw tab, validates the required headers, reports the spreadsheet and worksheet names and row count, and checks that sample values are strings. It does not modify the Sheet. A successful check on 2026-09-28 reported 23,544 data rows and all expected headers.
 
-## Read-only `TARGET_MASTER` check
-
-There is no dedicated checked-in command for this tab. The following one-off check uses the existing read-only connector, prints only row/header counts, and does not display cell contents:
+## Read-only Phase 5 table check
 
 ```bash
-python - <<'PY'
-import sys
-from pathlib import Path
-
-sys.path.insert(0, str(Path.cwd() / "src"))
-from laptop_tracker.config import Settings
-from laptop_tracker.sheets_source import connect, open_spreadsheet
-
-settings = Settings.from_env()
-spreadsheet = open_spreadsheet(connect(settings), settings.spreadsheet_id or "")
-worksheet = spreadsheet.worksheet("TARGET_MASTER")
-values = worksheet.get_all_values()
-print("TARGET_MASTER rows:", max(len(values) - 1, 0))
-print("TARGET_MASTER header columns:", len(values[0]) if values else 0)
-PY
+python check_target_tables.py --from-sheets
 ```
 
-The latest read-only check found the tab empty. This command confirms access only; it does not validate a schema.
+This command reads `TARGET_MASTER`, `SOURCE_MODEL_MAP`, and `MATCH_REVIEW` from the configured spreadsheet using the read-only scope and `get_all_values()` only. It validates each tab against the approved schema and writes local reports under `data/output/`. It prints table names, counts, and error codes, but never the spreadsheet title or cell values. A missing tab is reported and fails the check. The command never creates, clears, or writes tabs. The first live check on 2026-09-29 found no `TARGET_MASTER` header and found both supporting tabs missing. Add the approved header to `TARGET_MASTER` and create the supporting tabs manually from the `config/` templates. After that, expect `NO_DATA_ROWS` from `TARGET_MASTER` until approved rows are added.
 
-## Local `TARGET_MASTER` CSV check
+## Local Phase 5 CSV checks and candidate seeding
 
-This check validates a local CSV against the **proposed** schema in [TARGET_MASTER_SCHEMA.md](TARGET_MASTER_SCHEMA.md). It needs no credentials and makes no Google calls. Start from the header-only `config/target_master_template.csv`. Keep real exports outside Git, for example under the ignored `data/review/` folder.
+This check validates a local CSV against the approved schema in [TARGET_MASTER_SCHEMA.md](TARGET_MASTER_SCHEMA.md). It needs no credentials and makes no Google calls. Start from the header-only `config/target_master_template.csv`. Keep real exports outside Git, for example under the ignored `data/review/` folder.
 
 ```bash
 python check_target_master.py data/review/target_master_export.csv
@@ -117,6 +102,24 @@ python check_target_master.py data/review/target_master_export.csv
 - **Exit code:** `0` means the check passed; `1` means it failed.
 
 The template alone fails with `NO_DATA_ROWS`, as expected. This command never reads or writes the worksheet.
+
+To check the mapping and review tables, or all three together, run:
+
+```bash
+python check_target_tables.py --target-master data/review/target_master_export.csv \
+  --source-model-map data/review/source_model_map_export.csv \
+  --match-review data/review/match_review_export.csv
+```
+
+`--source-model-map` requires `--target-master`. The command writes `<table>_validation_errors.csv` for each table, and writes `<table>_validated.csv` only for tables that pass. Both go under `data/output/`.
+
+To create the initial local review worklist from the accepted Top 100, run:
+
+```bash
+python seed_match_review.py
+```
+
+This writes `data/review/match_review_candidates.csv` with one `NEW` row per distinct Top 100 model ID. All specifications, URLs, and approvals are blank. The command refuses to overwrite an existing file and stops without writing if `data/output/top_100_targets.csv` is missing; run `python run_phase1.py --dry-run` first. It never touches Google Sheets or creates `TARGET_MASTER` or mapping rows.
 
 ## Safe test-tab write
 
@@ -176,7 +179,9 @@ This reads the same raw source, completes local processing first, then requests 
 | Stale source month | Confirm the source includes current Manila-month data. Disable freshness only for intentional historical test fixtures. |
 | Too many validation errors | Review the private `validation_errors.csv`; fix the source or reviewed data-quality issue before increasing the threshold. |
 | Unresolved duplicate/model-identity conflicts | Review the private conflict report and redacted `duplicate_review.csv`; record an authorized decision in `config/duplicate_decisions.csv`. Stale fingerprints require a new review. |
-| `TARGET_MASTER` read succeeds but returns no rows | The tab is currently empty. The schema is proposed but not approved, and configurations have not been populated (Phase 5). |
+| `TARGET_MASTER` read succeeds but returns no rows | The 2026-09-29 check found no header row. Add the approved template header; then add evidence-backed, approved configurations as Phase 5 work. |
+| `check_target_tables.py` reports a header error for `SOURCE_MODEL_MAP` or `MATCH_REVIEW` | These headers must match the `config/` template exactly, including column order. |
+| `check_target_tables.py --from-sheets` reports a worksheet not found | Create the tab manually with the template headers. The command never creates tabs. |
 | `check_target_master.py` reports header or row errors | Compare the header with `config/target_master_template.csv`, then review the local `target_master_validation_errors.csv`. Duplicates are never resolved automatically; correct or remove rows in the source. |
 | Pipeline appears slow | Unit aggregation performance does not represent total runtime. Time each processing stage on a safe local-only run before changing the implementation. |
 | Write-enabled run does not create outputs | Check for a pipeline safety failure first; unresolved conflicts stop before Sheets writes. Confirm service-account Editor access only for the intended test spreadsheet. |

@@ -1,6 +1,6 @@
 # Laptop Price Tracker: Product Requirements
 
-**Status:** Phase 4 (the raw-data and ranking pipeline) is implemented in code, and the user accepted the current generated CSV reports on 2026-09-29. The latest read-only live run completed after fingerprint-matched decisions excluded 21 historical conflicting keys. Phase 5 has a proposed `TARGET_MASTER` schema and a local validator, and the schema awaits business approval. Retailer scraping and price comparison are future work.
+**Status:** Phase 4 (the raw-data and ranking pipeline) is implemented in code, and the user accepted the current generated CSV reports on 2026-09-29. The latest read-only live run completed after fingerprint-matched decisions excluded 21 historical conflicting keys. The user approved the Phase 5 `TARGET_MASTER` schema choices on 2026-09-29. Local validators for `TARGET_MASTER`, `SOURCE_MODEL_MAP`, and `MATCH_REVIEW` are implemented, as are a read-only sheet reader for those tabs and a Top 100 candidate seeding command. No configurations or mappings have been populated, and no approver has been named. Phase 5 remains partially complete. Retailer scraping and price comparison are future work.
 
 ## Purpose and business problem
 
@@ -31,7 +31,8 @@ The current problem is to produce a repeatable Top 100 candidate list without co
 
 - Retailer scraping, Playwright browser automation, retailer adapters, or price history.
 - Exact matching of scraped offers to `TARGET_MASTER` configurations.
-- An *approved* `TARGET_MASTER` schema, real configuration rows, or pipeline consumption of `TARGET_MASTER`. A proposed schema and a local validator exist; see [TARGET_MASTER_SCHEMA.md](TARGET_MASTER_SCHEMA.md).
+- Real configuration rows or pipeline consumption of `TARGET_MASTER`. Its schema is approved, and validators plus a read-only reader exist for it and its supporting tables. See [TARGET_MASTER_SCHEMA.md](TARGET_MASTER_SCHEMA.md).
+- Automatic promotion of review candidates, automatic source-to-target mapping, or inferring specifications from Shopee titles.
 - GitHub Actions scheduling or production monitoring.
 - Writing to `raw` or automatically resolving a human-review conflict.
 
@@ -45,7 +46,7 @@ The current code reads `raw`, validates rows, collapses exact duplicates, applie
 
 ### Planned long-term product
 
-Later phases will validate laptop configurations in `TARGET_MASTER`, collect retailer offers through retailer adapters, perform exact configuration matching, produce weekly comparisons and price history, write approved outputs, and automate an operating run. These components are not currently implemented.
+Remaining work includes researching the seeded candidates, preparing and approving configurations in `TARGET_MASTER` and their mappings, defining the downstream interface for the matching phase, collecting retailer offers through retailer adapters, performing exact configuration matching, producing weekly comparisons and price history, and automating an operating run. These components are not currently implemented.
 
 ## Functional requirements
 
@@ -61,7 +62,8 @@ Later phases will validate laptop configurations in `TARGET_MASTER`, collect ret
 | FR-08 | Select one distinct MTD price without averaging; flag conflicting prices. | Implemented. |
 | FR-09 | Save local outputs and diagnostics by default. | Implemented under `data/output/`. |
 | FR-10 | Write only approved output tabs after explicit opt-in; never write `raw`. | Guarded writer implemented and tested with synthetic data against a dedicated test spreadsheet; a read-only report confirmed its nine output tabs and expected synthetic rows. No production write occurred. |
-| FR-11 | Validate `TARGET_MASTER` configurations. | Partially implemented. A local validator and CSV check cover the proposed schema, and synthetic tests pass. The schema still needs business approval. The tab is empty and not consumed by the pipeline. |
+| FR-11 | Validate `TARGET_MASTER` configurations. | Partially implemented. The approved schema and header template are in place. Local CSV validators exist for `TARGET_MASTER`, `SOURCE_MODEL_MAP`, and `MATCH_REVIEW`. A read-only reader and `check_target_tables.py --from-sheets` handle the three tabs. Claude reported a passing test suite on 2026-09-29. A live read-only check found no `TARGET_MASTER` header and found the supporting tabs missing. No real configurations or mappings have been added, no approver is named, and there is no downstream consumer yet. |
+| FR-11a | Seed the Phase 4 Top 100 as `MATCH_REVIEW` candidates without guessing specifications. | Implemented (`seed_match_review.py`). On 2026-09-29 it produced 100 `NEW` local candidates from the accepted Top 100. The file is local and ignored; nothing was written to Sheets. |
 | FR-12 | Scrape retailer offers, match exact configurations, compare prices, and record history. | Planned. |
 | FR-13 | Run and monitor the pipeline in GitHub Actions. | Planned. |
 
@@ -81,7 +83,7 @@ Internal names map the source fields to `period_date`, `shop_id`, `item_id`, `mo
 
 `TARGET_MASTER` is intended to hold validated laptop configurations. The read-only check on 2026-09-28 found the worksheet but no header row or data rows.
 
-A proposed schema is described in [TARGET_MASTER_SCHEMA.md](TARGET_MASTER_SCHEMA.md). It covers identity, brand, series/model, CPU, memory, storage, display, variants, and review fields. The document separates what earlier docs established from choices that still need approval. `check_target_master.py` validates a local CSV export against the proposal. No code reads the worksheet's configurations or feeds them into the pipeline.
+The approved schema is described in [TARGET_MASTER_SCHEMA.md](TARGET_MASTER_SCHEMA.md). It requires exact configuration identity fields, a source URL, stable IDs, and approval details; Shopee source IDs belong in a separate mapping table, and incomplete candidates belong in `MATCH_REVIEW`. The full accepted Top 100 is in scope: every distinct configuration with verified specs should be tracked, while several source IDs may point to one configuration. `check_target_master.py` validates a local CSV export against the schema. `check_target_tables.py` validates snapshots of all three tables, or with `--from-sheets` reads the three tabs using the read-only scope. No code feeds validated configurations into the ranking pipeline or a matcher yet.
 
 ## Eligibility rules
 
@@ -160,7 +162,7 @@ The optional Google Sheets writer uses these approved tabs: `P1_TOP_100_TARGETS`
 
 ### Long-term acceptance
 
-- `TARGET_MASTER` has an agreed schema and validation rules.
+- `TARGET_MASTER` has approved headers, evidence-backed configurations, and a repeatable validation path.
 - Retailer adapters collect attributable offers and exact configuration matching rejects ambiguous matches.
 - Comparisons and price history are reproducible and reviewed.
 - A controlled pilot, scheduled automation, alerting, and operational ownership are documented and tested.
@@ -168,8 +170,8 @@ The optional Google Sheets writer uses these approved tabs: `P1_TOP_100_TARGETS`
 ## Known limitations and future enhancements
 
 - The latest successful live run took 57.49 seconds; stage timings were not captured. The synthetic 12,000-model aggregation test passes its under-10-second assertion, which does not establish end-to-end runtime.
-- `TARGET_MASTER` is empty. Its proposed schema needs business approval, and there is no pipeline integration. Only a local CSV validator exists.
+- A read-only check on 2026-09-29 found no `TARGET_MASTER` header and found `SOURCE_MODEL_MAP` and `MATCH_REVIEW` missing. The schema is approved. Validators and a read-only reader exist for all three tables, but there is no pipeline integration. Several behaviors not covered by the approved decisions use documented conservative defaults; see [TARGET_MASTER_SCHEMA.md](TARGET_MASTER_SCHEMA.md#unspecified-behaviors-and-chosen-defaults).
 - Eligibility is keyword-based and should be reviewed against real listings; ambiguous cases go to human review.
 - The optional remote eligibility-decision tab is not read into the same run's classification.
 - No retailer scraper, Playwright dependency, exact matcher, price-history store, GitHub Actions workflow, or production output-tab setup exists in the repository.
-- Future work should approve the `TARGET_MASTER` schema, populate reviewed configurations, and add retailer-specific adapters, exact configuration matching, price-history outputs, controlled pilot tests, and scheduled operations.
+- Future work should research the seeded candidates, populate approved configurations and mappings, and run the read-only sheet check. It should then add retailer-specific adapters, exact configuration matching, price-history outputs, controlled pilot tests, and scheduled operations.

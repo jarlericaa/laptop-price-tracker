@@ -13,7 +13,7 @@ The Python implementation and CLI are named “Phase 1” (`run_phase1.py` and `
 | 2. Create repository and project structure | COMPLETE | Four grouped commits cover setup, implementation, tests, and initial docs; follow-up commits record the Phase 5 validator and this status refresh. Local business decisions and outputs remain ignored. |
 | 3. Create Google Sheets output structure | COMPLETE | User-reported verification confirms the nine production output tabs and headers. A read-only report for the dedicated test spreadsheet confirmed all nine test tabs and headers, expected synthetic output rows, and `top_100_count=1`. The sequential-write recovery procedure is documented. The test report did not list or inspect `raw`; no production write occurred. |
 | 4. Read raw and generate Top 100 | COMPLETE | The 2026-09-28 read-only run completed in 57.49 seconds and generated 100 targets after 21 historical keys were explicitly excluded. The user accepted the current CSV reports on 2026-09-29; no production Sheets write was made. |
-| 5. Build and validate `TARGET_MASTER` | PARTIALLY_COMPLETE | Proposed schema, local validator, and CSV check command exist, covered by synthetic tests. The schema still needs business approval. The real tab is still empty and unchanged; no pipeline consumer exists. |
+| 5. Build and validate `TARGET_MASTER` | PARTIALLY_COMPLETE | Schema approved on 2026-09-29. Validators exist for all three tables, with a read-only sheet reader and a Top 100 candidate seeder; Claude reported 129 passing tests. A live read-only check found no `TARGET_MASTER` header and found the supporting tabs missing. No real configurations or mappings have been entered, and no approver is named. |
 | 6. Build shared scraping framework | NOT_STARTED | No scraping framework exists. |
 | 7. Implement retailer adapters | NOT_STARTED | No retailer adapters exist. |
 | 8. Normalize and perform exact matching | NOT_STARTED | No offer normalization or exact configuration matcher exists. |
@@ -77,14 +77,25 @@ The Python implementation and CLI are named “Phase 1” (`run_phase1.py` and `
 ### Phase 5 — Build and validate `TARGET_MASTER`
 
 - **Objective:** Create the authoritative list of laptop configurations to compare against retailers.
-- **Tasks:** Agree on configuration fields and uniqueness rules; populate reviewed configurations; validate required fields, brands, model/series, CPU, memory, storage, display, and relevant variants as agreed.
-- **Deliverables:** A documented `TARGET_MASTER` schema, validated rows, and a repeatable import/check path.
-- **Dependencies:** Phase 4 target review and business agreement on exact configuration identity.
-- **Validation:** Required-field, duplicate-configuration, and representative manual-review checks.
-- **Definition of done:** The tab has approved headers and configurations that pass validation; downstream code can consume it without fuzzy identity assumptions.
+- **Scope:** Account for all 100 accepted Phase 4 Top 100 source model IDs. Track every distinct configuration whose exact specs and evidence can be verified; keep unresolved candidates in `MATCH_REVIEW`. Multiple source IDs may map to one configuration.
+- **Tasks:** Prepare evidence-backed, complete configuration rows; identify the designated manager/category owner who approves additions and retirements; implement validators for the mapping and review tables; build a read-only sheet reader and a stable downstream interface.
+- **Deliverables:** Approved `TARGET_MASTER`, `SOURCE_MODEL_MAP`, and `MATCH_REVIEW` schemas; validated rows and mappings; a repeatable local snapshot check; a read-only sheet path for consumers.
+- **Dependencies:** Phase 4 target review, authoritative product evidence, and approval by the designated manager or category owner.
+- **Validation:** Required-field and exact-identity checks, duplicate-ID and mapping checks, review-state checks, and representative manual approval review.
+- **Definition of done:** The master and supporting tables contain approved, validated records; local CSV snapshots can be checked repeatably; downstream code can read the authoritative sheet tables without fuzzy identity assumptions.
 - **Current status:** `PARTIALLY_COMPLETE`.
-  - **Done:** A proposed schema is documented in [TARGET_MASTER_SCHEMA.md](TARGET_MASTER_SCHEMA.md), with a header-only template at `config/target_master_template.csv`. `src/laptop_tracker/target_master.py` validates headers, required fields, formats, allowed values, and dates. It also flags duplicate `target_id` values and duplicate configuration identities, keeps every value as an exact string, and never picks between duplicates. `check_target_master.py` checks a local CSV export without Google access and writes local reports only. Synthetic unit tests cover valid, invalid, duplicate, optional-field, and exact-string cases.
-  - **Not done:** The column set, mandatory fields, identity key, and conventions are proposals awaiting business approval; the open questions are listed in the schema doc. No real configurations have been defined. The real `TARGET_MASTER` worksheet was not written and remains empty. There is no read-only sheet check for the tab, and no pipeline consumer. Phase 4 report review was accepted by the user on 2026-09-29.
+  - **Done:** The user approved the schema choices on 2026-09-29. [TARGET_MASTER_SCHEMA.md](TARGET_MASTER_SCHEMA.md), `config/target_master_template.csv`, and the local validator reflect the approved identity fields, required specifications, decimal storage units, source URL, stable IDs, and human approval fields.
+    - `supporting_tables.py` validates `SOURCE_MODEL_MAP` and `MATCH_REVIEW` against their exact templates.
+    - `check_target_tables.py` checks local CSV snapshots of all three tables, or reads the tabs with the read-only scope using `--from-sheets`.
+    - `seed_match_review.py` produced 100 local `NEW` candidates from the accepted Top 100, with all specifications, URLs, and approvals blank.
+    - Three stale `TARGET_MASTER` test expectations were corrected to the approved rules; the validator's rules were unchanged.
+    - 129 tests, Ruff, and `compileall` passed on 2026-09-29.
+  - **Not done:**
+    - The designated manager or category owner has not been named.
+    - No candidate has been researched, approved, or mapped. `TARGET_MASTER` and `SOURCE_MODEL_MAP` contain no real rows, and the live `TARGET_MASTER` worksheet was last reported empty on 2026-09-28.
+    - A live read-only `--from-sheets` run found no `TARGET_MASTER` header and found `SOURCE_MODEL_MAP` and `MATCH_REVIEW` missing. Their approved headers must be added before the tables can pass validation.
+    - The conservative defaults for unspecified behaviors (listed in the schema doc) need owner confirmation.
+    - No downstream consumer interface or automatic full Top 100 source-ID coverage check exists.
 
 ### Phase 6 — Build shared scraping framework
 

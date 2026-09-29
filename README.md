@@ -14,10 +14,15 @@ production tabs were created with headers only and verified on 2026-09-29. A syn
 writer test completed on a dedicated test spreadsheet; a read-only report confirmed the nine
 tabs and headers, expected synthetic rows, and a run-log count of 1. The full
 `run_phase1.py --write-sheets` command has not been run, and no production sheet write has
-occurred. The current `TARGET_MASTER` worksheet is empty.
+occurred. A read-only production check on 2026-09-29 found no `TARGET_MASTER` header and found the
+`SOURCE_MODEL_MAP` and `MATCH_REVIEW` tabs missing.
 
-For Phase 5, a proposed `TARGET_MASTER` schema and a local CSV validator are available. The
-schema is pending business approval; see
+Phase 5 is PARTIALLY_COMPLETE. The `TARGET_MASTER` schema decisions are approved. Local
+validators exist for `TARGET_MASTER`, `SOURCE_MODEL_MAP`, and `MATCH_REVIEW`, along with a
+read-only Google Sheets reader for those tabs. A command seeds the Top 100 into a local
+`MATCH_REVIEW` candidate file. No real configurations or mappings have been entered, no approver
+has been named. The new reader reached the production spreadsheet and reported the missing Phase 5
+headers and tabs. See
 [docs/TARGET_MASTER_SCHEMA.md](docs/TARGET_MASTER_SCHEMA.md).
 
 The script is named `run_phase1.py` for historical reasons. Its raw-data and Top 100 work maps
@@ -58,8 +63,24 @@ explicit `--write-sheets` option is supplied.
 python check_target_master.py path/to/target_master_export.csv
 ```
 
-This validates a local `TARGET_MASTER` CSV (header template: `config/target_master_template.csv`)
-without Google access. It writes reports under `data/output/` and prints counts only.
+This validates a local `TARGET_MASTER` CSV snapshot (header template:
+`config/target_master_template.csv`) without Google access.
+
+```bash
+python check_target_tables.py --target-master tm.csv --source-model-map map.csv --match-review review.csv
+python check_target_tables.py --from-sheets
+python seed_match_review.py
+```
+
+`check_target_tables.py` validates local snapshots of any of the three Phase 5 tables. Mapping
+checks require the master snapshot, so target references can be verified. The header templates
+`config/source_model_map_template.csv` and `config/match_review_template.csv` are exact
+contracts. With `--from-sheets`, the command reads the three tabs with the read-only scope. It
+never writes or creates tabs. `seed_match_review.py` creates
+`data/review/match_review_candidates.csv`, with one `NEW` candidate per distinct Top 100 model
+ID. All specifications, URLs, and approvals are left blank for human research. It never creates
+`TARGET_MASTER` or mapping rows. All three commands write reports only under ignored `data/`
+paths and print counts only.
 
 ## Conflicting duplicates
 
@@ -92,14 +113,14 @@ The latest live dry run took 57.49 seconds and did not write to any Google Sheet
 - [Progress log](docs/PROGRESS_LOG.md)
 - [Decision log](docs/DECISIONS.md)
 - [Setup and operations](docs/SETUP_AND_OPERATIONS.md)
-- [TARGET_MASTER schema (proposed)](docs/TARGET_MASTER_SCHEMA.md)
+- [TARGET_MASTER schema (approved)](docs/TARGET_MASTER_SCHEMA.md)
 
 ## Local verification
 
 ```bash
 python -m pytest -q
 python -m ruff check .
-python -m compileall src run_phase1.py smoke_test.py check_target_master.py
+python -m compileall src run_phase1.py smoke_test.py check_target_master.py check_target_tables.py seed_match_review.py
 python smoke_test.py
 python run_phase1.py --dry-run
 ```
