@@ -121,6 +121,14 @@ python seed_match_review.py
 
 This writes `data/review/match_review_candidates.csv` with one `NEW` row per distinct Top 100 model ID. All specifications, URLs, and approvals are blank. The command refuses to overwrite an existing file and stops without writing if `data/output/top_100_targets.csv` is missing; run `python run_phase1.py --dry-run` first. It never touches Google Sheets or creates `TARGET_MASTER` or mapping rows.
 
+## Offline scraping framework tests (overall Phase 6)
+
+```bash
+python -m pytest -q tests/test_offers.py tests/test_scraping.py
+```
+
+These tests use synthetic fixtures under `tests/scraping_fixtures/`, a fake transport, and a fake clock. They need no credentials and no network; any socket connection fails the test. There is no scraping command or CLI. No retailer adapter exists, and nothing should make live retailer requests until Phase 7 retailer selection and data-use review are approved. The retrieval defaults (20 s timeout, 3 attempts, 5/10 s backoff capped at 60 s, and at least 10 s between requests per retailer) are documented in [SCRAPING_FRAMEWORK.md](SCRAPING_FRAMEWORK.md#retrieval-defaults). Scraping log lines use the `laptop_tracker.scraping` logger and contain redacted URLs and error codes only.
+
 ## Safe test-tab write
 
 The application has no standalone arbitrary test-tab writer. The writer accepts only named `P1_*` tabs, and there is no `P1_TEST` destination. **Do not use the production spreadsheet for a write test.**

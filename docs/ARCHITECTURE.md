@@ -25,7 +25,7 @@ flowchart LR
     TM -. validated rows only; integration planned .-> X[future retailer adapters, exact matching, comparison]
 ```
 
-The current and planned portions are different deliverables. Retailer scraping, exact configuration matching, price history, and GitHub Actions are not implemented.
+The current and planned portions are different deliverables. The shared scraping framework (overall Phase 6) is implemented and tested offline, but it has no retailer adapter and is not connected to the pipeline above. Retailer scraping, exact configuration matching, price history, and GitHub Actions are not implemented.
 
 ## Repository structure
 
@@ -46,15 +46,19 @@ The current and planned portions are different deliverables. Retailer scraping, 
 │   ├── config.py
 │   ├── data_quality.py
 │   ├── eligibility.py
+│   ├── offers.py                     # Offer observation model (overall Phase 6)
 │   ├── periods.py
 │   ├── pipeline.py
 │   ├── ranking.py
 │   ├── schema.py
+│   ├── scraping.py                   # Shared adapter contract and retrieval (overall Phase 6)
 │   ├── sheets_source.py
 │   ├── sheets_writer.py
 │   ├── supporting_tables.py
 │   └── target_master.py
 ├── tests/
+│   ├── example_adapter.py            # Offline example adapter (not a retailer integration)
+│   └── scraping_fixtures/            # Synthetic HTML pages for the framework tests
 ├── check_target_master.py            # Local TARGET_MASTER CSV check (overall Phase 5)
 ├── check_target_tables.py            # Three-table CSV or read-only sheet check (overall Phase 5)
 ├── seed_match_review.py              # Top 100 -> local MATCH_REVIEW candidates (overall Phase 5)
@@ -86,8 +90,10 @@ The current and planned portions are different deliverables. Retailer scraping, 
 | `supporting_tables.py` | Validates `SOURCE_MODEL_MAP` and `MATCH_REVIEW` against their exact `config/` header templates, reusing the `TARGET_MASTER` cell checks. Mapping checks cover one target per source ID and target references to valid master rows. Review checks cover the four statuses and blank-tolerant specs in master formats. Also builds seed candidates from Top 100 values. It never promotes or maps a row. |
 | `check_target_tables.py` | CLI that checks any of the three tables from local CSV snapshots, or with `--from-sheets` from the master sheet through the read-only reader. Writes per-table local reports and prints counts and codes only. |
 | `seed_match_review.py` | CLI that writes one `NEW` candidate per distinct Top 100 model ID to an ignored local file. Specs, URLs, and approvals are left blank, and it refuses to overwrite an existing file. |
+| `offers.py` | Retailer-neutral `OfferObservation` with `Decimal` price, ISO currency, availability evidence, and retrieval metadata, but no `target_id`. Also holds deterministic helpers for price parsing, text cleanup, and URL redaction. Uses no network or Google access. |
+| `scraping.py` | Shared adapter contract (`RetailerAdapter`, `ParsedOffer`), `Fetcher` with timeouts, bounded retries, and per-retailer throttling, injectable `Transport`/`Clock`, the `scrape()` runner, stage-specific failures, and redacted logging. The default transport is the standard-library `urllib`. See [SCRAPING_FRAMEWORK.md](SCRAPING_FRAMEWORK.md). |
 
-Validation runs on local CSV exports or on read-only sheet reads; nothing writes the three Phase 5 tabs. The schema is approved; see [TARGET_MASTER_SCHEMA.md](TARGET_MASTER_SCHEMA.md). Header templates for `TARGET_MASTER`, `SOURCE_MODEL_MAP`, and `MATCH_REVIEW` live under `config/`. No downstream consumer, retailer adapter, exact matcher, comparison-history, or approval-workflow module exists. Promotion from review to master is a manual, human-approved step.
+Validation runs on local CSV exports or on read-only sheet reads; nothing writes the three Phase 5 tabs. The schema is approved; see [TARGET_MASTER_SCHEMA.md](TARGET_MASTER_SCHEMA.md). Header templates for `TARGET_MASTER`, `SOURCE_MODEL_MAP`, and `MATCH_REVIEW` live under `config/`. No downstream consumer, retailer adapter, exact matcher, comparison-history, or approval-workflow module exists. The Phase 6 scraping framework does not read these tables. Promotion from review to master is a manual, human-approved step.
 
 ## Data-processing flow
 
@@ -132,14 +138,24 @@ From the repository root in WSL, `python smoke_test.py` checks connectivity and 
 
 There is no workflow in the repository today. Once the controlled pilot passes, a future scheduled workflow can install the pinned project dependencies, obtain credentials through an approved secret mechanism, run validation and generation, publish only approved outputs under explicit configuration, and retain logs or alert an operator on failure. Schedule, retention, secret rotation, approvals, and notification ownership remain to be decided during Phases 10-12.
 
-## Planned retailer adapter boundary
+## Retailer adapter boundary
 
-Retailer adapters are future components. The intended boundary is:
+The shared framework (overall Phase 6) exists; retailer adapters (Phase 7) do not. The boundary is:
 
-1. Read only validated laptop configurations from `TARGET_MASTER`, meaning rows that pass `validate_target_master` under the approved schema, and only `SOURCE_MODEL_MAP` links that pass `validate_source_model_map`. `read_target_table_values()` provides the read-only input; the consumer interface itself is not yet defined.
-2. Query or browse retailer-specific sources without changing the source sheet.
-3. Return normalized offer observations with retailer, URL, retrieval time, raw configuration text, price, and availability evidence.
-4. Pass normalized observations to a shared exact-configuration matcher. Ambiguous or partial matches must be review cases, not silent matches.
-5. Send confirmed comparisons to the future weekly comparison and price-history outputs.
+1. *(Planned)* Read only validated laptop configurations from `TARGET_MASTER`, meaning rows that pass `validate_target_master` under the approved schema, and only `SOURCE_MODEL_MAP` links that pass `validate_source_model_map`. `read_target_table_values()` provides the read-only input. How scrape requests are derived from targets is not yet defined, and the framework does not assume `TARGET_MASTER` is populated.
+2. *(Implemented)* `scrape()` takes a `ScrapeRequest` (retailer ID and URL) and fetches through the shared `Fetcher`. The adapter parses the page into `ParsedOffer` values. Nothing changes any sheet.
+3. *(Implemented)* The framework returns `OfferObservation` values with retailer, offer URL, UTC retrieval time, raw product and configuration text, `Decimal` price, ISO currency, availability evidence, and retrieval metadata, plus stage-specific `ScrapeFailure` records.
+4. *(Planned, Phase 8)* Pass normalized observations to a shared exact-configuration matcher. Ambiguous or partial matches must be review cases, not silent matches. Observations carry no `target_id`.
+5. *(Planned, Phase 9)* Send confirmed comparisons to the future weekly comparison and price-history outputs.
 
-The current repository contains none of these adapters or contracts; the list describes the planned connection point, not existing behavior.
+```mermaid
+flowchart LR
+    RQ[ScrapeRequest] --> FE[Fetcher: throttle, timeout, retries]
+    FE --> TR[Transport: urllib default, fake in tests]
+    FE --> AD[RetailerAdapter.parse: Phase 7, example adapter in tests]
+    AD --> BO[build_observation: normalize and validate]
+    BO --> OB[OfferObservation, no target_id]
+    OB -. planned Phase 8 .-> MX[exact matcher]
+```
+
+The framework is standalone: no pipeline, CLI, or Sheets code calls it yet, and it stores no observations.

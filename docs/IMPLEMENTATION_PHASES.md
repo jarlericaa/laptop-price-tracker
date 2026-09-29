@@ -14,8 +14,8 @@ The Python implementation and CLI are named “Phase 1” (`run_phase1.py` and `
 | 3. Create Google Sheets output structure | COMPLETE | User-reported verification confirms the nine production output tabs and headers. A read-only report for the dedicated test spreadsheet confirmed all nine test tabs and headers, expected synthetic output rows, and `top_100_count=1`. The sequential-write recovery procedure is documented. The test report did not list or inspect `raw`; no production write occurred. |
 | 4. Read raw and generate Top 100 | COMPLETE | The 2026-09-28 read-only run completed in 57.49 seconds and generated 100 targets after 21 historical keys were explicitly excluded. The user accepted the current CSV reports on 2026-09-29; no production Sheets write was made. |
 | 5. Build and validate `TARGET_MASTER` | PARTIALLY_COMPLETE | Schema approved on 2026-09-29. Validators exist for all three tables, with a read-only sheet reader and a Top 100 candidate seeder; Claude reported 129 passing tests. A live read-only check found no `TARGET_MASTER` header and found the supporting tabs missing. No real configurations or mappings have been entered, and no approver is named. |
-| 6. Build shared scraping framework | NOT_STARTED | No scraping framework exists. |
-| 7. Implement retailer adapters | NOT_STARTED | No retailer adapters exist. |
+| 6. Build shared scraping framework | COMPLETE | The retailer-neutral framework (`offers.py`, `scraping.py`) and an offline example-adapter harness were added on 2026-09-29. 203 tests, Ruff, and `compileall` passed. No live request was made. The framework does not read Sheets or match offers to targets. |
+| 7. Implement retailer adapters | NOT_STARTED | No retailer adapters exist. Retailer selection and the data-use review are still required before any live request. |
 | 8. Normalize and perform exact matching | NOT_STARTED | No offer normalization or exact configuration matcher exists. |
 | 9. Generate comparisons and price history | NOT_STARTED | No comparison or history outputs exist. |
 | 10. Test and run a controlled pilot | BLOCKED | Requires accepted Phase 4 outputs, approved and populated `TARGET_MASTER` configurations, and adapters first. |
@@ -102,10 +102,18 @@ The Python implementation and CLI are named “Phase 1” (`run_phase1.py` and `
 - **Objective:** Define common behavior for retailer data collection.
 - **Tasks:** Specify adapter inputs and outputs, retrieval metadata, retries and timeouts, throttling, parsing errors, and test fixtures.
 - **Deliverables:** Shared scraper interface, normalized offer model, logging, and adapter test harness.
-- **Dependencies:** Phase 5 schema and approved data-use approach.
+- **Dependencies:** Phase 5 schema and approved data-use approach. The framework needs neither populated `TARGET_MASTER` rows nor live access. The data-use approval gates live use in Phase 7, not the offline framework.
 - **Validation:** Offline fixtures, error-path tests, and deterministic normalization tests.
 - **Definition of done:** A retailer adapter can plug into the shared framework and return attributable, normalized observations.
-- **Current status:** `NOT_STARTED`.
+- **Current status:** `COMPLETE` for the shared framework, verified offline on 2026-09-29. See [SCRAPING_FRAMEWORK.md](SCRAPING_FRAMEWORK.md).
+  - **Done:**
+    - A `RetailerAdapter` protocol and `ParsedOffer` output. The framework adds all attribution: retailer, URLs, UTC retrieval time, attempts, body SHA-256, and adapter version.
+    - An `OfferObservation` model with `Decimal` prices, ISO currency codes, availability evidence, and a deterministic `to_record()`. It has no `target_id`.
+    - A `Fetcher` with configurable timeouts, bounded retries with backoff, `Retry-After` handling, and per-retailer throttling. Transport and clock are injectable.
+    - Retryable fetch failures are kept separate from non-retried parse and validation failures, and host allowlists cover requests, redirects, and offer links.
+    - Redacted structured logs.
+    - An offline example adapter with synthetic fixtures and 74 new tests.
+  - **Not done (later phases):** No retailer-specific adapter, live request, browser automation, data-use review, observation storage, or target matching. The retrieval defaults are conservative implementation choices that need per-retailer confirmation in Phase 7.
 
 ### Phase 7 — Implement retailer adapters
 
@@ -115,7 +123,7 @@ The Python implementation and CLI are named “Phase 1” (`run_phase1.py` and `
 - **Dependencies:** Phase 6 framework and Phase 5 configuration schema.
 - **Validation:** Fixture tests, controlled manual spot checks, and documented adapter failures.
 - **Definition of done:** Each approved adapter meets the shared contract and has an owner and maintenance notes.
-- **Current status:** `NOT_STARTED`. Retailer scraping and Playwright are not in the repository.
+- **Current status:** `NOT_STARTED`. Retailer scraping and Playwright are not in the repository. Adapters must implement the Phase 6 contract in [SCRAPING_FRAMEWORK.md](SCRAPING_FRAMEWORK.md). Each retailer's terms, robots.txt, and rate limits must be reviewed and approved before its first live request.
 
 ### Phase 8 — Normalize and perform exact matching
 
@@ -145,7 +153,7 @@ The Python implementation and CLI are named “Phase 1” (`run_phase1.py` and `
 - **Dependencies:** Phases 4-9 complete enough for an end-to-end pilot.
 - **Validation:** Reconcile target, source offers, matches, comparisons, and output tabs with human reviewers.
 - **Definition of done:** Stakeholders accept the pilot results and residual risks before automation.
-- **Current status:** `BLOCKED` by incomplete Phases 4 and 5 and unstarted Phases 6-9.
+- **Current status:** `BLOCKED` by incomplete Phase 5 and unstarted Phases 7-9.
 
 ### Phase 11 — Add GitHub Actions automation
 
