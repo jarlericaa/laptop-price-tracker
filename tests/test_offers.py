@@ -8,9 +8,12 @@ import pytest
 
 from laptop_tracker.offers import (
     OBSERVATION_COLUMNS,
+    OFFER_DETAIL_COLUMNS,
     Availability,
     ObservationValidationError,
+    OfferDetails,
     OfferObservation,
+    PriceType,
     RetrievalMetadata,
     clean_text,
     parse_price,
@@ -145,3 +148,101 @@ def test_observation_rejects_invalid_values(overrides: dict[str, object], field_
 def test_unknown_availability_may_omit_evidence() -> None:
     result = observation(availability=Availability.UNKNOWN, availability_evidence="")
     assert result.to_record()["availability"] == "UNKNOWN"
+
+
+# Optional offer details (added in Phase 7; existing records are unchanged)
+
+
+def sale_details(**overrides: object) -> OfferDetails:
+    values: dict[str, object] = {
+        "retailer_product_id": "42342",
+        "retailer_sku": "  Example   SKU ",
+        "price_type": PriceType.SALE,
+        "regular_price": Decimal("59999.00"),
+        "regular_price_text": "PHP 59,999.00",
+        "sale_price": Decimal("49999.00"),
+        "sale_price_text": "PHP 49,999.00",
+        "raw_specifications": (("RAM ", " 16GB\n DDR4"), ("", " ")),
+        "raw_categories": ("Laptops", " "),
+        "bundle_flag": True,
+        "bundle_evidence": ("title term FREE: + FREE",),
+    } | overrides
+    return OfferDetails(**values)  # type: ignore[arg-type]
+
+
+def test_details_normalize_text_and_serialize_deterministically() -> None:
+    details = sale_details()
+    assert details.retailer_sku == "Example SKU"
+    assert details.raw_specifications == (("RAM", "16GB DDR4"),)
+    assert details.raw_categories == ("Laptops",)
+    record = observation(price=Decimal("49999.00"), details=details).to_full_record()
+
+    assert list(record) == [*OBSERVATION_COLUMNS, *OFFER_DETAIL_COLUMNS]
+    assert record["price_type"] == "SALE"
+    assert (record["regular_price"], record["sale_price"]) == ("59999.00", "49999.00")
+    assert record["raw_specifications"] == '[["RAM","16GB DDR4"]]'
+    assert record["bundle_flag"] == "TRUE"
+    assert record["bundle_evidence"] == '["title term FREE: + FREE"]'
+    assert record == observation(price=Decimal("49999.00"), details=sale_details()).to_full_record()
+
+
+def test_empty_details_serialize_as_blanks_not_false_claims() -> None:
+    record = OfferDetails().to_record()
+    assert set(record.values()) == {""}
+
+
+def test_details_are_optional_and_leave_the_core_record_unchanged() -> None:
+    plain = observation()
+    with_details = observation(price=Decimal("49999.00"), details=sale_details())
+    assert plain.details is None
+    assert list(plain.to_record()) == list(OBSERVATION_COLUMNS)
+    assert list(with_details.to_record()) == list(OBSERVATION_COLUMNS)
+
+
+@pytest.mark.parametrize(
+    ("price", "details", "field_name"),
+    [
+        ("49999.00", sale_details(sale_price=Decimal("48000")), "sale_price"),
+        ("49999.00", sale_details(regular_price=Decimal("49999.00")), "regular_price"),
+        ("49999.00", sale_details(regular_price=None, regular_price_text=""), "regular_price"),
+        (
+            "49999.00",
+            sale_details(price_type=PriceType.REGULAR, regular_price=Decimal("49999.00")),
+            "sale_price",
+        ),
+        (
+            "49999.00",
+            sale_details(
+                price_type=PriceType.REGULAR, sale_price=None, sale_price_text="",
+            ),
+            "regular_price",
+        ),
+        ("49999.00", sale_details(price_type=None), "price_type"),
+    ],
+)
+def test_detail_prices_must_agree_with_the_current_price(
+    price: str, details: OfferDetails, field_name: str
+) -> None:
+    with pytest.raises(ObservationValidationError) as error:
+        observation(price=Decimal(price), details=details)
+    assert error.value.field_name == field_name
+
+
+@pytest.mark.parametrize(
+    ("overrides", "field_name"),
+    [
+        ({"regular_price": 59999.0}, "regular_price"),
+        ({"regular_price_text": ""}, "regular_price_text"),
+        ({"price_type": "SALE"}, "price_type"),
+        ({"bundle_flag": False}, "bundle_evidence"),
+        ({"bundle_evidence": ()}, "bundle_evidence"),
+        ({"bundle_flag": "yes"}, "bundle_flag"),
+        ({"raw_specifications": (("RAM",),)}, "raw_specifications"),
+        ({"raw_categories": ["Laptops"]}, "raw_categories"),
+        ({"retailer_sku": 123}, "retailer_sku"),
+    ],
+)
+def test_details_reject_invalid_values(overrides: dict[str, object], field_name: str) -> None:
+    with pytest.raises(ObservationValidationError) as error:
+        sale_details(**overrides)
+    assert error.value.field_name == field_name

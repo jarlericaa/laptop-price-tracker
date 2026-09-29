@@ -27,6 +27,7 @@ from .offers import (
     RETAILER_ID_PATTERN,
     Availability,
     ObservationValidationError,
+    OfferDetails,
     OfferObservation,
     RetrievalMetadata,
     clean_text,
@@ -39,7 +40,8 @@ from .offers import (
 LOGGER = logging.getLogger(__name__)
 
 # Response headers kept from a transport. Everything else, including Set-Cookie, is dropped.
-KEPT_RESPONSE_HEADERS = frozenset({"content-type", "retry-after"})
+KEPT_RESPONSE_HEADERS = frozenset({"content-type", "retry-after", "location"})
+REDIRECT_STATUSES = frozenset({301, 302, 303, 307, 308})
 
 
 class Stage(StrEnum):
@@ -104,6 +106,7 @@ class FetchConfig:
     retailer_min_intervals: Mapping[str, float] = field(default_factory=dict)
     retry_statuses: frozenset[int] = frozenset({408, 429, 500, 502, 503, 504})
     max_response_bytes: int = 5_000_000
+    max_redirects: int = 5
     user_agent: str = "laptop-price-tracker/0.1"
     extra_headers: Mapping[str, str] = field(default_factory=dict, repr=False)
 
@@ -121,6 +124,8 @@ class FetchConfig:
             raise ValueError("Request intervals must not be negative.")
         if self.max_response_bytes <= 0:
             raise ValueError("max_response_bytes must be positive.")
+        if not 0 <= self.max_redirects <= 10:
+            raise ValueError("max_redirects must be between 0 and 10.")
 
     def interval_for(self, retailer_id: str) -> float:
         return self.retailer_min_intervals.get(retailer_id, self.min_request_interval_seconds)
@@ -156,6 +161,13 @@ class TransportResponse:
 
 
 class Transport(Protocol):
+    """One GET per call. Transports must not follow redirects themselves.
+
+    A 3xx response is returned with its ``location`` header so the ``Fetcher`` can check the
+    target host before any redirected request is sent. A transport that can reach the network
+    is treated as live unless it sets ``live = False`` (offline fakes and fixtures only).
+    """
+
     def fetch(
         self, url: str, *, timeout: float, headers: Mapping[str, str], max_bytes: int
     ) -> TransportResponse:
@@ -182,11 +194,23 @@ class SystemClock:
         time.sleep(seconds)
 
 
+class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """Stops urllib from following redirects, so a 3xx surfaces as an ``HTTPError``."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
 class UrllibTransport:
-    """Standard-library HTTP(S) GET with no cookie handling. Redirects are followed by urllib.
+    """Standard-library HTTP(S) GET with no cookie handling and no automatic redirects.
 
     This is the default for future live use; the offline tests never call it over the network.
     """
+
+    live = True
+
+    def __init__(self) -> None:
+        self._opener = urllib.request.build_opener(_NoRedirectHandler())
 
     def fetch(
         self, url: str, *, timeout: float, headers: Mapping[str, str], max_bytes: int
@@ -197,7 +221,7 @@ class UrllibTransport:
             )
         request = urllib.request.Request(url, headers=dict(headers), method="GET")
         try:
-            with urllib.request.urlopen(request, timeout=timeout) as response:
+            with self._opener.open(request, timeout=timeout) as response:
                 body = response.read(max_bytes + 1)
                 if len(body) > max_bytes:
                     raise TransportError(
@@ -209,7 +233,8 @@ class UrllibTransport:
                     response.status, response.geturl(), body, _kept_headers(response.headers)
                 )
         except urllib.error.HTTPError as error:
-            # The error body is not read: status and headers are enough to decide on a retry.
+            # Includes unfollowed 3xx responses. The body is not read: status and headers are
+            # enough to decide on a retry or a redirect.
             with error:
                 return TransportResponse(error.code, url, b"", _kept_headers(error.headers))
         except TimeoutError:
@@ -282,7 +307,7 @@ class Throttle:
 
 
 class Fetcher:
-    """Retrieves pages with timeouts, bounded retries, and per-retailer throttling.
+    """Fetches with timeouts, bounded retries, per-retailer throttling, and checked redirects.
 
     Share one fetcher across adapters and requests so throttling state is shared.
     """
@@ -298,25 +323,33 @@ class Fetcher:
         self.clock = clock if clock is not None else SystemClock()
         self.throttle = Throttle(self.config, self.clock)
 
-    def fetch(self, request: ScrapeRequest) -> FetchedPage:
+    @property
+    def is_live(self) -> bool:
+        """True unless the transport explicitly declares ``live = False`` (fail closed)."""
+        return getattr(self.transport, "live", True) is not False
+
+    def fetch(
+        self, request: ScrapeRequest, allowed_hosts: frozenset[str] | None = None
+    ) -> FetchedPage:
+        """Fetch ``request.url``. Redirects are followed only to ``allowed_hosts``.
+
+        The default allows only the request's own host. A redirect elsewhere fails before the
+        redirected request is sent.
+        """
         config = self.config
+        hosts = allowed_hosts if allowed_hosts is not None else frozenset({url_host(request.url)})
         headers = {"User-Agent": config.user_agent, **config.extra_headers}
         log_fields = {"retailer": request.retailer_id, "url": redact_url(request.url)}
         for attempt in range(1, config.max_attempts + 1):
-            self.throttle.wait(request.retailer_id)
-            retrieved_at = self.clock.now().astimezone(UTC)
             retry_after: float | None = None
             try:
-                response = self.transport.fetch(
-                    request.url,
-                    timeout=config.timeout_seconds,
-                    headers=headers,
-                    max_bytes=config.max_response_bytes,
-                )
+                response, retrieved_at = self._send(request, hosts, headers, attempt, log_fields)
             except TransportError as error:
                 failure = FetchError(
                     error.code, error.message, retryable=error.retryable, attempts=attempt
                 )
+            except FetchError as failure_from_redirect:
+                failure = failure_from_redirect
             else:
                 status = response.status_code
                 if 200 <= status < 300:
@@ -369,6 +402,75 @@ class Fetcher:
             self.clock.sleep(delay)
         raise AssertionError("unreachable")  # pragma: no cover
 
+    def _send(
+        self,
+        request: ScrapeRequest,
+        hosts: frozenset[str],
+        headers: Mapping[str, str],
+        attempt: int,
+        log_fields: Mapping[str, str],
+    ) -> tuple[TransportResponse, datetime]:
+        """One attempt: GET, then follow allowed redirects, each hop throttled.
+
+        Returns the last response and the UTC time its request started. The response's
+        ``final_url`` is set to the URL that produced it.
+        """
+        url = request.url
+        for hop in range(self.config.max_redirects + 1):
+            self.throttle.wait(request.retailer_id)
+            started_at = self.clock.now().astimezone(UTC)
+            response = self.transport.fetch(
+                url,
+                timeout=self.config.timeout_seconds,
+                headers=headers,
+                max_bytes=self.config.max_response_bytes,
+            )
+            location = response.headers.get("location", "")
+            if response.status_code not in REDIRECT_STATUSES or not location:
+                return (
+                    TransportResponse(
+                        response.status_code,
+                        response.final_url or url,
+                        response.body,
+                        response.headers,
+                    ),
+                    started_at,
+                )
+            target = urljoin(url, location.strip())
+            if not is_http_url(target):
+                raise FetchError(
+                    "INVALID_REDIRECT",
+                    "Redirect target is not an absolute HTTP or HTTPS URL without credentials.",
+                    retryable=False,
+                    attempts=attempt,
+                    http_status=response.status_code,
+                )
+            if url_host(target) not in hosts:
+                raise FetchError(
+                    "REDIRECT_HOST_NOT_ALLOWED",
+                    "Redirect target host is not allowed; the redirect was not followed.",
+                    retryable=False,
+                    attempts=attempt,
+                    http_status=response.status_code,
+                )
+            _log(
+                logging.INFO,
+                "fetch redirected",
+                **log_fields,
+                stage=Stage.FETCH,
+                attempt=attempt,
+                http_status=response.status_code,
+                redirect_to=redact_url(target),
+                hop=hop + 1,
+            )
+            url = target
+        raise FetchError(
+            "TOO_MANY_REDIRECTS",
+            f"More than {self.config.max_redirects} redirects.",
+            retryable=False,
+            attempts=attempt,
+        )
+
 
 def _retry_after_seconds(value: str | None) -> float | None:
     """Integer-seconds ``Retry-After`` only; the HTTP-date form is ignored (normal backoff)."""
@@ -383,7 +485,9 @@ class ParsedOffer:
 
     ``price_text`` is parsed by the framework with ``parse_price``. ``offer_url`` may be relative
     to the page; blank means the offer is the page itself. Adapters map retailer wording to
-    ``availability`` and pass that wording as ``availability_evidence``.
+    ``availability`` and pass that wording as ``availability_evidence``. ``details`` is optional
+    retailer evidence (SKU, regular/sale price, raw specs, bundle flag); its text is normalized
+    and its prices are checked against ``price``.
     """
 
     raw_title: str
@@ -394,6 +498,7 @@ class ParsedOffer:
     raw_configuration_text: str = ""
     offer_url: str = ""
     decimal_separator: str = "."
+    details: OfferDetails | None = None
 
 
 class RetailerAdapter(Protocol):
@@ -402,6 +507,10 @@ class RetailerAdapter(Protocol):
     ``allowed_hosts`` lists exact host names; requests, redirects, and offer links to any
     other host are rejected. ``parse`` returns zero or more offers, or raises ``ParseError``
     when the page cannot be understood (for example after a layout change).
+
+    Optional ``live_use_approved: bool``: only an adapter that sets it to ``True``, after
+    documented project-owner authorization, may be used with a live transport. A missing
+    attribute counts as not approved.
     """
 
     retailer_id: str
@@ -469,7 +578,12 @@ def build_observation(
             content_type=page.content_type,
             adapter_version=adapter.adapter_version,
         ),
+        details=offer.details,
     )
+
+
+def live_use_approved(adapter: RetailerAdapter) -> bool:
+    return getattr(adapter, "live_use_approved", False) is True
 
 
 def scrape(
@@ -513,8 +627,16 @@ def scrape_one(adapter: RetailerAdapter, request: ScrapeRequest, fetcher: Fetche
             0,
             retryable=False,
         )
+    if fetcher.is_live and not live_use_approved(adapter):
+        return failed(
+            Stage.REQUEST,
+            "LIVE_USE_NOT_APPROVED",
+            "Adapter has no documented live-use approval; live requests are blocked.",
+            0,
+            retryable=False,
+        )
     try:
-        page = fetcher.fetch(request)
+        page = fetcher.fetch(request, allowed_hosts=_allowed_hosts(adapter))
     except FetchError as error:
         return failed(
             Stage.FETCH,
@@ -525,6 +647,7 @@ def scrape_one(adapter: RetailerAdapter, request: ScrapeRequest, fetcher: Fetche
             http_status=error.http_status,
         )
     if url_host(page.final_url) not in _allowed_hosts(adapter):
+        # Defense in depth for a transport that reports a different final URL.
         return failed(
             Stage.FETCH,
             "REDIRECT_HOST_NOT_ALLOWED",

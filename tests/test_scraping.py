@@ -2,18 +2,20 @@ from __future__ import annotations
 
 import hashlib
 import logging
-import socket
-from datetime import UTC, datetime, timedelta
+import urllib.request
+from datetime import timedelta
 from decimal import Decimal
 
 import pytest
 from example_adapter import EXAMPLE_HOST, EXAMPLE_URL, ExampleShopAdapter, fixture_bytes
+from scraping_fakes import START, FakeClock, FakeTransport, no_network  # noqa: F401
 
 from laptop_tracker.offers import Availability
 from laptop_tracker.scraping import (
     FetchConfig,
     FetchedPage,
     Fetcher,
+    FetchError,
     ParsedOffer,
     ScrapeRequest,
     Stage,
@@ -24,53 +26,8 @@ from laptop_tracker.scraping import (
     scrape,
 )
 
-START = datetime(2026, 9, 29, 4, 0, tzinfo=UTC)
 HTML = {"content-type": "text/html; charset=utf-8"}
-
-
-@pytest.fixture(autouse=True)
-def no_network(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Fail loudly if anything in these tests tries to open a real socket."""
-
-    def refuse(*args: object, **kwargs: object) -> None:
-        raise AssertionError("Scraping tests must not use the network.")
-
-    monkeypatch.setattr(socket.socket, "connect", refuse)
-    monkeypatch.setattr(socket, "create_connection", refuse)
-
-
-class FakeClock:
-    def __init__(self) -> None:
-        self.elapsed = 0.0
-        self.sleeps: list[float] = []
-
-    def now(self) -> datetime:
-        return START + timedelta(seconds=self.elapsed)
-
-    def monotonic(self) -> float:
-        return self.elapsed
-
-    def sleep(self, seconds: float) -> None:
-        self.sleeps.append(seconds)
-        self.elapsed += seconds
-
-
-class FakeTransport:
-    """Replays scripted responses or errors and records each call and its (fake) time."""
-
-    def __init__(self, clock: FakeClock, *script: TransportResponse | Exception) -> None:
-        self.clock = clock
-        self.script = list(script)
-        self.calls: list[dict[str, object]] = []
-
-    def fetch(self, url, *, timeout, headers, max_bytes) -> TransportResponse:
-        self.calls.append(
-            {"url": url, "timeout": timeout, "headers": dict(headers), "at": self.clock.elapsed}
-        )
-        item = self.script.pop(0)
-        if isinstance(item, Exception):
-            raise item
-        return item
+pytestmark = pytest.mark.usefixtures("no_network")
 
 
 def page(name: str, url: str = EXAMPLE_URL, headers: dict[str, str] = HTML) -> TransportResponse:
@@ -358,6 +315,8 @@ def test_urllib_transport_refuses_non_http_urls_without_connecting() -> None:
         {"min_request_interval_seconds": -1},
         {"retailer_min_intervals": {"example_shop": -1}},
         {"max_response_bytes": 0},
+        {"max_redirects": -1},
+        {"max_redirects": 11},
     ],
 )
 def test_fetch_config_rejects_unsafe_values(overrides: dict[str, object]) -> None:
@@ -385,3 +344,132 @@ def test_fetch_config_defaults_are_conservative() -> None:
 def test_scrape_request_validates_inputs(retailer_id: str, url: str) -> None:
     with pytest.raises(ValueError):
         ScrapeRequest(retailer_id, url)
+
+
+# Redirects (Phase 7 audit: a disallowed redirect must never be requested)
+
+
+def redirect(location: str, code: int = 302) -> TransportResponse:
+    return TransportResponse(code, EXAMPLE_URL, b"", {"location": location})
+
+
+def test_redirect_to_disallowed_host_is_stopped_before_it_is_sent() -> None:
+    result, transport, _ = run(redirect("https://elsewhere.example.test/laptops"))
+
+    assert [call["url"] for call in transport.calls] == [EXAMPLE_URL]
+    [failure] = result.failures
+    assert (failure.stage, failure.error_code, failure.retryable) == (
+        Stage.FETCH,
+        "REDIRECT_HOST_NOT_ALLOWED",
+        False,
+    )
+    assert failure.http_status == 302 and not result.observations
+
+
+def test_redirect_within_allowed_hosts_is_followed_and_throttled() -> None:
+    target = f"https://{EXAMPLE_HOST}/laptops-v2"
+    moved = page("example_listing.html", url=target)
+    result, transport, clock = run(redirect("/laptops-v2", code=301), moved)
+
+    assert result.ok
+    assert [call["url"] for call in transport.calls] == [EXAMPLE_URL, target]
+    assert [call["at"] for call in transport.calls] == [0.0, 10.0]
+    first = result.observations[0]
+    assert first.source.requested_url == EXAMPLE_URL and first.source.final_url == target
+    # Retrieval time is when the request that produced the page started (after throttling).
+    assert first.retrieved_at == START + timedelta(seconds=10)
+    assert clock.sleeps == [10.0]
+
+
+@pytest.mark.parametrize(
+    "location", ["ftp://shop.example.test/x", f"https://user:secret@{EXAMPLE_HOST}/"]
+)
+def test_invalid_redirect_targets_are_not_followed(location: str) -> None:
+    result, transport, _ = run(redirect(location))
+    assert len(transport.calls) == 1
+    assert result.failures[0].error_code == "INVALID_REDIRECT"
+
+
+def test_redirect_loops_are_bounded() -> None:
+    config = FetchConfig(max_redirects=2, min_request_interval_seconds=0)
+    loop = [redirect(EXAMPLE_URL) for _ in range(3)]
+    result, transport, _ = run(*loop, config=config)
+    assert len(transport.calls) == 3
+    assert result.failures[0].error_code == "TOO_MANY_REDIRECTS"
+
+
+def test_redirect_without_location_is_an_http_status_failure() -> None:
+    result, _, _ = run(TransportResponse(302, EXAMPLE_URL, b"", {}))
+    assert (result.failures[0].error_code, result.failures[0].http_status) == ("HTTP_STATUS", 302)
+
+
+def test_direct_fetch_defaults_to_same_host_redirects_only() -> None:
+    clock = FakeClock()
+    transport = FakeTransport(clock, redirect("https://elsewhere.example.test/"))
+    fetcher = Fetcher(transport, FetchConfig(), clock)
+    with pytest.raises(FetchError) as error:
+        fetcher.fetch(ScrapeRequest("example_shop", EXAMPLE_URL))
+    assert error.value.code == "REDIRECT_HOST_NOT_ALLOWED"
+    assert len(transport.calls) == 1
+
+
+def test_urllib_transport_does_not_follow_redirects_itself() -> None:
+    handlers = [
+        handler
+        for handler in UrllibTransport()._opener.handlers
+        if isinstance(handler, urllib.request.HTTPRedirectHandler)
+    ]
+    elsewhere = "https://elsewhere.example.test/"
+    assert handlers
+    for handler in handlers:
+        assert handler.redirect_request(None, None, 302, "Found", {}, elsewhere) is None
+    assert UrllibTransport.live is True
+
+
+# Live-use gate
+
+
+class ApprovedExampleAdapter(ExampleShopAdapter):
+    live_use_approved = True
+
+
+def test_live_transport_is_blocked_without_an_approved_data_use_review() -> None:
+    clock = FakeClock()
+    transport = FakeTransport(clock, page("example_listing.html"), live=True)
+    fetcher = Fetcher(transport, FetchConfig(), clock)
+    [result] = scrape(ExampleShopAdapter(), [ScrapeRequest("example_shop", EXAMPLE_URL)], fetcher)
+
+    assert transport.calls == []
+    assert (result.failures[0].stage, result.failures[0].error_code) == (
+        Stage.REQUEST,
+        "LIVE_USE_NOT_APPROVED",
+    )
+
+
+def test_live_transport_is_allowed_only_for_an_approved_adapter() -> None:
+    clock = FakeClock()
+    transport = FakeTransport(clock, page("example_listing.html"), live=True)
+    fetcher = Fetcher(transport, FetchConfig(), clock)
+    request = ScrapeRequest("example_shop", EXAMPLE_URL)
+    [result] = scrape(ApprovedExampleAdapter(), [request], fetcher)
+    assert result.ok and len(transport.calls) == 1
+
+
+def test_transports_without_a_live_flag_are_treated_as_live() -> None:
+    class Unmarked:
+        def fetch(self, url, *, timeout, headers, max_bytes):  # pragma: no cover
+            raise AssertionError("must not be called")
+
+    fetcher = Fetcher(Unmarked(), FetchConfig(), FakeClock())
+    assert fetcher.is_live
+    [result] = scrape(ExampleShopAdapter(), [ScrapeRequest("example_shop", EXAMPLE_URL)], fetcher)
+    assert result.failures[0].error_code == "LIVE_USE_NOT_APPROVED"
+
+
+def test_existing_records_are_unchanged_and_full_records_add_blank_details() -> None:
+    result, _, _ = run(page("example_listing.html"))
+    first = result.observations[0]
+    assert first.details is None
+    full = first.to_full_record()
+    assert list(full)[: len(first.to_record())] == list(first.to_record())
+    assert all(full[column] == "" for column in full if column not in first.to_record())

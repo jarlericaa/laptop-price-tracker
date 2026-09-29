@@ -8,6 +8,7 @@ Uses no network or Google access.
 
 from __future__ import annotations
 
+import json
 import re
 import unicodedata
 from dataclasses import dataclass
@@ -42,12 +43,36 @@ OBSERVATION_COLUMNS: tuple[str, ...] = (
     "adapter_version",
 )
 
+# Optional retailer-supplied details, appended after OBSERVATION_COLUMNS by to_full_record().
+OFFER_DETAIL_COLUMNS: tuple[str, ...] = (
+    "retailer_product_id",
+    "retailer_sku",
+    "brand",
+    "manufacturer_part_number",
+    "price_type",
+    "regular_price",
+    "regular_price_text",
+    "sale_price",
+    "sale_price_text",
+    "raw_specifications",
+    "raw_categories",
+    "bundle_flag",
+    "bundle_evidence",
+)
+
 
 class Availability(StrEnum):
     IN_STOCK = "IN_STOCK"
     OUT_OF_STOCK = "OUT_OF_STOCK"
     PREORDER = "PREORDER"
     UNKNOWN = "UNKNOWN"
+
+
+class PriceType(StrEnum):
+    """Which displayed price the observation's ``price`` is."""
+
+    REGULAR = "REGULAR"  # No sale shown; the regular price is the current price.
+    SALE = "SALE"  # A sale price is shown alongside a higher regular price.
 
 
 class ObservationValidationError(ValueError):
@@ -156,6 +181,114 @@ class RetrievalMetadata:
 
 
 @dataclass(frozen=True)
+class OfferDetails:
+    """Optional evidence an adapter can attach to an offer. Every field may be left empty.
+
+    Values are retailer text as shown; nothing here is a verified laptop specification or a
+    target match. Text is passed through ``clean_text`` on construction, and blank list entries
+    are dropped. ``bundle_flag`` is ``None`` when the adapter does not check for bundles.
+    """
+
+    retailer_product_id: str = ""
+    retailer_sku: str = ""
+    brand: str = ""
+    manufacturer_part_number: str = ""
+    price_type: PriceType | None = None
+    regular_price: Decimal | None = None
+    regular_price_text: str = ""
+    sale_price: Decimal | None = None
+    sale_price_text: str = ""
+    raw_specifications: tuple[tuple[str, str], ...] = ()
+    raw_categories: tuple[str, ...] = ()
+    bundle_flag: bool | None = None
+    bundle_evidence: tuple[str, ...] = ()
+
+    _TEXT_FIELDS = (
+        "retailer_product_id",
+        "retailer_sku",
+        "brand",
+        "manufacturer_part_number",
+        "regular_price_text",
+        "sale_price_text",
+    )
+
+    def __post_init__(self) -> None:
+        for name in self._TEXT_FIELDS:
+            value = getattr(self, name)
+            if not isinstance(value, str):
+                raise ObservationValidationError(name, "must be text")
+            object.__setattr__(self, name, clean_text(value))
+        if not _is_text_pairs(self.raw_specifications):
+            raise ObservationValidationError("raw_specifications", "must be (label, value) pairs")
+        pairs = ((clean_text(label), clean_text(value)) for label, value in self.raw_specifications)
+        object.__setattr__(self, "raw_specifications", tuple(p for p in pairs if p[0] or p[1]))
+        for name in ("raw_categories", "bundle_evidence"):
+            values = getattr(self, name)
+            if not isinstance(values, tuple) or not all(isinstance(v, str) for v in values):
+                raise ObservationValidationError(name, "must be a tuple of text")
+            cleaned = (clean_text(value) for value in values)
+            object.__setattr__(self, name, tuple(text for text in cleaned if text))
+        if self.price_type is not None and not isinstance(self.price_type, PriceType):
+            raise ObservationValidationError("price_type", "must be a PriceType value")
+        for name in ("regular_price", "sale_price"):
+            value = getattr(self, name)
+            if value is None:
+                continue
+            if not isinstance(value, Decimal) or not value.is_finite() or value <= 0:
+                raise ObservationValidationError(name, "must be a finite positive Decimal")
+            if not getattr(self, f"{name}_text"):
+                raise ObservationValidationError(f"{name}_text", "is required with the price")
+        if self.bundle_flag is not None and not isinstance(self.bundle_flag, bool):
+            raise ObservationValidationError("bundle_flag", "must be True, False, or None")
+        if self.bundle_evidence and self.bundle_flag is not True:
+            raise ObservationValidationError("bundle_evidence", "requires bundle_flag=True")
+        if self.bundle_flag is True and not self.bundle_evidence:
+            raise ObservationValidationError("bundle_evidence", "is required when flagged")
+
+    def check_against_price(self, price: Decimal) -> None:
+        """The detail prices must agree with the observation's current ``price``."""
+        if self.price_type is PriceType.SALE:
+            if self.sale_price != price:
+                raise ObservationValidationError("sale_price", "must equal price for a SALE")
+            if self.regular_price is None or self.regular_price <= price:
+                raise ObservationValidationError(
+                    "regular_price", "must be above the sale price for a SALE"
+                )
+        elif self.price_type is PriceType.REGULAR:
+            if self.sale_price is not None:
+                raise ObservationValidationError("sale_price", "must be empty for REGULAR")
+            if self.regular_price not in (None, price):
+                raise ObservationValidationError("regular_price", "must equal price for REGULAR")
+        elif self.sale_price is not None:
+            raise ObservationValidationError("price_type", "is required with a sale_price")
+
+    def to_record(self) -> dict[str, str]:
+        """Flat string record in ``OFFER_DETAIL_COLUMNS`` order; lists are compact JSON."""
+        values = {
+            **{name: getattr(self, name) for name in self._TEXT_FIELDS},
+            "price_type": "" if self.price_type is None else self.price_type.value,
+            "regular_price": "" if self.regular_price is None else str(self.regular_price),
+            "sale_price": "" if self.sale_price is None else str(self.sale_price),
+            "raw_specifications": _json_list([list(pair) for pair in self.raw_specifications]),
+            "raw_categories": _json_list(list(self.raw_categories)),
+            "bundle_flag": {None: "", True: "TRUE", False: "FALSE"}[self.bundle_flag],
+            "bundle_evidence": _json_list(list(self.bundle_evidence)),
+        }
+        return {column: values[column] for column in OFFER_DETAIL_COLUMNS}
+
+
+def _is_text_pairs(value: object) -> bool:
+    return isinstance(value, tuple) and all(
+        isinstance(pair, tuple) and len(pair) == 2 and all(isinstance(part, str) for part in pair)
+        for pair in value
+    )
+
+
+def _json_list(values: list[object]) -> str:
+    return json.dumps(values, ensure_ascii=False, separators=(",", ":")) if values else ""
+
+
+@dataclass(frozen=True)
 class OfferObservation:
     """One attributable, normalized retailer offer. Construction validates every invariant."""
 
@@ -171,6 +304,7 @@ class OfferObservation:
     availability_evidence: str
     offer_index: int
     source: RetrievalMetadata
+    details: OfferDetails | None = None
 
     def __post_init__(self) -> None:
         if not re.fullmatch(RETAILER_ID_PATTERN, self.retailer_id):
@@ -218,6 +352,10 @@ class OfferObservation:
             raise ObservationValidationError("content_sha256", "must be a SHA-256 hex digest")
         if not self.source.adapter_version:
             raise ObservationValidationError("adapter_version", "is required")
+        if self.details is not None:
+            if not isinstance(self.details, OfferDetails):
+                raise ObservationValidationError("details", "must be OfferDetails or None")
+            self.details.check_against_price(self.price)
 
     def to_record(self) -> dict[str, str]:
         """Flat string record in ``OBSERVATION_COLUMNS`` order; identical input, identical output.
@@ -247,3 +385,12 @@ class OfferObservation:
             "adapter_version": self.source.adapter_version,
         }
         return {column: values[column] for column in OBSERVATION_COLUMNS}
+
+    def to_full_record(self) -> dict[str, str]:
+        """``to_record()`` followed by ``OFFER_DETAIL_COLUMNS``; blank when details are absent."""
+        details = (
+            self.details.to_record()
+            if self.details is not None
+            else dict.fromkeys(OFFER_DETAIL_COLUMNS, "")
+        )
+        return self.to_record() | details
