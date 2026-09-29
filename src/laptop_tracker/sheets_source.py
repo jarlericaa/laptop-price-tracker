@@ -1,4 +1,4 @@
-"""Read-only Google Sheets source access for the Shopee `raw` worksheet."""
+"""Read-only Google Sheets source access for `raw` and the Phase 5 target tables."""
 
 from __future__ import annotations
 
@@ -12,6 +12,9 @@ from .config import Settings
 
 READ_ONLY_SCOPES = ["https://www.googleapis.com/auth/spreadsheets.readonly"]
 READ_WRITE_SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
+
+# Master copies of the Phase 5 tables; local CSV exports are validation snapshots.
+TARGET_TABLE_TABS = ("TARGET_MASTER", "SOURCE_MODEL_MAP", "MATCH_REVIEW")
 
 
 class SheetsSourceError(RuntimeError):
@@ -73,3 +76,27 @@ def read_raw_values(settings: Settings) -> tuple[str, str, Sequence[Sequence[str
     except gspread.exceptions.APIError as exc:
         raise SheetsSourceError("Unable to read the raw worksheet values.") from exc
     return spreadsheet.title, worksheet.title, values
+
+
+def read_target_table_values(
+    settings: Settings, tab_names: Sequence[str] = TARGET_TABLE_TABS
+) -> dict[str, list[list[str]] | None]:
+    """Read the named tabs with the read-only scope; a missing tab maps to ``None``.
+
+    Missing tabs are reported, never created. Only ``get_all_values`` is called.
+    """
+    client = connect(settings, read_only=True)
+    spreadsheet = open_spreadsheet(client, settings.spreadsheet_id or "")
+    tables: dict[str, list[list[str]] | None] = {}
+    for name in tab_names:
+        try:
+            worksheet = spreadsheet.worksheet(name)
+        except gspread.exceptions.WorksheetNotFound:
+            tables[name] = None
+            continue
+        try:
+            values = worksheet.get_all_values()
+        except gspread.exceptions.APIError as exc:
+            raise SheetsSourceError(f"Unable to read the {name} worksheet values.") from exc
+        tables[name] = [["" if cell is None else str(cell) for cell in row] for row in values]
+    return tables

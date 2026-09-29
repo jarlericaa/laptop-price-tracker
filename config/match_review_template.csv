@@ -1,0 +1,1 @@
+review_id,status,source_model_id,candidate_name,brand,manufacturer_model_code,cpu,gpu,ram_gb,storage_gb,storage_type,storage_layout,display_size_in,display_resolution,refresh_rate_hz,os_edition,source_url,review_reason,prepared_by,reviewer,reviewed_at,notes
