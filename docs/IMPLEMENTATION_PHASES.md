@@ -15,7 +15,7 @@ The Python implementation and CLI are named “Phase 1” (`run_phase1.py` and `
 | 4. Read raw and generate Top 100 | COMPLETE | The 2026-09-28 read-only run completed in 57.49 seconds and generated 100 targets after 21 historical keys were explicitly excluded. The user accepted the current CSV reports on 2026-09-29; no production Sheets write was made. |
 | 5. Build and validate `TARGET_MASTER` | PARTIALLY_COMPLETE | The user later reported all three tabs created with verified headers and no data rows. The local `TARGET_MASTER` and `MATCH_REVIEW` templates have since been revised to the new 1:1 identity key and still need to be reflected in the Sheet. Validators exist for all three tables, with a read-only reader and Top 100 candidate seeder. No real configurations or mappings have been entered, and no approver is named. |
 | 6. Build shared scraping framework | COMPLETE | The retailer-neutral framework (`offers.py`, `scraping.py`) and an offline example-adapter harness were added on 2026-09-29. 203 tests, Ruff, and `compileall` passed. No live request was made. The framework does not read Sheets or match offers to targets. |
-| 7. Implement retailer adapters | PARTIALLY_COMPLETE | The pilot Laptop Factory (LF) adapter is implemented and tested offline (2026-09-29). Project-owner policy authorizes internal collection, and the adapter has `live_use_approved = True`; retailer permission itself remains unverified. No live scraper request has been made. A controlled spot check, named adapter maintainer, and other retailer adapters remain. The framework checks redirect hosts before sending. 273 tests passed before the owner-policy change. |
+| 7. Implement retailer adapters | PARTIALLY_COMPLETE | The pilot Laptop Factory (LF) adapter is implemented and tested offline (2026-09-29). Project-owner policy authorizes internal collection, and the adapter has `live_use_approved = True`; retailer permission itself remains unverified. No live scraper request has been made. A controlled spot check, named adapter maintainer, and other retailer adapters remain. The framework checks redirect hosts before sending. 273 tests passed before the owner-policy change. The DataBlitz (DBZ) adapter was added and tested offline on 2026-10-01 under the same owner policy (external-policy finding UNKNOWN); 342 tests passed. PCX, PCC, and OCT remain. |
 | 8. Normalize and perform exact matching | NOT_STARTED | No offer normalization or exact configuration matcher exists. |
 | 9. Generate comparisons and price history | NOT_STARTED | No comparison or history outputs exist. |
 | 10. Test and run a controlled pilot | BLOCKED | Requires accepted Phase 4 outputs, approved and populated `TARGET_MASTER` configurations, and adapters first. |
@@ -129,10 +129,15 @@ The Python implementation and CLI are named “Phase 1” (`run_phase1.py` and `
     - **Adapter:** [`adapters/laptop_factory.py`](adapters/LAPTOP_FACTORY.md) parses one fetched product page. It prefers JSON-LD and falls back to visible content and the Tech Specs table. It separates sale and regular prices and fails on unclear prices. It combines stock wording, JSON-LD availability, and Add to Cart state, and gives `UNKNOWN` on conflict. It flags bundles with evidence without dropping them, and preserves raw specs without inferring refresh rate or other values.
     - **Framework:** optional `OfferDetails` (backward-compatible; `to_record()` unchanged). Redirects are followed by the `Fetcher` only after the target host is checked; `urllib` previously followed them first. A fail-closed live-use gate.
     - **Tests:** minimal fixtures and 70 new offline tests, 273 in total. Ruff (changed files) and `compileall` passed.
+  - **Done (DataBlitz, 2026-10-01):**
+    - **Host:** `ecommerce.datablitz.com.ph`, confirmed because `datablitz.com.ph` and `www.datablitz.com.ph` redirect there. Only that exact host is allowlisted.
+    - **Data-use review:** recorded in [RETAILER_DATA_USE_REVIEW.md](RETAILER_DATA_USE_REVIEW.md). External-policy finding UNKNOWN. robots.txt (Shopify-generated) allows product pages. The storefront's Shopify terms and privacy policy pages return 404, and no other terms page was found. Project status OWNER_APPROVED under the same owner policy; this does not verify retailer permission.
+    - **Adapter:** [`adapters/datablitz.py`](adapters/DATABLITZ.md) parses one fetched Shopify product page. It prefers JSON-LD and falls back to visible content and ignores the quick-buy `<template>` copy. It separates sale and compare-at prices, requires peso evidence, and fails on unclear prices. It combines JSON-LD availability with the add-to-cart button and gives `UNKNOWN` without an explicit signal or on conflict. It flags bundle wording with evidence and keeps raw description specs.
+    - **Tests:** four minimal fixtures and 69 new offline tests, 342 in total. Ruff passed on the changed Python files. No framework change was needed.
   - **Not done:**
-    - Controlled manual spot check with the live scraper has not been run.
-    - A named adapter maintainer.
-    - Adapters for DBZ, PCX, PCC, and OCT.
+    - Controlled manual spot check with the live scraper has not been run for Laptop Factory (beyond the user-reported smoke test) or DataBlitz.
+    - A named adapter maintainer for each adapter.
+    - Adapters for PCX, PCC, and OCT.
     - Search or category discovery, which is out of scope for the product-page adapter.
 
 ### Phase 8 — Normalize and perform exact matching

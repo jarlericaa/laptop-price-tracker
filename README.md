@@ -3,11 +3,11 @@
 This project processes Shopee Electronics data from Google Sheets and produces a ranked list
 of laptop models for future retailer price tracking. The current Python pipeline reads the
 `raw` worksheet, validates and classifies data, detects M-1 and MTD, and generates local ranking
-and review files. A shared, retailer-neutral scraping framework (overall Phase 6) and one
-offline-tested retailer adapter, Laptop Factory (Phase 7), are implemented. Live use is enabled
-under the project-owner policy; retailer permission remains unverified, and no live scraper
-request has been made. Exact configuration matching, price comparison, and GitHub Actions
-automation are planned; they are not implemented.
+and review files. A shared, retailer-neutral scraping framework (overall Phase 6) and two
+offline-tested retailer adapters, Laptop Factory and DataBlitz (Phase 7), are implemented. Live
+use is enabled under the project-owner policy; retailer permission remains unverified, and no
+live scraper request has been made. Exact configuration matching, price comparison, and GitHub
+Actions automation are planned; they are not implemented.
 
 The latest read-only live dry run completed in 57.49 seconds and generated 100 targets. The
 21 historical conflicting keys had fingerprint-matched `EXCLUDE_KEY` decisions; their source
@@ -42,6 +42,9 @@ Laptop Factory product pages offline, tested against minimal local fixtures. Pro
 policy enables its live-use flag; external retailer permission remains unverified. No project
 scraper request has been made to the retailer. See
 [docs/adapters/LAPTOP_FACTORY.md](docs/adapters/LAPTOP_FACTORY.md).
+`src/laptop_tracker/adapters/datablitz.py` (DBZ, added 2026-10-01) does the same for DataBlitz
+product pages on `ecommerce.datablitz.com.ph`, under the same owner policy. No project scraper
+request has been made to DataBlitz. See [docs/adapters/DATABLITZ.md](docs/adapters/DATABLITZ.md).
 
 The script is named `run_phase1.py` for historical reasons. Its raw-data and Top 100 work maps
 mainly to **overall Phase 4** in the revised plan. Google access is overall Phase 1.
@@ -135,6 +138,7 @@ The latest live dry run took 57.49 seconds and did not write to any Google Sheet
 - [Shared scraping framework (Phase 6)](docs/SCRAPING_FRAMEWORK.md)
 - [Retailer data-use review](docs/RETAILER_DATA_USE_REVIEW.md)
 - [Laptop Factory adapter (Phase 7)](docs/adapters/LAPTOP_FACTORY.md)
+- [DataBlitz adapter (Phase 7)](docs/adapters/DATABLITZ.md)
 
 ## Local verification
 

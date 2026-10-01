@@ -5,7 +5,7 @@
 - a fail-closed [live-use gate](#live-use-gate)
 - optional [offer details](#optional-offer-details)
 
-The first adapter is [Laptop Factory](adapters/LAPTOP_FACTORY.md). Its external-policy finding is UNKNOWN, but project-owner policy authorizes internal collection and its live-use flag is enabled. **No live scrape request has been made.** Nothing in the framework reads or writes Google Sheets, reads `TARGET_MASTER`, assigns a `target_id`, or matches offers to configurations (Phase 8).
+The first adapter is [Laptop Factory](adapters/LAPTOP_FACTORY.md). Its external-policy finding is UNKNOWN, but project-owner policy authorizes internal collection and its live-use flag is enabled. **No live scrape request has been made.** The second adapter, [DataBlitz](adapters/DATABLITZ.md) (2026-10-01), uses the same contract and owner policy with no framework change; its external-policy finding is also UNKNOWN. Nothing in the framework reads or writes Google Sheets, reads `TARGET_MASTER`, assigns a `target_id`, or matches offers to configurations (Phase 8).
 
 ## Modules
 
@@ -13,7 +13,7 @@ The first adapter is [Laptop Factory](adapters/LAPTOP_FACTORY.md). Its external-
 |---|---|
 | `src/laptop_tracker/offers.py` | `OfferObservation` model, optional `OfferDetails`, `RetrievalMetadata`, `Availability`, `PriceType`, and deterministic helpers: `parse_price`, `clean_text`, `redact_url`, `is_http_url`. |
 | `src/laptop_tracker/scraping.py` | Adapter contract (`RetailerAdapter`, `ParsedOffer`), `ScrapeRequest`, `Fetcher` (timeouts, retries, throttling, checked redirects), injectable `Transport` and `Clock`, the live-use gate, the `scrape()` runner, error types, and structured logging. |
-| `src/laptop_tracker/adapters/` | Retailer adapters (Phase 7). Currently only `laptop_factory.py`. |
+| `src/laptop_tracker/adapters/` | Retailer adapters (Phase 7): `laptop_factory.py` and `datablitz.py`. |
 | `tests/example_adapter.py` | Offline example adapter for synthetic fixtures. It demonstrates the contract; it is not a retailer integration. |
 | `tests/scraping_fakes.py` | Shared fake transport, fake clock, and no-network guard. |
 | `tests/scraping_fixtures/` | Synthetic pages on the reserved `shop.example.test` host, plus minimal retailer fixtures in per-retailer folders. |
@@ -167,8 +167,8 @@ The tests use a fake transport and a fake clock, so no real time passes. A no-ne
 ## Left for later phases
 
 - **Phase 7 (remaining):**
-  - Run a controlled manual spot check for Laptop Factory under the current owner policy.
-  - Add further retailers (DBZ, PCX, PCC, OCT), each with its own host allowlist, adapter, fixtures, and maintenance owner. The project-wide owner policy is recorded in [DECISIONS.md](DECISIONS.md).
+  - Run a controlled manual spot check for Laptop Factory and DataBlitz under the current owner policy.
+  - Add further retailers (PCX, PCC, OCT), each with its own host allowlist, adapter, fixtures, and maintenance owner. DataBlitz (DBZ) was added on 2026-10-01. The project-wide owner policy is recorded in [DECISIONS.md](DECISIONS.md).
   - Confirm or tune the retrieval defaults per retailer.
   - Decide whether `UrllibTransport` is sufficient or whether browser automation is needed and approved. No browser automation exists.
 - **Phase 7 or 8:** Decide how scrape requests are built, for example from `TARGET_MASTER` search terms or retailer URLs, without assuming the table is populated.
