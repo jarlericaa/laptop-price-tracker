@@ -1,12 +1,12 @@
 # Retailer Data-Use Review
 
-One entry per retailer. **CLEAR** means the retailer's own sources or written permission support the intended collection, with project-owner approval recorded in [DECISIONS.md](DECISIONS.md). **OWNER_APPROVED** records an explicit project-owner decision to proceed under the internal-tool assumption, while retailer permission remains unverified. **UNKNOWN** means neither external support nor a project-owner authorization has been recorded. The framework enforces the adapter-level approval with `live_use_approved`; see [SCRAPING_FRAMEWORK.md](SCRAPING_FRAMEWORK.md#live-use-gate).
+One entry per retailer. **CLEAR** means the retailer's own sources or written permission support the intended collection, with project-owner approval recorded in [DECISIONS.md](DECISIONS.md). **OWNER_APPROVED** records an explicit project-owner decision to proceed with internal collection; the retailer's external-policy finding is recorded separately and may still be RESTRICTED. **UNKNOWN** means neither external support nor a project-owner authorization has been recorded. The framework enforces the adapter-level project approval with `live_use_approved`; see [SCRAPING_FRAMEWORK.md](SCRAPING_FRAMEWORK.md#live-use-gate).
 
 | Result | Meaning |
 |---|---|
 | CLEAR | Official sources permit the intended automated collection, or the retailer granted written permission, and the owner approved it. |
-| RESTRICTED | Official sources prohibit or limit the intended collection. Live use stays blocked unless permission is obtained. |
-| OWNER_APPROVED | The project owner authorized internal collection under an explicit assumption, but retailer permission has not been verified. Live use is enabled by that project decision. |
+| RESTRICTED | Official sources prohibit or limit the intended collection. Live use defaults to blocked unless permission or an applicable explicit owner decision is recorded; an owner decision does not change the external finding. The 2026-10-01 project-wide owner decision covers retailer adapters in this internal tool. |
+| OWNER_APPROVED | The project owner authorized internal collection under an explicit assumption. Retailer permission may be unverified or restricted; live use is enabled by the project decision. |
 | UNKNOWN | Official sources are silent or unclear, and no project-owner authorization to proceed has been recorded. Live use stays blocked. |
 
 ## Laptop Factory (LF): `laptopfactory.com.ph`
@@ -81,3 +81,40 @@ The questions above remain useful if the project later seeks retailer confirmati
 6. Who owns ongoing maintenance of the adapter? No adapter maintainer is named.
 
 These questions do not block current internal use under the owner decision. Do not describe this `OWNER_APPROVED` entry as `CLEAR` unless the external-policy evidence changes.
+
+## PC Express (PCX): `pcx.com.ph`
+
+- **External policy finding: RESTRICTED.** The PC Express terms of service, published on the storefront, say: "You must not conduct any systematic or automated data collection activities (including without limitation scraping, data mining, data extraction, and data harvesting) on or in relation to this website without PC Express' express written consent." No written consent has been recorded.
+- **Project status: OWNER_APPROVED. Live use is enabled.** `PCXAdapter.live_use_approved = True` and `DATA_USE_REVIEW_STATUS = "OWNER_APPROVED"`. After reviewing the PC Express terms, the project owner explicitly directed live use for this internal tool on 2026-10-01; see [DECISIONS.md](DECISIONS.md). This is a project authorization despite the published restriction. It is not PC Express consent, and the external-policy finding remains RESTRICTED. A later user-reported live check returned one in-stock Acer Aspire Lite offer; see [PROGRESS_LOG.md](PROGRESS_LOG.md#pcx-live-smoke-check-2026-10-01).
+- **Host:** `pcx.com.ph`, the Shopify storefront ("PC Express" in the title, `og:site_name`, and footer). `www.pcx.com.ph` redirects to it (HTTP 301). Only the apex host is allowlisted.
+- **Date checked:** 2026-10-01.
+- **Method:** single manual GETs by Claude during implementation, at least 10 seconds apart. They used a descriptive user agent, no cookies, no login, and no redirect following. Seven requests in total:
+  - the apex and `www` home pages, once each;
+  - robots.txt;
+  - the terms of service and privacy policy;
+  - two product pages linked from the home page.
+
+  No collection, search, pagination, cart, or checkout URL was requested, and the project scraper was not run. The two product pages were requested to design the parser, before the terms page was read in full.
+
+| Source | URL | Evidence |
+|---|---|---|
+| Apex and `www` domains | https://pcx.com.ph/, https://www.pcx.com.ph/ | The apex returned HTTP 200 with the PC Express storefront. `www` returned HTTP 301 to `https://pcx.com.ph/`. |
+| robots.txt | https://pcx.com.ph/robots.txt | Shopify's generated file. For `User-agent: *` it has `Allow: /`. It disallows admin, cart, checkout, orders, account, `/services`, `/sf_*`, `/cart.js`, `/recommendations/products`, and collection sort and filter crawl traps. It does not disallow `/products/` and has no `Crawl-delay`. Its comments, written by the platform, say checkout must not be completed automatically and that agents should use Shopify's UCP/MCP endpoints for catalog, cart, and checkout. They link the **Shopify** Terms of Service and `bots@shopify.com`. Sitemap: `https://pcx.com.ph/sitemap.xml`. |
+| Terms of service | https://pcx.com.ph/policies/terms-of-service | HTTP 200. The terms govern use of the website. Its acceptable-use section prohibits systematic or automated data collection, "including without limitation scraping, data mining, data extraction, and data harvesting", without PC Express' express written consent. It also prohibits republishing, reproducing, or commercially exploiting site material, and using the site for marketing purposes without written consent. It says purchases on the site are for retail and personal use only. Philippine law and courts govern. |
+| Privacy policy | https://pcx.com.ph/policies/privacy-policy | HTTP 200. It covers customers' personal data. It does not address automated collection of public product data. |
+| Product pages | https://pcx.com.ph/products/hp-14-ep1144tu-c4fw3pa-intel-core-5-laptop-natural-silver and https://pcx.com.ph/products/asus-16-zenscreen-mb169ck-portable-usb-monitor-full-hd | Both returned HTTP 200 with no redirect. Public pages with no login. Used only to design minimal, sanitized fixtures; no page copy was kept in the repository. |
+
+**Findings**
+
+- The retailer's own terms expressly prohibit automated scraping and data extraction without written consent. That is a prohibition, not silence, so the finding is RESTRICTED, not UNKNOWN.
+- robots.txt does not exclude product pages, but robots.txt is crawler etiquette and does not override the published terms.
+- There is no published rate guidance.
+
+**Open questions for the owner**
+
+1. Will the project request written consent from PC Express for low-volume internal price collection? The contact page is linked from the storefront footer.
+2. Should collection use the platform's suggested UCP/MCP catalog interface? That interface is still subject to the retailer's terms and would need a separate review and adapter.
+3. What request rate and schedule are appropriate? The framework default is at least 10 seconds between requests per retailer.
+4. Who owns ongoing maintenance of the adapter? No adapter maintainer is named.
+
+The owner's PCX decision enables the project adapter while the external finding remains RESTRICTED. Do not describe the retailer's terms as permitting collection or mark this entry CLEAR without new evidence.

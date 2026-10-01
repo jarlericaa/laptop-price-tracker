@@ -25,7 +25,7 @@ flowchart LR
     TM -. validated rows only; integration planned .-> X[future retailer adapters, exact matching, comparison]
 ```
 
-The current and planned portions are different deliverables. The shared scraping framework (overall Phase 6) and two retailer adapters, Laptop Factory and DataBlitz (Phase 7), are implemented and tested offline. The adapters are enabled for live use under the project-owner policy; retailer permission remains unverified, and no scraper request has been made. They are not connected to the pipeline above. Exact configuration matching, price history, and GitHub Actions are not implemented.
+The current and planned portions are different deliverables. The shared scraping framework (overall Phase 6) and three retailer adapters, Laptop Factory, DataBlitz, and PC Express (Phase 7), are implemented and tested offline. All three are enabled for live use under project-owner decisions. Laptop Factory and DataBlitz each have one user-reported live check; a user-reported PC Express check returned one in-stock Acer offer, with offer-URL formatting still to verify. PC Express's external-policy finding remains RESTRICTED under the retailer's terms. They are not connected to the pipeline above. Exact configuration matching, price history, and GitHub Actions are not implemented.
 
 ## Repository structure
 
@@ -45,7 +45,8 @@ The current and planned portions are different deliverables. The shared scraping
 ├── src/laptop_tracker/
 │   ├── adapters/
 │   │   ├── datablitz.py              # DataBlitz (DBZ) product-page adapter (Phase 7, offline)
-│   │   └── laptop_factory.py         # Laptop Factory (LF) product-page adapter (Phase 7, offline)
+│   │   ├── laptop_factory.py         # Laptop Factory (LF) product-page adapter (Phase 7, offline)
+│   │   └── pcx.py                    # PC Express (PCX) product-page adapter (Phase 7, live use enabled)
 │   ├── config.py
 │   ├── data_quality.py
 │   ├── eligibility.py
@@ -62,7 +63,7 @@ The current and planned portions are different deliverables. The shared scraping
 ├── tests/
 │   ├── example_adapter.py            # Offline example adapter (not a retailer integration)
 │   ├── scraping_fakes.py             # Shared fake transport/clock and no-network guard
-│   └── scraping_fixtures/            # Synthetic pages; laptop_factory/ and datablitz/ hold minimal retailer fixtures
+│   └── scraping_fixtures/            # Synthetic pages; laptop_factory/, datablitz/, and pcx/ hold minimal retailer fixtures
 ├── check_target_master.py            # Local TARGET_MASTER CSV check (overall Phase 5)
 ├── check_target_tables.py            # Three-table CSV or read-only sheet check (overall Phase 5)
 ├── seed_match_review.py              # Top 100 -> local MATCH_REVIEW candidates (overall Phase 5)
@@ -98,6 +99,7 @@ The current and planned portions are different deliverables. The shared scraping
 | `scraping.py` | Shared adapter contract (`RetailerAdapter`, `ParsedOffer`), `Fetcher` with timeouts, bounded retries, per-retailer throttling, and redirects checked before they are sent. Injectable `Transport`/`Clock`, a fail-closed live-use gate, the `scrape()` runner, stage-specific failures, and redacted logging. The default transport is the standard-library `urllib`, with redirects disabled. See [SCRAPING_FRAMEWORK.md](SCRAPING_FRAMEWORK.md). |
 | `adapters/laptop_factory.py` | Laptop Factory product-page parser. It prefers JSON-LD and falls back to visible content, gives sale versus regular price, combines stock evidence, flags bundles, and keeps raw Tech Specs. It makes no HTTP calls itself. `live_use_approved = True` under the project-owner policy; retailer permission remains unverified. See [adapters/LAPTOP_FACTORY.md](adapters/LAPTOP_FACTORY.md) and [RETAILER_DATA_USE_REVIEW.md](RETAILER_DATA_USE_REVIEW.md). |
 | `adapters/datablitz.py` | DataBlitz Shopify product-page parser for `ecommerce.datablitz.com.ph`. It prefers JSON-LD and falls back to visible content, separates sale and compare-at prices, combines JSON-LD availability with the add-to-cart button, flags bundle wording, and keeps raw description specs. It ignores the quick-buy `<template>` copy and makes no HTTP calls itself. `live_use_approved = True` under the project-owner policy; retailer permission remains unverified. See [adapters/DATABLITZ.md](adapters/DATABLITZ.md). |
+| `adapters/pcx.py` | PC Express Shopify (Kalles theme) product-page parser for `pcx.com.ph`. It reads the visible main block and reconciles the page's two Product JSON-LD blocks, failing when they disagree. It separates `<del>`/`<ins>` prices, combines JSON-LD availability with the add-to-cart and notify-me buttons, fails on variant markup, flags bundle wording, and keeps raw specs. It makes no HTTP calls itself. `live_use_approved = True` under an explicit project-owner decision; the retailer's published restriction remains recorded as RESTRICTED. See [adapters/PCX.md](adapters/PCX.md). |
 
 Validation runs on local CSV exports or on read-only sheet reads; nothing writes the three Phase 5 tabs. The current `TARGET_MASTER` identity key is documented in [TARGET_MASTER_SCHEMA.md](TARGET_MASTER_SCHEMA.md) and aligned with the requested downstream fields in [PRICE_TRACKING_OUTPUT_SCHEMA.md](PRICE_TRACKING_OUTPUT_SCHEMA.md). Header templates for `TARGET_MASTER`, `SOURCE_MODEL_MAP`, and `MATCH_REVIEW` live under `config/`. No downstream consumer, retailer adapter, exact matcher, comparison-history, or approval-workflow module exists. The Phase 6 scraping framework does not read these tables. Promotion from review to master is a manual, human-approved step.
 
@@ -146,7 +148,7 @@ There is no workflow in the repository today. Once the controlled pilot passes, 
 
 ## Retailer adapter boundary
 
-The shared framework (overall Phase 6) exists. Two retailer adapters (Phase 7, Laptop Factory and DataBlitz) exist and are enabled for live use under project-owner policy. No live request has been made. The boundary is:
+The shared framework (overall Phase 6) exists. Three retailer adapters (Phase 7) exist and are enabled for live use under project-owner decisions. Laptop Factory and DataBlitz each have one user-reported live check. PC Express has made no live request; its external-policy finding remains RESTRICTED. The boundary is:
 
 1. *(Planned)* Read only validated laptop configurations from `TARGET_MASTER`, meaning rows that pass `validate_target_master` under the approved schema, and only `SOURCE_MODEL_MAP` links that pass `validate_source_model_map`. `read_target_table_values()` provides the read-only input. How scrape requests are derived from targets is not yet defined, and the framework does not assume `TARGET_MASTER` is populated.
 2. *(Implemented)* `scrape()` takes a `ScrapeRequest` (retailer ID and URL) and fetches through the shared `Fetcher`. The adapter parses the page into `ParsedOffer` values. Nothing changes any sheet.

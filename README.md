@@ -3,10 +3,11 @@
 This project processes Shopee Electronics data from Google Sheets and produces a ranked list
 of laptop models for future retailer price tracking. The current Python pipeline reads the
 `raw` worksheet, validates and classifies data, detects M-1 and MTD, and generates local ranking
-and review files. A shared, retailer-neutral scraping framework (overall Phase 6) and two
-offline-tested retailer adapters, Laptop Factory and DataBlitz (Phase 7), are implemented. Live
-use is enabled under the project-owner policy; retailer permission remains unverified, and no
-live scraper request has been made. Exact configuration matching, price comparison, and GitHub
+and review files. A shared, retailer-neutral scraping framework (overall Phase 6) and three
+offline-tested retailer adapters, Laptop Factory, DataBlitz, and PC Express (Phase 7), are
+implemented and enabled for live use under project-owner decisions. Laptop Factory and DataBlitz
+each have one user-reported live check. PC Express has no live check, and its external-policy
+finding remains RESTRICTED under the retailer's terms. Exact configuration matching, price comparison, and GitHub
 Actions automation are planned; they are not implemented.
 
 The latest read-only live dry run completed in 57.49 seconds and generated 100 targets. The
@@ -39,12 +40,17 @@ under `tests/` exercises them with synthetic fixtures. See
 
 Phase 7 is PARTIALLY_COMPLETE. `src/laptop_tracker/adapters/laptop_factory.py` parses fetched
 Laptop Factory product pages offline, tested against minimal local fixtures. Project-owner
-policy enables its live-use flag; external retailer permission remains unverified. No project
-scraper request has been made to the retailer. See
+policy enables its live-use flag; external retailer permission remains unverified. One
+user-reported live smoke test still needs a bare-URL recheck. See
 [docs/adapters/LAPTOP_FACTORY.md](docs/adapters/LAPTOP_FACTORY.md).
 `src/laptop_tracker/adapters/datablitz.py` (DBZ, added 2026-10-01) does the same for DataBlitz
-product pages on `ecommerce.datablitz.com.ph`, under the same owner policy. No project scraper
-request has been made to DataBlitz. See [docs/adapters/DATABLITZ.md](docs/adapters/DATABLITZ.md).
+product pages on `ecommerce.datablitz.com.ph`, under the same owner policy. A user-reported live
+spot check returned one offer. See [docs/adapters/DATABLITZ.md](docs/adapters/DATABLITZ.md).
+`src/laptop_tracker/adapters/pcx.py` (PCX, added 2026-10-01) parses PC Express product pages on
+`pcx.com.ph`. Its live use is enabled by an explicit project-owner decision for this internal
+tool. A user-reported live check returned one in-stock Acer offer; the offer URL appeared as a
+Markdown link in the report, so its exact string still needs `repr()` confirmation. The retailer's
+terms remain an external finding of RESTRICTED. See [docs/adapters/PCX.md](docs/adapters/PCX.md).
 
 The script is named `run_phase1.py` for historical reasons. Its raw-data and Top 100 work maps
 mainly to **overall Phase 4** in the revised plan. Google access is overall Phase 1.
@@ -139,6 +145,7 @@ The latest live dry run took 57.49 seconds and did not write to any Google Sheet
 - [Retailer data-use review](docs/RETAILER_DATA_USE_REVIEW.md)
 - [Laptop Factory adapter (Phase 7)](docs/adapters/LAPTOP_FACTORY.md)
 - [DataBlitz adapter (Phase 7)](docs/adapters/DATABLITZ.md)
+- [PC Express adapter (Phase 7)](docs/adapters/PCX.md)
 
 ## Local verification
 
