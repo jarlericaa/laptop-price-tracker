@@ -25,7 +25,7 @@ flowchart LR
     TM -. validated rows only; integration planned .-> X[future retailer adapters, exact matching, comparison]
 ```
 
-The current and planned portions are different deliverables. The shared scraping framework (overall Phase 6) and four retailer adapters, Laptop Factory, DataBlitz, PC Express, and PC Central (Phase 7), are implemented and tested offline. All four are enabled for live use under project-owner decisions. Laptop Factory and DataBlitz each have one user-reported live check; a user-reported PC Express check returned one in-stock Acer offer, with offer-URL formatting still to verify. PC Express's external-policy finding remains RESTRICTED under the retailer's terms. PC Central's finding is UNKNOWN; a bare-URL check failed safely with `AMBIGUOUS_VARIANT`, and a selected-variant check returned one in-stock offer. They are not connected to the pipeline above. Exact configuration matching, price history, and GitHub Actions are not implemented.
+The current and planned portions are different deliverables. The shared scraping framework (overall Phase 6) and five retailer adapters, Laptop Factory, DataBlitz, PC Express, PC Central, and Octagon (Phase 7), are implemented and tested offline. All five are enabled for live use under project-owner decisions. Laptop Factory and DataBlitz each have one user-reported live check; a user-reported PC Express check returned one in-stock Acer offer, with offer-URL formatting still to verify. PC Express's external-policy finding remains RESTRICTED under the retailer's terms. PC Central's finding is UNKNOWN; a bare-URL check failed safely with `AMBIGUOUS_VARIANT`, and a selected-variant check returned one in-stock offer. Octagon's finding is RESTRICTED under its terms, and it has had no live check. They are not connected to the pipeline above. Exact configuration matching, price history, and GitHub Actions are not implemented.
 
 ## Repository structure
 
@@ -46,6 +46,7 @@ The current and planned portions are different deliverables. The shared scraping
 │   ├── adapters/
 │   │   ├── datablitz.py              # DataBlitz (DBZ) product-page adapter (Phase 7, offline)
 │   │   ├── laptop_factory.py         # Laptop Factory (LF) product-page adapter (Phase 7, offline)
+│   │   ├── oct.py                    # Octagon (OCT) product-page adapter (Phase 7, live use enabled)
 │   │   ├── pcc.py                    # PC Central (PCC) product-page adapter (Phase 7, live use enabled)
 │   │   └── pcx.py                    # PC Express (PCX) product-page adapter (Phase 7, live use enabled)
 │   ├── config.py
@@ -64,7 +65,7 @@ The current and planned portions are different deliverables. The shared scraping
 ├── tests/
 │   ├── example_adapter.py            # Offline example adapter (not a retailer integration)
 │   ├── scraping_fakes.py             # Shared fake transport/clock and no-network guard
-│   └── scraping_fixtures/            # Synthetic pages; laptop_factory/, datablitz/, pcx/, and pcc/ hold minimal retailer fixtures
+│   └── scraping_fixtures/            # Synthetic pages; laptop_factory/, datablitz/, pcx/, pcc/, and oct/ hold minimal retailer fixtures
 ├── check_target_master.py            # Local TARGET_MASTER CSV check (overall Phase 5)
 ├── check_target_tables.py            # Three-table CSV or read-only sheet check (overall Phase 5)
 ├── seed_match_review.py              # Top 100 -> local MATCH_REVIEW candidates (overall Phase 5)
@@ -102,6 +103,7 @@ The current and planned portions are different deliverables. The shared scraping
 | `adapters/datablitz.py` | DataBlitz Shopify product-page parser for `ecommerce.datablitz.com.ph`. It prefers JSON-LD and falls back to visible content, separates sale and compare-at prices, combines JSON-LD availability with the add-to-cart button, flags bundle wording, and keeps raw description specs. It ignores the quick-buy `<template>` copy and makes no HTTP calls itself. `live_use_approved = True` under the project-owner policy; retailer permission remains unverified. See [adapters/DATABLITZ.md](adapters/DATABLITZ.md). |
 | `adapters/pcx.py` | PC Express Shopify (Kalles theme) product-page parser for `pcx.com.ph`. It reads the visible main block and reconciles the page's two Product JSON-LD blocks, failing when they disagree. It separates `<del>`/`<ins>` prices, combines JSON-LD availability with the add-to-cart and notify-me buttons, fails on variant markup, flags bundle wording, and keeps raw specs. It makes no HTTP calls itself. `live_use_approved = True` under an explicit project-owner decision; the retailer's published restriction remains recorded as RESTRICTED. See [adapters/PCX.md](adapters/PCX.md). |
 | `adapters/pcc.py` | PC Central Shopify (Dawn theme) product-page parser for `pccentralcomputerstore.com`. For a multi-variant product it requires a `?variant=<id>` URL whose variant the page selected; otherwise it fails with `AMBIGUOUS_VARIANT`. It cross-checks the displayed price with the selected JSON-LD offer and the variant JSON. It gives a sale price only for Dawn's on-sale state with a higher compare-at price, and combines JSON-LD, variant, button, and sold-out-state availability. It checks product identity, flags bundle wording, and keeps raw description lines. It makes no HTTP calls itself. `live_use_approved = True` under the project-wide owner decision; the external-policy finding is UNKNOWN. See [adapters/PCC.md](adapters/PCC.md). |
+| `adapters/oct.py` | Octagon Shopify ("Multi" theme) product-page parser for `www.octagon.com.ph`. It cross-checks the displayed `dl.#price` amount with the selected JSON-LD offer and the analytics variant price. It gives a sale price only for `@on-sale` with a higher `@compare` amount, and combines JSON-LD, stock-alert, and button availability. It checks SKU and product-path identity and quotes the theme's invalid leading-zero `gtin12` values before reading JSON-LD. It never takes the store name as brand, follows the PCC `?variant=<id>` rule, flags bundle wording, and keeps raw "Tech Specification" lines. It makes no HTTP calls itself. `live_use_approved = True` under the project-wide owner decision; the external-policy finding is RESTRICTED. See [adapters/OCT.md](adapters/OCT.md). |
 
 Validation runs on local CSV exports or on read-only sheet reads; nothing writes the three Phase 5 tabs. The current `TARGET_MASTER` identity key is documented in [TARGET_MASTER_SCHEMA.md](TARGET_MASTER_SCHEMA.md) and aligned with the requested downstream fields in [PRICE_TRACKING_OUTPUT_SCHEMA.md](PRICE_TRACKING_OUTPUT_SCHEMA.md). Header templates for `TARGET_MASTER`, `SOURCE_MODEL_MAP`, and `MATCH_REVIEW` live under `config/`. No downstream consumer, retailer adapter, exact matcher, comparison-history, or approval-workflow module exists. The Phase 6 scraping framework does not read these tables. Promotion from review to master is a manual, human-approved step.
 
@@ -150,7 +152,7 @@ There is no workflow in the repository today. Once the controlled pilot passes, 
 
 ## Retailer adapter boundary
 
-The shared framework (overall Phase 6) exists. Four retailer adapters (Phase 7) exist and are enabled for live use under project-owner decisions. Laptop Factory, DataBlitz, and PC Express each have one user-reported live check; PC Express's external-policy finding remains RESTRICTED. PC Central's bare-URL check stopped at `AMBIGUOUS_VARIANT` as designed; a selected-variant check returned one in-stock offer. The boundary is:
+The shared framework (overall Phase 6) exists. Five retailer adapters (Phase 7) exist and are enabled for live use under project-owner decisions. Laptop Factory, DataBlitz, and PC Express each have one user-reported live check. The external-policy findings for PC Express and Octagon are RESTRICTED. PC Central's bare-URL check stopped at `AMBIGUOUS_VARIANT` as designed; a selected-variant check returned one in-stock offer. Octagon has had no live check. The boundary is:
 
 1. *(Planned)* Read only validated laptop configurations from `TARGET_MASTER`, meaning rows that pass `validate_target_master` under the approved schema, and only `SOURCE_MODEL_MAP` links that pass `validate_source_model_map`. `read_target_table_values()` provides the read-only input. How scrape requests are derived from targets is not yet defined, and the framework does not assume `TARGET_MASTER` is populated.
 2. *(Implemented)* `scrape()` takes a `ScrapeRequest` (retailer ID and URL) and fetches through the shared `Fetcher`. The adapter parses the page into `ParsedOffer` values. Nothing changes any sheet.
@@ -162,7 +164,7 @@ The shared framework (overall Phase 6) exists. Four retailer adapters (Phase 7) 
 flowchart LR
     RQ[ScrapeRequest] --> FE[Fetcher: throttle, timeout, retries]
     FE --> TR[Transport: urllib default, fake in tests]
-    FE --> AD[RetailerAdapter.parse: LF, DBZ, PCX, PCC adapters; example adapter in tests]
+    FE --> AD[RetailerAdapter.parse: LF, DBZ, PCX, PCC, OCT adapters; example adapter in tests]
     AD --> BO[build_observation: normalize and validate]
     BO --> OB[OfferObservation, no target_id]
     OB -. planned Phase 8 .-> MX[exact matcher]

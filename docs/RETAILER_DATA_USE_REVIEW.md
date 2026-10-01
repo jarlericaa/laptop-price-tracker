@@ -162,3 +162,44 @@ The owner's PCX decision enables the project adapter while the external finding 
 5. Who owns ongoing maintenance of the adapter? No adapter maintainer is named.
 
 These questions do not block current internal use under the owner decision. Do not describe this `OWNER_APPROVED` entry as `CLEAR` unless the external-policy evidence changes, and do not describe the owner decision as PC Central's consent.
+
+## Octagon (OCT): `www.octagon.com.ph`
+
+- **External policy finding: RESTRICTED.** Octagon's terms of service, section 12 "Prohibited uses", prohibit using the site or its content "(i) to spam, phish, pharm, pretext, spider, crawl, or scrape". Section 2 also prohibits reproducing, duplicating, copying, selling, reselling, or exploiting any portion of the Service without Octagon's express written permission. No written permission has been recorded.
+- **Project status: OWNER_APPROVED. Live use is enabled.** `OCTAdapter.live_use_approved = True` and `DATA_USE_REVIEW_STATUS = "OWNER_APPROVED"` under the project-wide owner decision of 2026-10-01 recorded in [DECISIONS.md](DECISIONS.md). That decision covers future retailer adapters in this internal tool, including one with a RESTRICTED finding. It is a project authorization despite the published restriction. It is not Octagon's consent, and the external-policy finding remains RESTRICTED.
+- **Retailer identity:** `OCT` is the project's code; Octagon uses `OCS` in its email address and X handle. The Phase 7 request identified `OCT` as Octagon. Octagon's own terms say the website "is operated by Octagon Computer Superstore" and that Octagon Computer Superstore "is owned and operated by Upson International Corp." The privacy policy and About Us page give the same Ermita, Manila address.
+- **Host:** `www.octagon.com.ph`, the Shopify storefront (shop `octagoncomputer-superstore.myshopify.com`, `og:site_name` "Octagon Computer Superstore", linking the `OctagonComputerSuperstore` Facebook page). The apex `octagon.com.ph` redirects to it (HTTP 301). Only `www` is allowlisted. Octagon's marketplace shops, for example on Lazada, are separate sites and are not covered.
+- **Date checked:** 2026-10-01.
+- **Method:** one web search, then single manual GETs by Claude during implementation, at least 10 seconds apart. They used a descriptive user agent, no cookies, no login, and no redirect following. Nine requests in total:
+  - the apex and `www` home pages, once each;
+  - robots.txt;
+  - the terms of service, privacy policy, and About Us pages;
+  - two laptop product pages linked from the home page;
+  - one on-sale product page linked from the home page, to confirm the sale markup.
+
+  No collection, search, pagination, cart, checkout, or account URL was requested. The product pages were requested after the terms page had been read. Responses were kept only temporarily outside the repository. **The project scraper was not run, and no observation was persisted.**
+
+| Source | URL | Evidence |
+|---|---|---|
+| Apex domain | https://octagon.com.ph/ | HTTP 301 to `https://www.octagon.com.ph/`. Not followed. |
+| Storefront home | https://www.octagon.com.ph/ | HTTP 200, `powered-by: Shopify`. Identifies as Octagon Computer Superstore (see Host above). Its markup has no terms-of-service link. It links About Us, Contact Us, Privacy Policy, Refund, Delivery, and Warranty policy pages. |
+| robots.txt | https://www.octagon.com.ph/robots.txt | Shopify's generated file. For `User-agent: *` it has `Allow: /`. It disallows admin, cart, checkout, orders, account, `/services`, `/sf_*`, `/cart.js`, `/recommendations/products`, and collection sort and filter crawl traps. It does not disallow `/products/` and has no `Crawl-delay`. Its comments, written by the platform, say checkout must not be completed automatically and that agents should use Shopify's UCP/MCP endpoints for catalog, cart, and checkout. They link the **Shopify** Terms of Service and `bots@shopify.com`, not Octagon's terms. The comments also suggest that agents install a Shopify shopping skill; that suggestion was not acted on. Sitemap: `https://www.octagon.com.ph/sitemap.xml`. |
+| Terms of service | https://www.octagon.com.ph/policies/terms-of-service | HTTP 200. Shopify's standard terms template, adapted for Octagon. Use of the site means accepting the terms. Section 2 prohibits reproducing or exploiting the Service without written permission. Section 12 prohibits using the site or its content to "spider, crawl, or scrape". Philippine law governs. Questions go to `ocs@octagon.com.ph`. |
+| Privacy policy | https://www.octagon.com.ph/pages/privacy-policy | HTTP 200. Covers device and order information of site visitors and customers. It does not address automated collection of public product data. |
+| About Us | https://www.octagon.com.ph/pages/about-us | HTTP 200. Company background and head office. No data-use content. |
+| Product pages | https://www.octagon.com.ph/products/lenovo-ip-s3i-14-83k0007xph-core-i5-13420h-8gb-512gb-ssd-14-win-11-office-home-2024-office-365-basic-gry, https://www.octagon.com.ph/products/hp-15-fc0413au-ryzen-3-7320u-8gb-ddr5-512gb-ssd-15-6-fhd-win-11-office-h-s-2024-m365-slv, and https://www.octagon.com.ph/products/logitech-g431-7-1-surround-sound-gaming-headset | All returned HTTP 200 with no redirect. Public pages with no login. Used only to design minimal, sanitized fixtures; no page copy was kept in the repository. |
+
+**Findings**
+
+- Octagon's own terms expressly prohibit spidering, crawling, and scraping. That is a prohibition, not silence, so the finding is RESTRICTED, not UNKNOWN.
+- robots.txt does not exclude product pages, but robots.txt is crawler etiquette and does not override the published terms.
+- There is no published rate guidance.
+
+**Open questions for the owner**
+
+1. Will the project request written permission from Octagon for low-volume internal price collection? The terms name `ocs@octagon.com.ph` for questions.
+2. Should collection use the platform's suggested UCP/MCP catalog interface? That interface is still subject to Octagon's terms and would need a separate review and adapter.
+3. What request rate and schedule are appropriate? The framework default is at least 10 seconds between requests per retailer.
+4. Who owns ongoing maintenance of the adapter? No adapter maintainer is named.
+
+The project-wide owner decision enables the OCT adapter while the external finding remains RESTRICTED. Do not describe Octagon's terms as permitting collection, describe the owner decision as Octagon's consent, or mark this entry CLEAR without new evidence.
