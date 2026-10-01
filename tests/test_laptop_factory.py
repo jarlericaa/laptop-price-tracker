@@ -329,11 +329,25 @@ def test_redirect_off_the_official_host_is_not_followed() -> None:
         f"https://{HOST}/product-category/mainstream-laptops/",
         f"https://{HOST}/?s=laptop",
         "https://www.laptopfactory.com.ph/product/x/",
+        f"http://{HOST}/product/x/",
+        f"https://{HOST}/product/",
+        f"https://{HOST}/product/x/y/",
+        f"https://{HOST}/product/x/?add-to-cart=42342",
+        f"https://{HOST}/product/x/?utm_source=example",
+        f"https://{HOST}/product/x/#tab-description",
+        f"[https://{HOST}/product/x/](https://{HOST}/product/x/)",
+        f" https://{HOST}/product/x/",
     ],
 )
 def test_product_request_accepts_only_product_pages(url: str) -> None:
     with pytest.raises(ValueError):
         product_request(url)
+
+
+@pytest.mark.parametrize("url", [SALE_URL, f"https://{HOST}/product/example-notebook-15"])
+def test_product_request_keeps_a_bare_product_url_unchanged(url: str) -> None:
+    request = product_request(url)
+    assert (request.retailer_id, request.url) == ("laptop_factory", url)
 
 
 # Live-use gate

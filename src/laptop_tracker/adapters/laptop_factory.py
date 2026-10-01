@@ -67,9 +67,15 @@ _VOID_TAGS = frozenset(
 
 
 def product_request(url: str) -> ScrapeRequest:
-    """Build a request for one Laptop Factory product page (``/product/...`` on ``HOST``)."""
-    if url_host(url) != HOST or not urlsplit(url).path.startswith("/product/"):
-        raise ValueError(f"Not a Laptop Factory product URL on {HOST}.")
+    """Build a request for one Laptop Factory product page (``/product/<slug>/`` on ``HOST``).
+
+    Queries and fragments are refused: WooCommerce GET queries such as ``?add-to-cart=`` change
+    cart state, and robots.txt disallows them.
+    """
+    parts = urlsplit(url)
+    path = parts.path if url_host(url) == HOST and parts.scheme == "https" else ""
+    if not re.fullmatch(r"/product/[^/]+/?", path) or parts.query or parts.fragment:
+        raise ValueError(f"Not a Laptop Factory product URL on https://{HOST}.")
     return ScrapeRequest(RETAILER_ID, url)
 
 
@@ -79,7 +85,8 @@ class LaptopFactoryAdapter:
     # Bump when parsing rules change; recorded in every observation's source metadata.
     adapter_version = "lf-1"
     allowed_hosts = frozenset({HOST})
-    live_use_approved = True  # Project-owner policy; retailer permission is not independently verified.
+    # Project-owner policy; retailer permission is not independently verified.
+    live_use_approved = True
 
     def parse(self, page: FetchedPage) -> list[ParsedOffer]:
         parsed = _ProductPageParser()
