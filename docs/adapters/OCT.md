@@ -1,6 +1,6 @@
 # Octagon (OCT) Adapter
 
-**Status:** Adapter implemented and tested offline on 2026-10-01 (`adapter_version = "oct-1"`). **Live use is enabled** (`live_use_approved = True`) under the project-wide owner decision in [DECISIONS.md](../DECISIONS.md). Octagon's published terms of service prohibit using the site or its content to "spider, crawl, or scrape", so the external-policy finding is **RESTRICTED**. No Octagon written permission is recorded, and the owner decision is not Octagon's consent. A user-reported live smoke check returned one in-stock HP 15-FC0413AU offer at PHP 37,999. The observation was printed only; no data was persisted. Adapter maintainer: not yet named.
+**Status:** Adapter implemented and tested offline on 2026-10-01 (`adapter_version = "oct-1"`). **Live use is enabled** (`live_use_approved = True`) under the project-wide owner decision in [DECISIONS.md](../DECISIONS.md). Octagon's published terms of service prohibit using the site or its content to "spider, crawl, or scrape", so the external-policy finding is **RESTRICTED**. No Octagon written permission is recorded, and the owner decision is not Octagon's consent. A user-reported live smoke check returned one in-stock HP 15-FC0413AU offer at PHP 37,999. The observation was printed only; no data was persisted. Adapter maintainer: Jarelle Ricaforte.
 
 | Item | Value |
 |---|---|

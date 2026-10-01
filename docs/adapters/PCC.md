@@ -1,6 +1,6 @@
 # PC Central (PCC) Adapter
 
-**Status:** Adapter implemented and tested offline on 2026-10-01 (`adapter_version = "pcc-1"`). **Live use is enabled** (`live_use_approved = True`) under the project-wide owner decision in [DECISIONS.md](../DECISIONS.md). PC Central's published pages neither grant nor prohibit automated collection, so the external-policy finding is **UNKNOWN**. No retailer permission is recorded. A bare-URL live check fetched the page and failed safely with `AMBIGUOUS_VARIANT`; a selected-variant check returned one in-stock ASUS VivoBook offer at PHP 36,999.00. See [PROGRESS_LOG.md](../PROGRESS_LOG.md#pcc-live-smoke-checks-2026-10-01). Adapter maintainer: not yet named.
+**Status:** Adapter implemented and tested offline on 2026-10-01 (`adapter_version = "pcc-1"`). **Live use is enabled** (`live_use_approved = True`) under the project-wide owner decision in [DECISIONS.md](../DECISIONS.md). PC Central's published pages neither grant nor prohibit automated collection, so the external-policy finding is **UNKNOWN**. No retailer permission is recorded. A bare-URL live check fetched the page and failed safely with `AMBIGUOUS_VARIANT`; a selected-variant check returned one in-stock ASUS VivoBook offer at PHP 36,999.00. See [PROGRESS_LOG.md](../PROGRESS_LOG.md#pcc-live-smoke-checks-2026-10-01). Adapter maintainer: Jarelle Ricaforte.
 
 | Item | Value |
 |---|---|

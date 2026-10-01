@@ -1,6 +1,6 @@
 # Laptop Factory (LF) Adapter
 
-**Status:** Offline adapter implemented and tested on 2026-09-29 (`adapter_version = "lf-1"`). Live use is enabled under the project-owner policy in [DECISIONS.md](../DECISIONS.md). The retailer's published permission remains unverified (external-policy finding UNKNOWN; project status OWNER_APPROVED). No project scraper request has been made to Laptop Factory. Adapter maintainer: not yet named.
+**Status:** Offline adapter implemented and tested on 2026-09-29 (`adapter_version = "lf-1"`). Live use is enabled under the project-owner policy in [DECISIONS.md](../DECISIONS.md). The retailer's published permission remains unverified (external-policy finding UNKNOWN; project status OWNER_APPROVED). A controlled bare-URL live check on 2026-10-01 returned one in-stock Acer Aspire AI 14 offer at PHP 45,999.00 (SALE, regular PHP 50,999.00); the requested, final, and offer URLs were the same plain string. See [PROGRESS_LOG.md](../PROGRESS_LOG.md#phase-7-live-follow-up-checks-2026-10-01). Adapter maintainer: Jarelle Ricaforte.
 
 | Item | Value |
 |---|---|
@@ -20,7 +20,9 @@ No configuration or credentials are needed. The adapter never performs HTTP; it 
 python -m pytest -q tests/test_laptop_factory.py
 ```
 
-The default `Fetcher()` uses a live transport, so calling `scrape(LaptopFactoryAdapter(), [...], Fetcher())` can send a real request. No standalone scraper CLI exists, and no live scrape has been run. Search (`/?s=`) and category pages are out of scope; `product_request` refuses them.
+The default `Fetcher()` uses a live transport, so calling `scrape(LaptopFactoryAdapter(), [...], Fetcher())` can send a real request. No standalone scraper CLI exists. Search (`/?s=`) and category pages are out of scope.
+
+`product_request` accepts only `https://laptopfactory.com.ph/product/<slug>/`, with or without the trailing slash. Since 2026-10-01 it refuses `http`, other hosts, nested or empty product paths, fragments, and every query. Queries are refused because WooCommerce GET queries such as `?add-to-cart=` change cart state, and robots.txt disallows them. Pass a bare URL; a string wrapped in Markdown link syntax is refused.
 
 ## Page assumptions
 
@@ -64,6 +66,7 @@ Only markup inside the product summary is read. Related products and smart-bundl
 
 ## Known limitations
 
+- **Live behavior has two one-product checks.** The 2026-09-29 user-reported check returned an in-stock Acer Nitro V 15 offer; its displayed input URL had Markdown markup, which `ScrapeRequest` would refuse, so that markup was most likely added when the output was displayed. The 2026-10-01 controlled bare-URL check confirmed clean URL attribution for one sale-priced, in-stock simple product. Out-of-stock, backorder, and variable products have not been observed live. The smart-bundle parse was checked only against a saved research page, not through the project scraper.
 - Only simple and smart-bundle product pages were reviewed. Variable products with a price range or several JSON-LD offers yield `AMBIGUOUS_PRICE` unless exactly one current price is displayed.
 - Only the stock wordings `In stock`, `<n> in stock`, and `Out of stock` are mapped. Other wording is kept as evidence and mapped to `UNKNOWN`.
 - Bundle detection is keyword and markup based and can over-flag, for example a title mentioning a monitor size. That is intentional, since review happens downstream.

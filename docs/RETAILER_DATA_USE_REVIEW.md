@@ -14,7 +14,7 @@ One entry per retailer. **CLEAR** means the retailer's own sources or written pe
 - **Project decision: OWNER_APPROVED. Live use is enabled.** `LaptopFactoryAdapter.live_use_approved = True` under the project-wide owner policy recorded in [DECISIONS.md](DECISIONS.md).
 - **External policy finding: UNKNOWN.** The pages reviewed below do not grant or prohibit automated collection. The project decision assumes retailer approval for internal use; it is not evidence of retailer permission.
 - **Date checked:** 2026-09-29.
-- **Method:** one manual GET each, by Claude during implementation, using a descriptive user agent, no cookies, and no login. Five requests in total: robots.txt, the terms page, the privacy page, and two product pages. No category page, search, or pagination was requested. The project scraper was not run.
+- **Method:** one manual GET each, by Claude during implementation, using a descriptive user agent, no cookies, and no login. Five requests in total: robots.txt, the terms page, the privacy page, and two product pages. No category page, search, or pagination was requested. The project scraper was not run during this research. Later live checks through the project scraper are recorded in [PROGRESS_LOG.md](PROGRESS_LOG.md#phase-7-live-follow-up-checks-2026-10-01); they do not change this finding.
 
 | Source | URL | Evidence |
 |---|---|---|
@@ -36,7 +36,7 @@ One entry per retailer. **CLEAR** means the retailer's own sources or written pe
 2. Which legal entity operates the website, given that the warranty page and privacy policy name different entities? Whom should a permission request go to (for example, the listed business email)?
 3. What request rate and schedule are acceptable? The framework default is at least 10 seconds between requests; a weekly cadence over a limited product list would be the likely pilot.
 4. Is internal price comparison the only intended use, with no republication of product text or images?
-5. Who owns ongoing maintenance of the adapter? No adapter maintainer is named.
+5. Who owns ongoing maintenance of the adapter? Jarelle Ricaforte is the named maintainer.
 
 The questions above remain useful if the project later seeks retailer confirmation. They do not block current internal use under the owner decision. The existing throttle remains at least 10 seconds between requests per retailer; this is an engineering default, not a retailer-confirmed rate. Do not describe this `OWNER_APPROVED` entry as `CLEAR` unless the external-policy evidence changes.
 
@@ -78,14 +78,14 @@ The questions above remain useful if the project later seeks retailer confirmati
 3. Should collection use the platform's suggested UCP/MCP catalog interface instead of product HTML? That would need a separate review and adapter.
 4. What request rate and schedule are acceptable? The framework default is at least 10 seconds between requests per retailer.
 5. Is internal price comparison the only intended use, with no republication of product text or images?
-6. Who owns ongoing maintenance of the adapter? No adapter maintainer is named.
+6. Who owns ongoing maintenance of the adapter? Jarelle Ricaforte is the named maintainer.
 
 These questions do not block current internal use under the owner decision. Do not describe this `OWNER_APPROVED` entry as `CLEAR` unless the external-policy evidence changes.
 
 ## PC Express (PCX): `pcx.com.ph`
 
 - **External policy finding: RESTRICTED.** The PC Express terms of service, published on the storefront, say: "You must not conduct any systematic or automated data collection activities (including without limitation scraping, data mining, data extraction, and data harvesting) on or in relation to this website without PC Express' express written consent." No written consent has been recorded.
-- **Project status: OWNER_APPROVED. Live use is enabled.** `PCXAdapter.live_use_approved = True` and `DATA_USE_REVIEW_STATUS = "OWNER_APPROVED"`. After reviewing the PC Express terms, the project owner explicitly directed live use for this internal tool on 2026-10-01; see [DECISIONS.md](DECISIONS.md). This is a project authorization despite the published restriction. It is not PC Express consent, and the external-policy finding remains RESTRICTED. A later user-reported live check returned one in-stock Acer Aspire Lite offer; see [PROGRESS_LOG.md](PROGRESS_LOG.md#pcx-live-smoke-check-2026-10-01).
+- **Project status: OWNER_APPROVED. Live use is enabled.** `PCXAdapter.live_use_approved = True` and `DATA_USE_REVIEW_STATUS = "OWNER_APPROVED"`. After reviewing the PC Express terms, the project owner explicitly directed live use for this internal tool on 2026-10-01; see [DECISIONS.md](DECISIONS.md). This is a project authorization despite the published restriction. It is not PC Express consent, and the external-policy finding remains RESTRICTED. A later user-reported live check returned one in-stock Acer Aspire Lite offer; see [PROGRESS_LOG.md](PROGRESS_LOG.md#pcx-live-smoke-check-2026-10-01). A controlled one-page check on 2026-10-01 confirmed the offer URL is a plain string; see [PROGRESS_LOG.md](PROGRESS_LOG.md#phase-7-live-follow-up-checks-2026-10-01). Neither check changes the RESTRICTED finding.
 - **Host:** `pcx.com.ph`, the Shopify storefront ("PC Express" in the title, `og:site_name`, and footer). `www.pcx.com.ph` redirects to it (HTTP 301). Only the apex host is allowlisted.
 - **Date checked:** 2026-10-01.
 - **Method:** single manual GETs by Claude during implementation, at least 10 seconds apart. They used a descriptive user agent, no cookies, no login, and no redirect following. Seven requests in total:
@@ -115,7 +115,7 @@ These questions do not block current internal use under the owner decision. Do n
 1. Will the project request written consent from PC Express for low-volume internal price collection? The contact page is linked from the storefront footer.
 2. Should collection use the platform's suggested UCP/MCP catalog interface? That interface is still subject to the retailer's terms and would need a separate review and adapter.
 3. What request rate and schedule are appropriate? The framework default is at least 10 seconds between requests per retailer.
-4. Who owns ongoing maintenance of the adapter? No adapter maintainer is named.
+4. Who owns ongoing maintenance of the adapter? Jarelle Ricaforte is the named maintainer.
 
 The owner's PCX decision enables the project adapter while the external finding remains RESTRICTED. Do not describe the retailer's terms as permitting collection or mark this entry CLEAR without new evidence.
 
@@ -134,7 +134,7 @@ The owner's PCX decision enables the project adapter while the external finding 
   - the terms of service and privacy policy;
   - two product pages linked from the home page.
 
-  No collection, search, pagination, cart, or checkout URL was requested. After the offline tests passed, one controlled live smoke check ran through the project scraper; see [PROGRESS_LOG.md](PROGRESS_LOG.md#pcc-live-smoke-check-2026-10-01).
+  No collection, search, pagination, cart, or checkout URL was requested. After the offline tests passed, one controlled live smoke check ran through the project scraper; see [PROGRESS_LOG.md](PROGRESS_LOG.md#pcc-live-smoke-checks-2026-10-01).
 
 | Source | URL | Evidence |
 |---|---|---|
@@ -159,7 +159,7 @@ The owner's PCX decision enables the project adapter while the external finding 
 2. Which legal entity operates the storefront, and whom should a permission request go to? The storefront lists a Viber number and social accounts but no business email or address.
 3. Should collection use the platform's suggested UCP/MCP catalog interface instead of product HTML? That would need a separate review and adapter.
 4. What request rate and schedule are acceptable? The framework default is at least 10 seconds between requests per retailer.
-5. Who owns ongoing maintenance of the adapter? No adapter maintainer is named.
+5. Who owns ongoing maintenance of the adapter? Jarelle Ricaforte is the named maintainer.
 
 These questions do not block current internal use under the owner decision. Do not describe this `OWNER_APPROVED` entry as `CLEAR` unless the external-policy evidence changes, and do not describe the owner decision as PC Central's consent.
 
@@ -200,6 +200,6 @@ These questions do not block current internal use under the owner decision. Do n
 1. Will the project request written permission from Octagon for low-volume internal price collection? The terms name `ocs@octagon.com.ph` for questions.
 2. Should collection use the platform's suggested UCP/MCP catalog interface? That interface is still subject to Octagon's terms and would need a separate review and adapter.
 3. What request rate and schedule are appropriate? The framework default is at least 10 seconds between requests per retailer.
-4. Who owns ongoing maintenance of the adapter? No adapter maintainer is named.
+4. Who owns ongoing maintenance of the adapter? Jarelle Ricaforte is the named maintainer.
 
 The project-wide owner decision enables the OCT adapter while the external finding remains RESTRICTED. Do not describe Octagon's terms as permitting collection, describe the owner decision as Octagon's consent, or mark this entry CLEAR without new evidence.

@@ -1,6 +1,6 @@
 # PC Express (PCX) Adapter
 
-**Status:** Adapter implemented and tested offline on 2026-10-01 (`adapter_version = "pcx-1"`). **Live use is enabled** (`live_use_approved = True`) by the explicit project-owner PCX decision in [DECISIONS.md](../DECISIONS.md). PC Express's published terms restrict automated collection without express written consent; the external-policy finding remains **RESTRICTED**, and no written consent is recorded. A user-reported live check returned one in-stock Acer Aspire Lite offer. The offer URL appeared as a Markdown link in the reported output, so its exact string still needs `repr()` confirmation. Adapter maintainer: not yet named.
+**Status:** Adapter implemented and tested offline on 2026-10-01 (`adapter_version = "pcx-1"`). **Live use is enabled** (`live_use_approved = True`) by the explicit project-owner PCX decision in [DECISIONS.md](../DECISIONS.md). PC Express's published terms restrict automated collection without express written consent; the external-policy finding remains **RESTRICTED**, and no written consent is recorded. A user-reported live check returned one in-stock Acer Aspire Lite offer; its offer URL appeared as a Markdown link in the reported output. A controlled live check on 2026-10-01 of the reviewed HP 14 laptop page printed `repr(offer.offer_url)` as the bare `'https://pcx.com.ph/products/…'` string (a `str`, equal to the requested and final URLs). See [PROGRESS_LOG.md](../PROGRESS_LOG.md#phase-7-live-follow-up-checks-2026-10-01). Adapter maintainer: Jarelle Ricaforte.
 
 | Item | Value |
 |---|---|
@@ -25,7 +25,7 @@ No configuration or credentials are needed. The adapter never performs HTTP; it 
 python -m pytest -q tests/test_pcx.py
 ```
 
-The default `Fetcher()` uses a live transport, so `scrape(PCXAdapter(), [...], Fetcher())` can send a real request. The project-owner decision enables this internal use without changing the retailer's external-policy finding. One user-reported live smoke check succeeded; verify the offer URL string with `repr()` if needed. Collection (`/collections/...`), search, cart, and collection-scoped product URLs are out of scope; `product_request` refuses them.
+The default `Fetcher()` uses a live transport, so `scrape(PCXAdapter(), [...], Fetcher())` can send a real request. The project-owner decision enables this internal use without changing the retailer's external-policy finding. A user-reported live smoke check and a controlled `repr()` check have succeeded. Collection (`/collections/...`), search, cart, and collection-scoped product URLs are out of scope; `product_request` refuses them.
 
 ## Page assumptions
 
@@ -102,7 +102,7 @@ Otherwise the result is `UNKNOWN` with `signals conflict` in the evidence. That 
 
 ## Known limitations
 
-- **Live behavior has one spot check.** A user-reported call returned an in-stock Acer offer at PHP 34,999.00. The posted offer URL is Markdown-formatted, so its underlying string still needs confirmation. This check covers one product only. The external-policy finding remains RESTRICTED despite the owner's project authorization.
+- **Live behavior has two one-product checks.** A user-reported call returned an in-stock Acer offer at PHP 34,999.00, with the offer URL displayed as a Markdown link. On 2026-10-01 a controlled call for the reviewed HP 14-EP1144TU page returned REGULAR PHP 47,990.00, `IN_STOCK`, and an offer URL whose `repr()` was the bare product URL. That confirms the adapter returns a plain URL string. The Acer offer's own string was not rechecked, but it comes from the same JSON-LD `Offer.url` path. Both checks were in-stock laptops; the Acer check's price type was not reported. No sale-priced laptop, sold-out, pre-order, or multi-variant page has been checked live. The external-policy finding remains RESTRICTED despite the owner's project authorization.
 - Only two pages were reviewed: one in-stock regular-price laptop and one out-of-stock sale monitor. No sale-priced laptop, pre-order, or multi-variant page was observed. The `Sold out`, `Pre-order`, and `Unavailable` labels and the variant markup are assumed.
 - Shopify JSON-LD availability is usually derived from whether the variant can be bought, so it may say `InStock` for items on continued selling.
 - The configuration summary is free-form retailer text: a configuration line on the reviewed laptop and marketing prose on the monitor. Phase 8 must treat it as evidence, not verified specifications.

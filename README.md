@@ -6,7 +6,8 @@ of laptop models for future retailer price tracking. The current Python pipeline
 and review files. A shared, retailer-neutral scraping framework (overall Phase 6) and five
 offline-tested retailer adapters, Laptop Factory, DataBlitz, PC Express, PC Central, and
 Octagon (Phase 7), are implemented and enabled for live use under project-owner decisions.
-Laptop Factory, DataBlitz, and PC Express each have one user-reported live check. The
+Laptop Factory, DataBlitz, and PC Express each have a user-reported live check; Laptop Factory
+and PC Express also have a controlled 2026-10-01 check with plain-string URLs. The
 external-policy findings for PC Express and Octagon are RESTRICTED under the retailers' terms.
 PC Central's bare-URL check failed safely; a selected-variant live check returned one in-stock
 offer. A user-reported OCT live check returned one in-stock HP 15-FC0413AU offer at PHP 37,999. Exact configuration matching, price comparison, and
@@ -40,29 +41,17 @@ provide timeouts, bounded retries, and per-retailer throttling. An offline examp
 under `tests/` exercises them with synthetic fixtures. See
 [docs/SCRAPING_FRAMEWORK.md](docs/SCRAPING_FRAMEWORK.md).
 
-Phase 7 is PARTIALLY_COMPLETE. `src/laptop_tracker/adapters/laptop_factory.py` parses fetched
-Laptop Factory product pages offline, tested against minimal local fixtures. Project-owner
-policy enables its live-use flag; external retailer permission remains unverified. One
-user-reported live smoke test still needs a bare-URL recheck. See
-[docs/adapters/LAPTOP_FACTORY.md](docs/adapters/LAPTOP_FACTORY.md).
-`src/laptop_tracker/adapters/datablitz.py` (DBZ, added 2026-10-01) does the same for DataBlitz
-product pages on `ecommerce.datablitz.com.ph`, under the same owner policy. A user-reported live
-spot check returned one offer. See [docs/adapters/DATABLITZ.md](docs/adapters/DATABLITZ.md).
-`src/laptop_tracker/adapters/pcx.py` (PCX, added 2026-10-01) parses PC Express product pages on
-`pcx.com.ph`. Its live use is enabled by an explicit project-owner decision for this internal
-tool. A user-reported live check returned one in-stock Acer offer; the offer URL appeared as a
-Markdown link in the report, so its exact string still needs `repr()` confirmation. The retailer's
-terms remain an external finding of RESTRICTED. See [docs/adapters/PCX.md](docs/adapters/PCX.md).
-`src/laptop_tracker/adapters/pcc.py` (PCC, added 2026-10-01) parses PC Central product pages on
-`pccentralcomputerstore.com` under the project-wide owner decision; the external-policy finding
-is UNKNOWN. PC Central sells laptops in RAM variants, so such a product needs a
-`?variant=<id>` URL. A bare-URL live check stopped safely with
-`AMBIGUOUS_VARIANT`; a selected-variant check returned one in-stock ASUS VivoBook offer. See [docs/adapters/PCC.md](docs/adapters/PCC.md).
-`src/laptop_tracker/adapters/oct.py` (OCT, added 2026-10-01) parses Octagon Computer Superstore
-product pages on `www.octagon.com.ph` under the project-wide owner decision. Octagon's terms
-prohibit scraping, so the external-policy finding is RESTRICTED; the owner decision is not
-Octagon's consent. A user-reported live check returned one HP 15-FC0413AU offer at PHP 37,999, IN_STOCK. See
-[docs/adapters/OCT.md](docs/adapters/OCT.md).
+Phase 7 is COMPLETE. Jarelle Ricaforte maintains all five retailer adapters: LF, DBZ, PCX, PCC, and OCT. Known unobserved page states remain documented limitations, and retailer-policy findings are recorded separately from project-owner authorization.
+
+`src/laptop_tracker/adapters/laptop_factory.py` parses Laptop Factory product pages offline and has a controlled bare-URL live check returning one in-stock Acer Aspire AI 14 offer at a sale price. Retailer permission remains unverified. See [docs/adapters/LAPTOP_FACTORY.md](docs/adapters/LAPTOP_FACTORY.md).
+
+`src/laptop_tracker/adapters/datablitz.py` parses DataBlitz product pages on `ecommerce.datablitz.com.ph`; a user-reported live spot check returned one in-stock MSI offer. See [docs/adapters/DATABLITZ.md](docs/adapters/DATABLITZ.md).
+
+`src/laptop_tracker/adapters/pcx.py` parses PC Express product pages on `pcx.com.ph`. Internal live use is enabled by the project-owner decision; the retailer's external-policy finding remains RESTRICTED. A controlled check confirmed the offer URL is a plain string. See [docs/adapters/PCX.md](docs/adapters/PCX.md).
+
+`src/laptop_tracker/adapters/pcc.py` parses PC Central product pages on `pccentralcomputerstore.com`. Products with several variants need a `?variant=<id>` URL. A selected-variant live check returned one in-stock ASUS VivoBook offer. See [docs/adapters/PCC.md](docs/adapters/PCC.md).
+
+`src/laptop_tracker/adapters/oct.py` parses Octagon product pages on `www.octagon.com.ph`. Its terms prohibit scraping, so the external-policy finding is RESTRICTED; the project-owner decision is not Octagon's consent. A user-reported live check returned one in-stock HP offer. See [docs/adapters/OCT.md](docs/adapters/OCT.md).
 
 The script is named `run_phase1.py` for historical reasons. Its raw-data and Top 100 work maps
 mainly to **overall Phase 4** in the revised plan. Google access is overall Phase 1.

@@ -1,6 +1,6 @@
 # DataBlitz (DBZ) Adapter
 
-**Status:** Adapter implemented and tested offline on 2026-10-01 (`adapter_version = "dbz-1"`). A user-reported live spot check on 2026-10-01 returned one MSI Crosshair A16 HX offer at PHP 162,995.00 with `IN_STOCK`. Live use is enabled under the project-owner policy in [DECISIONS.md](../DECISIONS.md). The retailer's published permission remains unverified (external-policy finding UNKNOWN; project status OWNER_APPROVED). Adapter maintainer: not yet named.
+**Status:** Adapter implemented and tested offline on 2026-10-01 (`adapter_version = "dbz-1"`). A user-reported live spot check on 2026-10-01 returned one MSI Crosshair A16 HX offer at PHP 162,995.00 with `IN_STOCK`. Live use is enabled under the project-owner policy in [DECISIONS.md](../DECISIONS.md). The retailer's published permission remains unverified (external-policy finding UNKNOWN; project status OWNER_APPROVED). Adapter maintainer: Jarelle Ricaforte.
 
 | Item | Value |
 |---|---|
@@ -24,7 +24,7 @@ No configuration or credentials are needed. The adapter never performs HTTP; it 
 python -m pytest -q tests/test_datablitz.py
 ```
 
-The default `Fetcher()` uses a live transport, so calling `scrape(DataBlitzAdapter(), [...], Fetcher())` can send a real request. No standalone scraper CLI exists, and no live scrape has been run. Collection (`/collections/...`), search, and collection-scoped product URLs (`/collections/<c>/products/<handle>`) are out of scope; `product_request` refuses them.
+The default `Fetcher()` uses a live transport, so calling `scrape(DataBlitzAdapter(), [...], Fetcher())` can send a real request. No standalone scraper CLI exists. One user-reported live spot check has been run (see Status). Collection (`/collections/...`), search, and collection-scoped product URLs (`/collections/<c>/products/<handle>`) are out of scope; `product_request` refuses them.
 
 ## Page assumptions
 
@@ -81,6 +81,7 @@ Otherwise, or when the main form has several different buttons, the result is `U
 
 ## Known limitations
 
+- **Live behavior has one spot check.** The user-reported check returned one in-stock, single-variant MSI offer. Its final URL, offer URL, and bundle fields were not reported. No sold-out, pre-order, sale-priced, or multi-variant page has been checked live.
 - Only single-variant laptop pages were reviewed. Multi-variant products (several JSON-LD offers) are `AMBIGUOUS_PRICE`, since the displayed price belongs to whichever variant is preselected.
 - The `Sold out`, `Pre-order`, and `Unavailable` labels come from the theme's own strings on the reviewed pages. No sold-out or pre-order laptop page was reviewed, so their markup is assumed, not observed.
 - Shopify JSON-LD availability is usually derived from whether the variant can be bought, so it may say `InStock` for items sold on continued selling or as pre-orders. A `Pre-order` button with `InStock` JSON-LD is treated as a conflict and gives `UNKNOWN`.
