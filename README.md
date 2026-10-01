@@ -9,7 +9,7 @@ Octagon (Phase 7), are implemented and enabled for live use under project-owner 
 Laptop Factory, DataBlitz, and PC Express each have one user-reported live check. The
 external-policy findings for PC Express and Octagon are RESTRICTED under the retailers' terms.
 PC Central's bare-URL check failed safely; a selected-variant live check returned one in-stock
-offer. Octagon has had no live check yet. Exact configuration matching, price comparison, and
+offer. A user-reported OCT live check returned one in-stock HP 15-FC0413AU offer at PHP 37,999. Exact configuration matching, price comparison, and
 GitHub Actions automation are planned; they are not implemented.
 
 The latest read-only live dry run completed in 57.49 seconds and generated 100 targets. The
@@ -61,7 +61,7 @@ is UNKNOWN. PC Central sells laptops in RAM variants, so such a product needs a
 `src/laptop_tracker/adapters/oct.py` (OCT, added 2026-10-01) parses Octagon Computer Superstore
 product pages on `www.octagon.com.ph` under the project-wide owner decision. Octagon's terms
 prohibit scraping, so the external-policy finding is RESTRICTED; the owner decision is not
-Octagon's consent. No live check has been run through the project scraper. See
+Octagon's consent. A user-reported live check returned one HP 15-FC0413AU offer at PHP 37,999, IN_STOCK. See
 [docs/adapters/OCT.md](docs/adapters/OCT.md).
 
 The script is named `run_phase1.py` for historical reasons. Its raw-data and Top 100 work maps

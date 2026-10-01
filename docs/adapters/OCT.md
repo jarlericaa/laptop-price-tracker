@@ -1,6 +1,6 @@
 # Octagon (OCT) Adapter
 
-**Status:** Adapter implemented and tested offline on 2026-10-01 (`adapter_version = "oct-1"`). **Live use is enabled** (`live_use_approved = True`) under the project-wide owner decision in [DECISIONS.md](../DECISIONS.md). Octagon's published terms of service prohibit using the site or its content to "spider, crawl, or scrape", so the external-policy finding is **RESTRICTED**. No Octagon written permission is recorded, and the owner decision is not Octagon's consent. **No live smoke check has been run through the project scraper, and no observation has been persisted.** Adapter maintainer: not yet named.
+**Status:** Adapter implemented and tested offline on 2026-10-01 (`adapter_version = "oct-1"`). **Live use is enabled** (`live_use_approved = True`) under the project-wide owner decision in [DECISIONS.md](../DECISIONS.md). Octagon's published terms of service prohibit using the site or its content to "spider, crawl, or scrape", so the external-policy finding is **RESTRICTED**. No Octagon written permission is recorded, and the owner decision is not Octagon's consent. A user-reported live smoke check returned one in-stock HP 15-FC0413AU offer at PHP 37,999. The observation was printed only; no data was persisted. Adapter maintainer: not yet named.
 
 | Item | Value |
 |---|---|
@@ -149,7 +149,7 @@ Otherwise the result is `UNKNOWN` with `signals conflict` in the evidence. That 
 
 ## Known limitations
 
-- **No live check through the project scraper has been run.** The adapter was checked offline against the three research pages saved temporarily outside the repository. It gave REGULAR PHP 44,999 and PHP 37,999 `IN_STOCK` laptop offers, and a SALE PHP 2,295 (regular 2,495) `IN_STOCK` headset offer through the `gtin12` repair. A controlled live smoke check is a later step.
+- **Live check:** the user reported `ok: True` for an HP 15-FC0413AU at PHP 37,999, `IN_STOCK`; the displayed offer URL contains a variant ID. The observation was printed only, with no persistence. Offline research fixtures also parse the two regular-price laptops and sale headset described above.
 - Multi-variant, sold-out, pre-order, unavailable, and bundle pages were not observed. Their handling is assumed from the theme's strings and the data shapes on single-variant pages.
 - The stock alert was seen only as a low-stock warning (`@type:warning`, "Only 1 left" or "Only 2 left"). It may be absent at higher stock levels; a page without it depends on JSON-LD and the button.
 - Shopify's JSON-LD `InStock` usually means the variant can be bought online. It may be true for items sold on continued selling, and it does not describe branch stock.
