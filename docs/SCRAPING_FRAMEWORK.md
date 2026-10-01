@@ -5,7 +5,7 @@
 - a fail-closed [live-use gate](#live-use-gate)
 - optional [offer details](#optional-offer-details)
 
-The first adapter is [Laptop Factory](adapters/LAPTOP_FACTORY.md). Its external-policy finding is UNKNOWN, but project-owner policy authorizes internal collection and its live-use flag is enabled. The user reported one live smoke test, whose input URL still needs a clean-URL recheck. The second adapter, [DataBlitz](adapters/DATABLITZ.md) (2026-10-01), uses the same contract and owner policy with no framework change. Its external-policy finding is also UNKNOWN, and the user reported a one-product live spot check. The third adapter, [PC Express](adapters/PCX.md) (2026-10-01), also needed no framework change. Its live-use flag is enabled by an explicit owner decision; the external-policy finding remains RESTRICTED because the retailer's terms require written consent for automated collection. A user-reported live check returned one in-stock Acer offer; the offer URL appeared Markdown-formatted in the report, so its exact value needs confirmation. Nothing in the framework reads or writes Google Sheets, reads `TARGET_MASTER`, assigns a `target_id`, or matches offers to configurations (Phase 8).
+The first adapter is [Laptop Factory](adapters/LAPTOP_FACTORY.md). Its external-policy finding is UNKNOWN, but project-owner policy authorizes internal collection and its live-use flag is enabled. The user reported one live smoke test, whose input URL still needs a clean-URL recheck. The second adapter, [DataBlitz](adapters/DATABLITZ.md) (2026-10-01), uses the same contract and owner policy with no framework change. Its external-policy finding is also UNKNOWN, and the user reported a one-product live spot check. The third adapter, [PC Express](adapters/PCX.md) (2026-10-01), also needed no framework change. Its live-use flag is enabled by an explicit owner decision; the external-policy finding remains RESTRICTED because the retailer's terms require written consent for automated collection. A user-reported live check returned one in-stock Acer offer; the offer URL appeared Markdown-formatted in the report, so its exact value needs confirmation. The fourth adapter, [PC Central](adapters/PCC.md) (2026-10-01), also needed no framework change. It is enabled under the project-wide owner decision, with external-policy finding UNKNOWN. It accepts a `?variant=<id>` product URL, because PC Central sells laptops in RAM variants at different prices. Its bare-URL live check failed safely with `AMBIGUOUS_VARIANT`; a selected-variant check returned one in-stock offer. Nothing in the framework reads or writes Google Sheets, reads `TARGET_MASTER`, assigns a `target_id`, or matches offers to configurations (Phase 8).
 
 ## Modules
 
@@ -13,7 +13,7 @@ The first adapter is [Laptop Factory](adapters/LAPTOP_FACTORY.md). Its external-
 |---|---|
 | `src/laptop_tracker/offers.py` | `OfferObservation` model, optional `OfferDetails`, `RetrievalMetadata`, `Availability`, `PriceType`, and deterministic helpers: `parse_price`, `clean_text`, `redact_url`, `is_http_url`. |
 | `src/laptop_tracker/scraping.py` | Adapter contract (`RetailerAdapter`, `ParsedOffer`), `ScrapeRequest`, `Fetcher` (timeouts, retries, throttling, checked redirects), injectable `Transport` and `Clock`, the live-use gate, the `scrape()` runner, error types, and structured logging. |
-| `src/laptop_tracker/adapters/` | Retailer adapters (Phase 7): `laptop_factory.py`, `datablitz.py`, and `pcx.py` (live use enabled by owner decisions). |
+| `src/laptop_tracker/adapters/` | Retailer adapters (Phase 7): `laptop_factory.py`, `datablitz.py`, `pcx.py`, and `pcc.py` (live use enabled by owner decisions). |
 | `tests/example_adapter.py` | Offline example adapter for synthetic fixtures. It demonstrates the contract; it is not a retailer integration. |
 | `tests/scraping_fakes.py` | Shared fake transport, fake clock, and no-network guard. |
 | `tests/scraping_fixtures/` | Synthetic pages on the reserved `shop.example.test` host, plus minimal retailer fixtures in per-retailer folders. |
@@ -155,6 +155,7 @@ Logs go to the `laptop_tracker.scraping` logger as `event key=value ...`. The sa
 
 ```bash
 python -m pytest -q tests/test_offers.py tests/test_scraping.py tests/test_laptop_factory.py
+python -m pytest -q tests/test_datablitz.py tests/test_pcx.py tests/test_pcc.py
 ```
 
 The tests use a fake transport and a fake clock, so no real time passes. A no-network fixture makes any socket connection fail the test. They cover:
@@ -168,8 +169,9 @@ The tests use a fake transport and a fake clock, so no real time passes. A no-ne
 
 - **Phase 7 (remaining):**
   - Rerun the Laptop Factory spot check with a bare URL. DataBlitz has a user-reported one-product spot check.
-  - Add further retailers (PCC, OCT), each with its own host allowlist, adapter, fixtures, and maintenance owner. DataBlitz (DBZ) and PC Express (PCX) were added on 2026-10-01. The project-wide owner policy is recorded in [DECISIONS.md](DECISIONS.md); check each retailer's own terms, as the PCX review found a prohibition.
-  - Run one controlled PCX live spot check with a bare product URL; its live-use flag is enabled by the owner's explicit decision.
+  - Add the remaining retailer (OCT) with its own host allowlist, adapter, fixtures, and maintenance owner. DataBlitz (DBZ), PC Express (PCX), and PC Central (PCC) were added on 2026-10-01. The project-wide owner policy is recorded in [DECISIONS.md](DECISIONS.md); check each retailer's own terms, as the PCX review found a prohibition.
+  - Verify the PCX offer URL string from the user-reported live check.
+  - PCC's selected-variant live check returned one in-stock offer; name an adapter maintainer and review more page states when available.
   - Confirm or tune the retrieval defaults per retailer.
   - Decide whether `UrllibTransport` is sufficient or whether browser automation is needed and approved. No browser automation exists.
 - **Phase 7 or 8:** Decide how scrape requests are built, for example from `TARGET_MASTER` search terms or retailer URLs, without assuming the table is populated.

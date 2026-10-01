@@ -3,11 +3,12 @@
 This project processes Shopee Electronics data from Google Sheets and produces a ranked list
 of laptop models for future retailer price tracking. The current Python pipeline reads the
 `raw` worksheet, validates and classifies data, detects M-1 and MTD, and generates local ranking
-and review files. A shared, retailer-neutral scraping framework (overall Phase 6) and three
-offline-tested retailer adapters, Laptop Factory, DataBlitz, and PC Express (Phase 7), are
-implemented and enabled for live use under project-owner decisions. Laptop Factory and DataBlitz
-each have one user-reported live check. PC Express has no live check, and its external-policy
-finding remains RESTRICTED under the retailer's terms. Exact configuration matching, price comparison, and GitHub
+and review files. A shared, retailer-neutral scraping framework (overall Phase 6) and four
+offline-tested retailer adapters, Laptop Factory, DataBlitz, PC Express, and PC Central
+(Phase 7), are implemented and enabled for live use under project-owner decisions. Laptop
+Factory, DataBlitz, and PC Express each have one user-reported live check. PC Express's
+external-policy finding remains RESTRICTED under the retailer's terms. PC Central's bare-URL
+check failed safely; a selected-variant live check returned one in-stock offer. Exact configuration matching, price comparison, and GitHub
 Actions automation are planned; they are not implemented.
 
 The latest read-only live dry run completed in 57.49 seconds and generated 100 targets. The
@@ -51,6 +52,11 @@ spot check returned one offer. See [docs/adapters/DATABLITZ.md](docs/adapters/DA
 tool. A user-reported live check returned one in-stock Acer offer; the offer URL appeared as a
 Markdown link in the report, so its exact string still needs `repr()` confirmation. The retailer's
 terms remain an external finding of RESTRICTED. See [docs/adapters/PCX.md](docs/adapters/PCX.md).
+`src/laptop_tracker/adapters/pcc.py` (PCC, added 2026-10-01) parses PC Central product pages on
+`pccentralcomputerstore.com` under the project-wide owner decision; the external-policy finding
+is UNKNOWN. PC Central sells laptops in RAM variants, so such a product needs a
+`?variant=<id>` URL. A bare-URL live check stopped safely with
+`AMBIGUOUS_VARIANT`; a selected-variant check returned one in-stock ASUS VivoBook offer. See [docs/adapters/PCC.md](docs/adapters/PCC.md).
 
 The script is named `run_phase1.py` for historical reasons. Its raw-data and Top 100 work maps
 mainly to **overall Phase 4** in the revised plan. Google access is overall Phase 1.
@@ -146,6 +152,7 @@ The latest live dry run took 57.49 seconds and did not write to any Google Sheet
 - [Laptop Factory adapter (Phase 7)](docs/adapters/LAPTOP_FACTORY.md)
 - [DataBlitz adapter (Phase 7)](docs/adapters/DATABLITZ.md)
 - [PC Express adapter (Phase 7)](docs/adapters/PCX.md)
+- [PC Central adapter (Phase 7)](docs/adapters/PCC.md)
 
 ## Local verification
 

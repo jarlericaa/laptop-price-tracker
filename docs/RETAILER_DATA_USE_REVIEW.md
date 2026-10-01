@@ -118,3 +118,47 @@ These questions do not block current internal use under the owner decision. Do n
 4. Who owns ongoing maintenance of the adapter? No adapter maintainer is named.
 
 The owner's PCX decision enables the project adapter while the external finding remains RESTRICTED. Do not describe the retailer's terms as permitting collection or mark this entry CLEAR without new evidence.
+
+## PC Central (PCC): `pccentralcomputerstore.com`
+
+- **Project decision: OWNER_APPROVED. Live use is enabled.** `PCCAdapter.live_use_approved = True` and `DATA_USE_REVIEW_STATUS = "OWNER_APPROVED"` under the project-wide owner decision of 2026-10-01 recorded in [DECISIONS.md](DECISIONS.md). That decision covers future retailer adapters in this internal tool. It is a project authorization, not PC Central's consent.
+- **External policy finding: UNKNOWN.** PC Central's published "Terms of service" and "Privacy policy" pages contain only a one-line warranty statement. Neither addresses website use, automated access, scraping, or data reuse, so there is neither a grant nor a prohibition. No retailer permission is recorded.
+- **Retailer identity:** the `PCC` code is not defined in the repository, and web searches found more than one retailer that fits it. The user confirmed **PC Central** on 2026-10-01.
+- **Host:** `pccentralcomputerstore.com`, the Shopify storefront (shop `pc-central-computer-store.myshopify.com`, title "PC Central PH", `og:site_name` "PC Central", linking the `PCCentral.PH` Facebook page). `www.pccentralcomputerstore.com` redirects to it (HTTP 301). Only the apex host is allowlisted. The previously indexed domain `pccentral.com.ph` (and its `www` host) redirected to an unrelated third-party site, so it is not allowlisted; the redirect was not followed.
+- **Date checked:** 2026-10-01.
+- **Method:** web searches, then single manual GETs by Claude during implementation, at least 10 seconds apart. They used a descriptive user agent, no cookies, no login, and no redirect following. Ten HTTP requests were sent, and one more lookup failed in DNS:
+  - `pccentral.com.ph` and `www.pccentral.com.ph`;
+  - the `pccentralcomputerstore.com` home page and its `www` host;
+  - `pccentralstore.com` (DNS failure, no request sent);
+  - robots.txt;
+  - the terms of service and privacy policy;
+  - two product pages linked from the home page.
+
+  No collection, search, pagination, cart, or checkout URL was requested. After the offline tests passed, one controlled live smoke check ran through the project scraper; see [PROGRESS_LOG.md](PROGRESS_LOG.md#pcc-live-smoke-check-2026-10-01).
+
+| Source | URL | Evidence |
+|---|---|---|
+| Old domain | https://pccentral.com.ph/, https://www.pccentral.com.ph/ | Both returned HTTP 301 to an unrelated third-party domain (Cloudflare-served). Not followed. |
+| Storefront home | https://pccentralcomputerstore.com/ | HTTP 200, `powered-by: Shopify`. Identifies as PC Central (see Host above). Its footer links social accounts and a Viber number; it has no terms-of-use or contact-page link. |
+| `www` host | https://www.pccentralcomputerstore.com/ | HTTP 301 to `https://pccentralcomputerstore.com/`. |
+| robots.txt | https://pccentralcomputerstore.com/robots.txt | Shopify's generated file. For `User-agent: *` it has `Allow: /`. It disallows admin, cart, checkout, orders, account, `/services`, `/sf_*`, `/cart.js`, `/recommendations/products`, and collection sort and filter crawl traps. It does not disallow `/products/` and has no `Crawl-delay`. Its comments, written by the platform, say checkout must not be completed automatically and that agents should use Shopify's UCP/MCP endpoints for catalog, cart, and checkout. They link the **Shopify** Terms of Service and `bots@shopify.com`, not PC Central terms. Sitemap: `https://pccentralcomputerstore.com/sitemap.xml`. |
+| Terms of service | https://pccentralcomputerstore.com/policies/terms-of-service | HTTP 200. The policy body is only "15 days replacement upon receiving the item. 2 years local warranty". It says nothing about website use or automated access. |
+| Privacy policy | https://pccentralcomputerstore.com/policies/privacy-policy | HTTP 200. Same one-line warranty text as the terms page; no privacy or data-use content. |
+| Product pages | https://pccentralcomputerstore.com/products/hp-15-fc0905au-15-6-ryzen-7-7730u-8gb-256gb-ssd-amd-radeon-graphics-win-11-home-pc-central and https://pccentralcomputerstore.com/products/acer-nitro-v-15-anv15-52-585u-15-6in-fhd-ips-165hz-intel-core-5-210h-16gb-ddr4-512gb-ssd-geforce-rtx-5050-8gb-win11-home-pc-central | Both returned HTTP 200 with no redirect. Public pages with no login. Used only to design minimal, sanitized fixtures; no page copy was kept in the repository. |
+
+**Findings**
+
+- The published policy pages hold only warranty text. They neither grant nor prohibit automated collection, so the finding is UNKNOWN, not RESTRICTED. A fuller policy may exist elsewhere, for example on social media, and was not reviewed.
+- robots.txt does not exclude product pages. That is a crawler-etiquette signal, not a grant of permission.
+- There is no published rate guidance.
+- The old `pccentral.com.ph` domain now redirects off-site. Treat any request or link to it as untrusted.
+
+**Unresolved external-policy questions**
+
+1. Does PC Central have website terms of use beyond the warranty line, or will it grant written permission for low-volume automated price collection?
+2. Which legal entity operates the storefront, and whom should a permission request go to? The storefront lists a Viber number and social accounts but no business email or address.
+3. Should collection use the platform's suggested UCP/MCP catalog interface instead of product HTML? That would need a separate review and adapter.
+4. What request rate and schedule are acceptable? The framework default is at least 10 seconds between requests per retailer.
+5. Who owns ongoing maintenance of the adapter? No adapter maintainer is named.
+
+These questions do not block current internal use under the owner decision. Do not describe this `OWNER_APPROVED` entry as `CLEAR` unless the external-policy evidence changes, and do not describe the owner decision as PC Central's consent.
