@@ -1,6 +1,6 @@
 # DataBlitz (DBZ) Adapter
 
-**Status:** Offline adapter implemented and tested on 2026-10-01 (`adapter_version = "dbz-1"`). Live use is enabled under the project-owner policy in [DECISIONS.md](../DECISIONS.md). The retailer's published permission remains unverified (external-policy finding UNKNOWN; project status OWNER_APPROVED). No project scraper request has been made to DataBlitz. Adapter maintainer: not yet named.
+**Status:** Adapter implemented and tested offline on 2026-10-01 (`adapter_version = "dbz-1"`). A user-reported live spot check on 2026-10-01 returned one MSI Crosshair A16 HX offer at PHP 162,995.00 with `IN_STOCK`. Live use is enabled under the project-owner policy in [DECISIONS.md](../DECISIONS.md). The retailer's published permission remains unverified (external-policy finding UNKNOWN; project status OWNER_APPROVED). Adapter maintainer: not yet named.
 
 | Item | Value |
 |---|---|

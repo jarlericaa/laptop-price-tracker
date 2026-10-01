@@ -53,7 +53,7 @@ The questions above remain useful if the project later seeks retailer confirmati
   - four candidate policy URLs;
   - two product pages.
 
-  No search, pagination, cart, or checkout URL was requested. The project scraper was not run.
+  No search, pagination, cart, or checkout URL was requested during this research. A later user-reported project-scraper spot check is recorded in [PROGRESS_LOG.md](PROGRESS_LOG.md#datablitz-live-smoke-test-2026-10-01).
 
 | Source | URL | Evidence |
 |---|---|---|
