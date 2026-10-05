@@ -1,41 +1,43 @@
 # `TARGET_MASTER` Schema and Review Workflow
 
-**Status:** On 2026-09-29, the user revised the Phase 5 configuration identity to use the fields marked 1:1 in [PRICE_TRACKING_OUTPUT_SCHEMA.md](PRICE_TRACKING_OUTPUT_SCHEMA.md). The local validator and templates now reflect that revised key. The current master Google Sheet header has not been changed as part of this local schema update. No approver is named.
+**Policy updated:** On 2026-10-05, the user set a five-field core identity and authorized rule-based promotion of candidates with those fields complete. This supersedes the ten-field identity proposal recorded on 2026-09-29. The Python validators, CSV templates, and Google Sheet have not yet been synchronized; they still implement the earlier rule. Do not treat this document update as a code or Sheets migration.
 
 ## Purpose and authority
 
-`TARGET_MASTER` contains only complete, reviewed laptop configurations that are candidates for future retailer price comparisons. It does not contain unreviewed Shopee titles or partial specifications. The Google Sheet is the master copy; local CSV exports are validation snapshots.
+`TARGET_MASTER` is the persistent catalog of laptop configurations the tracker intends to compare. It is not rebuilt when the weekly Top 100 changes. The Google Sheet is the master copy; local CSV exports are validation snapshots. Candidates with incomplete core specifications remain in `MATCH_REVIEW`.
 
-The revised 1:1 identity key is `model`, `screen_size_in`, `resolution`, `display_type`, `refresh_rate_hz`, `cpu_series`, `ram_capacity_gb`, `storage_capacity_gb`, `gpu_model`, and `os`. `brand` remains required product context, but is not part of the key because it was not bolded in the user's matching-field list. Other requested specifications are retained as fields for description and downstream output; they are not part of the identity key unless listed above.
+The **core identity key** is `model`, `screen_size_in`, `cpu_series`, `ram_capacity_gb`, and `storage_capacity_gb`. A candidate is core-complete when all five have unambiguous values. `resolution`, `display_type`, `refresh_rate_hz`, `gpu_model`, and `os` are lower-priority secondary details: retain them when available, but their absence does not block core completion, promotion, or a core match. Known secondary details can increase confidence; explicit contradictions must be recorded and surfaced for review rather than silently overwritten. They do not create a second target row by themselves.
 
-## Approved `TARGET_MASTER` columns
+`brand` is useful context and should be retained when known, but it is not one of the five core fields. Values must be based on available evidence; do not invent missing specifications.
 
-The header order matches `config/target_master_template.csv`. Headers are exact and case-sensitive. Every required column must be present; optional columns may be omitted or left blank. Unknown, blank, or repeated headers stop validation.
+## `TARGET_MASTER` columns under the updated policy
 
-| Column | Required | Meaning and format | Identity field |
+The existing header order is still defined by `config/target_master_template.csv`. Keep the Google Sheet headers unchanged during data updates. The required/optional designations below record the 2026-10-05 policy; the local template and validator have not yet been changed to match it.
+
+| Column | Required by updated policy | Meaning and format | Matching role |
 |---|---:|---|---:|
 | `target_id` | Yes | Stable ID exactly like `TGT-000001`. Never derive it from specs or reuse it. | No; unique ID |
 | `status` | Yes | `ACTIVE` or `INACTIVE` (uppercase). Retire configurations by setting `INACTIVE`; do not delete rows. | No |
-| `brand` | Yes | Manufacturer brand. Required context; not part of the 1:1 key. | No |
-| `model` | Yes | Exact product model name/code as verified from product evidence. | Yes |
-| `screen_size_in` | Yes | Positive diagonal display size in inches, up to two decimal places. | Yes |
-| `resolution` | Yes | `WIDTHxHEIGHT` with lowercase `x`, for example `1920x1080`. | Yes |
-| `display_type` | Yes | Exact display type, such as the manufacturer-stated panel technology. | Yes |
-| `refresh_rate_hz` | Yes | Positive integer in Hz. | Yes |
+| `brand` | No | Manufacturer brand, when known; useful context. | Context |
+| `model` | Yes | Laptop model name/code. | Core |
+| `screen_size_in` | Yes | Positive diagonal display size in inches, up to two decimal places. | Core |
+| `resolution` | No | `WIDTHxHEIGHT` with lowercase `x`, for example `1920x1080`. | Secondary |
+| `display_type` | No | Exact display type, such as the manufacturer-stated panel technology. | Secondary |
+| `refresh_rate_hz` | No | Positive integer in Hz. | Secondary |
 | `cpu_brand` | No | CPU manufacturer/brand. | No |
-| `cpu_series` | Yes | Exact CPU series, as stated in product evidence. | Yes |
+| `cpu_series` | Yes | Exact CPU series, as stated in available evidence. | Core |
 | `cpu_generation` | No | CPU generation, if verified. | No |
 | `cpu_cores` | No | Positive integer core count, if verified. | No |
-| `ram_capacity_gb` | Yes | Positive integer in GB. | Yes |
+| `ram_capacity_gb` | Yes | Positive integer in GB. | Core |
 | `ram_type` | No | Memory type as stated in product evidence. | No |
-| `storage_capacity_gb` | Yes | Total capacity in decimal GB: `1 TB = 1000 GB`. | Yes |
+| `storage_capacity_gb` | Yes | Total capacity in decimal GB: `1 TB = 1000 GB`. | Core |
 | `storage_type` | No | Storage technology or combination, as verified. | No |
 | `storage_layout` | No | Per-drive layout, for example `1x512GB SSD + 1x1000GB HDD`. | No |
 | `gpu_type` | No | Graphics type, if verified. | No |
 | `gpu_brand` | No | GPU brand, if verified. | No |
-| `gpu_model` | Yes | Exact GPU model; enter the verified integrated GPU where applicable. | Yes |
+| `gpu_model` | No | Exact GPU model, if known. | Secondary |
 | `vram` | No | VRAM detail as stated by the evidence. | No |
-| `os` | Yes | Exact preinstalled OS/edition. Use an explicit value such as `No OS`, rather than leaving it blank. | Yes |
+| `os` | No | Exact preinstalled OS/edition, if known. | Secondary |
 | `battery_capacity` | No | Battery capacity as stated in the evidence. | No |
 | `build_material` | No | Build material as stated in the evidence. | No |
 | `manufacturer_model_code` | No | Manufacturer model code/SKU; useful evidence, not the identity key. | No |
@@ -44,16 +46,18 @@ The header order matches `config/target_master_template.csv`. Headers are exact 
 | `color` | No | Descriptive color variant. | No |
 | `variant_notes` | No | Descriptive variant details. | No |
 | `manufacturer_part_number` | No | Manufacturer part number or SKU; evidence only, not a stand-alone identity rule. | No |
-| `source_url` | Yes | Absolute HTTP(S) URL a reviewer can use to verify the configuration. | No |
-| `reviewer` | Yes | Name of the manager or category owner who approved the row. No approver has been designated. | No |
-| `reviewed_at` | Yes | Actual approval date in `YYYY-MM-DD` format. | No |
+| `source_url` | No | Helpful verification link, when available. Do not invent one. | Evidence |
+| `reviewer` | No | Approval source. For rule-based promotion, use `Owner-approved five-core-field rule`; a personal name is not required. | Audit |
+| `reviewed_at` | No | Date the row was promoted, in `YYYY-MM-DD` format, if recorded. | Audit |
 | `notes` | No | Descriptive free text. | No |
 
-The uniqueness key is the identity fields marked **Yes** above, excluding the stable ID and required non-identity `brand`. A missing identity specification is an error; it must not make two incomplete rows appear to match. Incomplete candidates stay in `MATCH_REVIEW` until the required fields and evidence are complete.
+The uniqueness key is exactly the five core fields: `model`, `screen_size_in`, `cpu_series`, `ram_capacity_gb`, and `storage_capacity_gb`. Normalize only harmless formatting such as case, surrounding whitespace, and numeric units before comparing. Do not use fuzzy model matching. A missing core value means the row is not core-complete; blanks never match one another.
 
 For duplicate detection, the validator compares identity text case-insensitively and collapses whitespace; it does not rewrite the stored text. This retains the existing validator's comparison convention. `ACTIVE` and `INACTIVE` rows both participate in uniqueness checks. Keep inactive rows so retired `target_id` values cannot be reused.
 
-Specification fields have no controlled vocabulary beyond the formats above. Preserve source wording; do not infer absent specifications. Store RAM and storage capacities as integer GB, using decimal units (`1 TB = 1000 GB`). Keep full CPU model, RAM/storage types, and storage layout as additional evidence where available; these are not part of the revised identity key.
+Specification fields have no controlled vocabulary beyond the formats above. Preserve source wording. Store RAM and storage capacities as integer GB, using decimal units (`1 TB = 1000 GB`). Keep full CPU model, RAM/storage types, and storage layout as additional evidence where available; these are not part of the core identity key.
+
+Rows that share the same five-field core key share one `target_id`, even if secondary details are missing. If secondary values disagree, do not overwrite known values silently; record the conflict in notes and flag it for review. Missing secondary values alone do not create a conflict or prevent promotion.
 
 ## Shopee source mapping
 
@@ -63,20 +67,25 @@ Shopee `source_model_id` values are kept outside `TARGET_MASTER`, in a separate 
 source_model_id,target_id,reviewer,reviewed_at,notes
 ```
 
-Each row records one reviewed `source_model_id` to `target_id` link. A `source_model_id` can map to at most one target; multiple source model IDs may map to the same target configuration. A mapping's `target_id` must refer to a `TARGET_MASTER` record. Put ambiguous links in `MATCH_REVIEW` and do not create a mapping until a reviewer resolves them. IDs remain text, including any leading zeroes. Validation rules are listed under [Validation behavior](#validation-behavior).
+Each row records one `source_model_id` to `target_id` link. A `source_model_id` can map to at most one target; multiple source model IDs may map to the same target configuration. A mapping's `target_id` must refer to a `TARGET_MASTER` record. Add a mapping when a candidate is promoted under the five-core-field rule. IDs remain text, including any leading zeroes.
+
+For the user's rule-based batch promotion, record `Owner-approved five-core-field rule` in `reviewer` and the actual promotion date in `reviewed_at`; a personal name is not required. Do not use this rule for a candidate with missing or ambiguous core fields.
 
 ## `MATCH_REVIEW` workflow
 
-Use `MATCH_REVIEW` for new, incomplete, ambiguous, or rejected candidates. Its initial header template is `config/match_review_template.csv`. The approved statuses are exactly:
+Use `MATCH_REVIEW` for new, incomplete, ambiguous, complete-but-not-yet-transferred, or rejected candidates. Its initial header template is `config/match_review_template.csv`. The desired statuses are:
 
 - `NEW`: captured, not yet assessed.
-- `INCOMPLETE`: one or more required identity specifications or source evidence are missing.
-- `REVIEW_REQUIRED`: enough evidence exists to assess the candidate, but a person must resolve its identity or mapping.
+- `INCOMPLETE`: one or more core fields are missing or ambiguous.
+- `COMPLETE`: the five core fields are populated and unambiguous; eligible for rule-based promotion. Missing secondary fields and source URL do not block this status.
+- `REVIEW_REQUIRED`: a core identity conflict or unresolved ambiguity prevents safe promotion.
 - `REJECTED`: a designated manager or category owner decided the candidate should not be tracked.
 
-The candidate template allows missing specifications so they can be gathered during review. A candidate moves into `TARGET_MASTER` only when its identity fields and source URL are complete and a designated manager or category owner has approved it. Record that person's name and approval date in `reviewer` and `reviewed_at`. No approver is assigned by this project documentation. Add its reviewed Shopee link separately to `SOURCE_MODEL_MAP`. Rejected and unresolved candidates remain in `MATCH_REVIEW`, not `TARGET_MASTER`.
+The candidate template allows missing specifications so they can be gathered during review. Under the user's 2026-10-05 standing rule, any non-rejected candidate with all five core fields filled and no core ambiguity is approved for promotion. Copy one `TARGET_MASTER` row per unique core key, assign or reuse a stable `target_id`, and map each associated `source_model_id` in `SOURCE_MODEL_MAP`. Keep its `MATCH_REVIEW` row with status `COMPLETE` as the review trail. Rejected, incomplete, and core-ambiguous candidates remain in `MATCH_REVIEW`.
 
-Promotion is a manual step. No command in this repository moves, copies, or maps a review row into `TARGET_MASTER` or `SOURCE_MODEL_MAP`.
+Secondary details should be copied when known. Their absence never blocks promotion. If known secondary values conflict among candidates with the same core key, retain the conflict in notes and flag it; do not overwrite an existing master value silently or create a second target solely because a secondary field differs.
+
+Promotion and mapping are currently spreadsheet/manual operations. No command in this repository yet moves, copies, assigns target IDs, or maps review rows under this policy.
 
 ### Seeding the candidate universe from the Top 100
 
@@ -96,9 +105,13 @@ python seed_match_review.py
 
 On 2026-09-29, seeding the accepted Top 100 produced 100 `NEW` candidates for 100 distinct source model IDs. That is a count of Shopee model IDs, not of configurations: several source IDs may later prove to be the same configuration, and incomplete or ambiguous candidates remain under review. Import the file into the `MATCH_REVIEW` tab manually if desired; this project does not write it to the sheet.
 
-The tracking scope is the full accepted Top 100: every distinct laptop configuration represented by those source IDs should be tracked once its exact specifications and evidence are verified. Multiple source IDs can link to one configuration. Candidates without enough evidence stay in review. The designated owner may approve the reviewed set as a batch, with the approver name and date recorded on each `TARGET_MASTER` row.
+The initial tracking scope is the accepted Top 100 plus sibling Shopee variations that the user has explicitly included in `MATCH_REVIEW`. Several `source_model_id` values may represent the same core configuration and link to one target. Incomplete or ambiguous core identities stay in review. The user authorized promotion based on the five core fields on 2026-10-05.
 
 ## Validation behavior
+
+### Implementation status
+
+This section describes the validator currently in the repository, which has not been updated for the 2026-10-05 policy. It still requires the previous ten-field identity, requires source URLs and per-row reviewer/date values, and permits only `NEW`, `INCOMPLETE`, `REVIEW_REQUIRED`, and `REJECTED` in `MATCH_REVIEW`. It will reject some rows this policy considers promotable and does not implement automatic target-ID assignment or mapping. Update the templates, validators, and sheet status validation before using local checks or code-driven promotion with this policy.
 
 `src/laptop_tracker/target_master.py` validates the approved `TARGET_MASTER` schema using exact strings:
 
@@ -157,23 +170,21 @@ This reads the `TARGET_MASTER`, `SOURCE_MODEL_MAP`, and `MATCH_REVIEW` tabs from
 
 ## Unspecified behaviors and chosen defaults
 
-These behaviors were not covered by the approved decisions. The implementation uses the least destructive option, and each should be confirmed or changed by the designated manager or category owner once named:
+These implementation behaviors are not yet aligned with the 2026-10-05 rule. The current code uses the defaults below until the templates and validators are updated:
 
 | Question | Current behavior |
 |---|---|
 | May a mapping point to an `INACTIVE` target? | Allowed and counted (`links_to_inactive_targets`), not rejected. No policy has been approved. |
 | May a mapping point to a `TARGET_MASTER` row that fails validation? | Rejected as `TARGET_NOT_VALID`, so downstream code never consumes a link to an unvalidated configuration. Nothing is deleted. |
 | What is the `review_id` scheme? | None is approved. Any text is accepted, nonblank IDs must be unique, and the seeding command leaves the field blank. |
-| Who may review a `SOURCE_MODEL_MAP` link? | Not specified. A reviewer name and date are required, but names are not checked against an approver list, because no approver has been designated. |
-| When a candidate is promoted, is its review row removed, kept, or given a new status? | Not specified. No row is removed automatically; the overlap count shows mapped IDs whose review rows remain open. |
-| Must `status` agree with the evidence? For example, a `NEW` row with complete specifications. | Not enforced. Status is a human judgement; only the allowed values are checked. |
+| Who may review a `SOURCE_MODEL_MAP` link? | The user authorized rule-based promotion. The current validator still requires nonblank reviewer/date values; use the policy label above and actual promotion date after synchronization. |
+| When a candidate is promoted, is its review row removed, kept, or given a new status? | Updated policy: keep it as `COMPLETE` for traceability. Current validator does not yet allow that status. |
+| Must `status` agree with the evidence? For example, a `NEW` row with complete core specifications. | Updated policy: set `COMPLETE` when the five core fields are complete and unambiguous. Current validator only checks allowed values. |
 | Who is `prepared_by` for seeded rows? | Left blank rather than attributed to a person or tool. |
 
-## Decisions still to operationalize
+## Implementation work still required
 
-- Identify the designated manager or category owner who approves additions and retirements. This document deliberately does not assign one.
-- Prepare actual product configuration rows from authoritative evidence; the accepted Phase 4 Shopee model list alone does not verify CPU, GPU, RAM, storage, display, or OS variants. The seeded candidate file is the starting worklist.
-- Add the approved header to `TARGET_MASTER` and create `SOURCE_MODEL_MAP` and `MATCH_REVIEW` in the master spreadsheet from the templates, then rerun the read-only `--from-sheets` check.
-- Confirm or change the defaults in the table above.
-- Define the downstream interface that the later exact-matching phase will consume from the validated tables.
-- Add a coverage check showing which of the 100 accepted Top 100 source model IDs have reviewed mappings and which remain unresolved in `MATCH_REVIEW`.
+- Synchronize the local templates, `TARGET_MASTER` and `MATCH_REVIEW` validators, and Sheet dropdowns with the five-core-field rule and `COMPLETE` status.
+- Implement core-key duplicate grouping, stable target-ID reuse/assignment, and one source-model mapping per eligible Shopee variation.
+- Implement Phase 8 matching: require exact agreement on the five core fields; use available secondary values as corroboration; flag known contradictions for review.
+- Add a coverage check showing which in-scope Shopee variation IDs are mapped and which remain incomplete or ambiguous.

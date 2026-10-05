@@ -13,10 +13,10 @@ The Python implementation and CLI are named “Phase 1” (`run_phase1.py` and `
 | 2. Create repository and project structure | COMPLETE | Four grouped commits cover setup, implementation, tests, and initial docs; follow-up commits record the Phase 5 validator and this status refresh. Local business decisions and outputs remain ignored. |
 | 3. Create Google Sheets output structure | COMPLETE | User-reported verification confirms the nine production output tabs and headers. A read-only report for the dedicated test spreadsheet confirmed all nine test tabs and headers, expected synthetic output rows, and `top_100_count=1`. The sequential-write recovery procedure is documented. The test report did not list or inspect `raw`; no production write occurred. |
 | 4. Read raw and generate Top 100 | COMPLETE | The 2026-09-28 read-only run completed in 57.49 seconds and generated 100 targets after 21 historical keys were explicitly excluded. The user accepted the current CSV reports on 2026-09-29; no production Sheets write was made. |
-| 5. Build and validate `TARGET_MASTER` | PARTIALLY_COMPLETE | The user later reported all three tabs created with verified headers and no data rows. The local `TARGET_MASTER` and `MATCH_REVIEW` templates have since been revised to the new 1:1 identity key and still need to be reflected in the Sheet. Validators exist for all three tables, with a read-only reader and Top 100 candidate seeder. No real configurations or mappings have been entered, and no approver is named. |
+| 5. Build and validate `TARGET_MASTER` | PARTIALLY_COMPLETE | On 2026-10-05 the user approved rule-based promotion when the five core identity fields are populated and unambiguous. Documentation now records this policy; local templates, validators, and Sheet headers still need synchronization. No current Sheet data was inspected for this update. |
 | 6. Build shared scraping framework | COMPLETE | The retailer-neutral framework (`offers.py`, `scraping.py`) and an offline example-adapter harness were added on 2026-09-29. 203 tests, Ruff, and `compileall` passed. No live request was made. The framework does not read Sheets or match offers to targets. |
 | 7. Implement retailer adapters | COMPLETE | LF, DBZ, PCX, PCC, and OCT adapters meet the Phase 6 contract, have offline tests and documentation, and have live-check evidence recorded. Jarelle Ricaforte is the named maintainer for all five. Unobserved page states remain documented limitations; retailer-policy findings remain separate from the project-owner live-use decision. |
-| 8. Normalize and perform exact matching | NOT_STARTED | No offer normalization or exact configuration matcher exists. |
+| 8. Normalize and perform exact matching | NOT_STARTED | No offer normalization or configuration matcher exists. The approved matching key is model, screen size, CPU series, RAM capacity, and storage capacity; other specs are optional corroboration. |
 | 9. Generate comparisons and price history | NOT_STARTED | No comparison or history outputs exist. |
 | 10. Test and run a controlled pilot | BLOCKED | Requires accepted Phase 4 outputs, approved and populated `TARGET_MASTER` configurations, and adapters first. |
 | 11. Add GitHub Actions automation | NOT_STARTED | No workflow exists; this follows a passing controlled pilot. |
@@ -77,24 +77,22 @@ The Python implementation and CLI are named “Phase 1” (`run_phase1.py` and `
 ### Phase 5 — Build and validate `TARGET_MASTER`
 
 - **Objective:** Create the authoritative list of laptop configurations to compare against retailers.
-- **Scope:** Account for all 100 accepted Phase 4 Top 100 source model IDs. Track every distinct configuration whose exact specs and evidence can be verified; keep unresolved candidates in `MATCH_REVIEW`. Multiple source IDs may map to one configuration.
-- **Tasks:** Prepare evidence-backed, complete configuration rows; identify the designated manager/category owner who approves additions and retirements; implement validators for the mapping and review tables; build a read-only sheet reader and a stable downstream interface.
-- **Deliverables:** Approved `TARGET_MASTER`, `SOURCE_MODEL_MAP`, and `MATCH_REVIEW` schemas; validated rows and mappings; a repeatable local snapshot check; a read-only sheet path for consumers.
-- **Dependencies:** Phase 4 target review, authoritative product evidence, and approval by the designated manager or category owner.
-- **Validation:** Required-field and exact-identity checks, duplicate-ID and mapping checks, review-state checks, and representative manual approval review.
-- **Definition of done:** The master and supporting tables contain approved, validated records; local CSV snapshots can be checked repeatably; downstream code can read the authoritative sheet tables without fuzzy identity assumptions.
+- **Scope:** Keep a reusable catalog of laptop configurations, not just the current week's Top 100. Include accepted Top 100 source model IDs and sibling variation IDs that are added to `MATCH_REVIEW`. Multiple Shopee source IDs may map to one configuration.
+- **Tasks:** Promote a review candidate when its five core identity fields are populated and unambiguous: `model`, `screen_size_in`, `cpu_series`, `ram_capacity_gb`, and `storage_capacity_gb`. Reuse a matching target row or create one with a new stable `target_id`; map each source model ID to that target. Keep missing secondary fields from blocking promotion. Implement matching validators and a stable downstream interface.
+- **Deliverables:** Synchronized `TARGET_MASTER`, `SOURCE_MODEL_MAP`, and `MATCH_REVIEW` schemas; promoted rows and mappings; a repeatable local snapshot check; a read-only sheet path for consumers.
+- **Dependencies:** Phase 4 candidate data and the user's 2026-10-05 authorization for rule-based promotion using the five core fields. Do not infer missing specs. Conflicting or incomplete core identity data remains in review.
+- **Validation:** Five-core-field completeness, exact core-key deduplication, stable target-ID uniqueness, one-target-per-source-ID mapping, and review-state checks. Missing secondary fields are allowed; known secondary-field disagreements must be surfaced without silently overwriting values.
+- **Definition of done:** The master and supporting tables contain validated records promoted under the five-field rule; local CSV snapshots can be checked repeatably; downstream code can read the authoritative sheet tables without fuzzy identity assumptions.
 - **Current status:** `PARTIALLY_COMPLETE`.
-  - **Done:** The user revised the 1:1 identity key on 2026-09-29 to the bolded fields in [PRICE_TRACKING_OUTPUT_SCHEMA.md](PRICE_TRACKING_OUTPUT_SCHEMA.md). [TARGET_MASTER_SCHEMA.md](TARGET_MASTER_SCHEMA.md), both local templates, and the validators now reflect those fields, required brand context, decimal storage units, source URL, stable IDs, and human approval fields.
+  - **Done:** The user approved a five-field core identity and rule-based promotion on 2026-10-05. See [TARGET_MASTER_SCHEMA.md](TARGET_MASTER_SCHEMA.md), [PRICE_TRACKING_OUTPUT_SCHEMA.md](PRICE_TRACKING_OUTPUT_SCHEMA.md), and [DECISIONS.md](DECISIONS.md).
     - `supporting_tables.py` validates `SOURCE_MODEL_MAP` and `MATCH_REVIEW` against their exact templates.
     - `check_target_tables.py` checks local CSV snapshots of all three tables, or reads the tabs with the read-only scope using `--from-sheets`.
     - `seed_match_review.py` produced 100 local `NEW` candidates from the accepted Top 100, with all specifications, URLs, and approvals blank.
     - Three stale `TARGET_MASTER` test expectations were corrected to the approved rules; the validator's rules were unchanged.
     - 129 tests, Ruff, and `compileall` passed on 2026-09-29.
   - **Not done:**
-    - The designated manager or category owner has not been named.
-    - No candidate has been researched, approved, or mapped. The user reported the Phase 5 tabs had no data rows.
-    - Update the existing master Google Sheet's `TARGET_MASTER` and `MATCH_REVIEW` headers to the revised local templates; this repository change did not write to Sheets. The user previously reported that the three Phase 5 tabs had headers and no data rows.
-    - The conservative defaults for unspecified behaviors (listed in the schema doc) need owner confirmation.
+    - Synchronize `TARGET_MASTER` and `MATCH_REVIEW` headers, dropdown statuses, local templates, and validators with the five-field policy; this documentation update did not write to Sheets or change code.
+    - Promote eligible rows and populate `SOURCE_MODEL_MAP`; the current state of the live sheet was not checked during this documentation update.
     - No downstream consumer interface or automatic full Top 100 source-ID coverage check exists.
 
 ### Phase 6 — Build shared scraping framework
@@ -165,7 +163,7 @@ The Python implementation and CLI are named “Phase 1” (`run_phase1.py` and `
 ### Phase 8 — Normalize and perform exact matching
 
 - **Objective:** Match retailer offers only to the correct target configuration.
-- **Tasks:** Normalize attributes; compare the user-designated 1:1 fields in [PRICE_TRACKING_OUTPUT_SCHEMA.md](PRICE_TRACKING_OUTPUT_SCHEMA.md), as represented by `TARGET_IDENTITY_COLUMNS`; classify exact, unmatched, and ambiguous offers. Define normalization and missing-value behavior before coding the matcher.
+- **Tasks:** Normalize attributes; first match exactly on `model`, `screen_size_in`, `cpu_series`, `ram_capacity_gb`, and `storage_capacity_gb`. Use resolution, display type, refresh rate, GPU model, OS, and other known details as corroborating or conflict signals. Missing secondary values do not block a core match. Classify exact, unmatched, and ambiguous offers; do not silently publish ambiguous core matches.
 - **Deliverables:** Normalization rules, exact matcher, match evidence, and review queue.
 - **Dependencies:** Phases 5 and 6; retailer observations from Phase 7.
 - **Validation:** Positive, negative, near-match, and ambiguous fixtures; require exact outcomes for all reviewed test cases.
