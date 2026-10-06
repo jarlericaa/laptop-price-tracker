@@ -110,6 +110,15 @@ ID. All specifications, URLs, and approvals are left blank for human research. I
 `TARGET_MASTER` or mapping rows. All three commands write reports only under ignored `data/`
 paths and print counts only.
 
+```bash
+python match_offers.py --target-master tm.csv --observations offer_observations.csv
+```
+
+`match_offers.py` (Phase 8) matches saved retailer offer observations to a fully valid
+`TARGET_MASTER` snapshot using the five-field exact rule, offline. It writes
+`offer_match_results.csv`, `offer_match_review_queue.csv`, and `offer_match_evidence.csv` under
+`data/output/` and prints counts only. See [docs/MATCHING.md](docs/MATCHING.md).
+
 ## Conflicting duplicates
 
 Exact duplicate rows for a `period_month`/`shop_id`/`item_id`/`model_id` key are kept once.
@@ -149,13 +158,14 @@ The latest live dry run took 57.49 seconds and did not write to any Google Sheet
 - [PC Express adapter (Phase 7)](docs/adapters/PCX.md)
 - [PC Central adapter (Phase 7)](docs/adapters/PCC.md)
 - [Octagon adapter (Phase 7)](docs/adapters/OCT.md)
+- [Exact offer matching (Phase 8)](docs/MATCHING.md)
 
 ## Local verification
 
 ```bash
 python -m pytest -q
 python -m ruff check .
-python -m compileall src run_phase1.py smoke_test.py check_target_master.py check_target_tables.py seed_match_review.py
+python -m compileall src run_phase1.py smoke_test.py check_target_master.py check_target_tables.py seed_match_review.py match_offers.py
 python smoke_test.py
 python run_phase1.py --dry-run
 ```

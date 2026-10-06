@@ -17,6 +17,8 @@ from urllib.parse import urlsplit
 
 import pandas as pd
 
+from .normalization import CORE_MATCH_COLUMNS, core_value_key
+
 
 @dataclass(frozen=True)
 class TargetColumn:
@@ -46,32 +48,32 @@ TARGET_MASTER_COLUMNS: tuple[TargetColumn, ...] = (
     TargetColumn(
         "status", True, "Whether the configuration is tracked.", allowed=("ACTIVE", "INACTIVE")
     ),
-    TargetColumn("brand", True, "Manufacturer brand; descriptive, not part of the 1:1 key."),
-    TargetColumn("model", True, "Exact product model name/code; part of the 1:1 key."),
+    TargetColumn("brand", False, "Manufacturer brand, when known; context, not core identity."),
+    TargetColumn("model", True, "Exact product model name/code; core identity."),
     TargetColumn(
         "screen_size_in",
         True,
-        "Diagonal display size in inches; part of the 1:1 key.",
+        "Diagonal display size in inches; core identity.",
         r"[1-9][0-9]?(\.[0-9]{1,2})?",
         "positive number such as 14 or 15.6",
     ),
     TargetColumn(
         "resolution",
-        True,
-        "Native display resolution; part of the 1:1 key.",
+        False,
+        "Native display resolution, when known; secondary corroboration.",
         r"[1-9][0-9]{2,4}x[1-9][0-9]{2,4}",
         "WIDTHxHEIGHT such as 1920x1080",
     ),
-    TargetColumn("display_type", True, "Display panel type; part of the 1:1 key."),
+    TargetColumn("display_type", False, "Display panel type, when known; secondary."),
     TargetColumn(
         "refresh_rate_hz",
-        True,
-        "Display refresh rate in Hz; part of the 1:1 key.",
+        False,
+        "Display refresh rate in Hz, when known; secondary.",
         POSITIVE_INTEGER_PATTERN,
         "positive integer",
     ),
     TargetColumn("cpu_brand", False, "CPU manufacturer/brand."),
-    TargetColumn("cpu_series", True, "Exact CPU series; part of the 1:1 key."),
+    TargetColumn("cpu_series", True, "Exact CPU series; core identity."),
     TargetColumn("cpu_generation", False, "CPU generation, if verified."),
     TargetColumn(
         "cpu_cores",
@@ -83,7 +85,7 @@ TARGET_MASTER_COLUMNS: tuple[TargetColumn, ...] = (
     TargetColumn(
         "ram_capacity_gb",
         True,
-        "Installed memory capacity in GB; part of the 1:1 key.",
+        "Installed memory capacity in GB; core identity.",
         POSITIVE_INTEGER_PATTERN,
         "positive integer",
     ),
@@ -91,7 +93,7 @@ TARGET_MASTER_COLUMNS: tuple[TargetColumn, ...] = (
     TargetColumn(
         "storage_capacity_gb",
         True,
-        "Total storage capacity in decimal GB (1 TB = 1000 GB); part of the 1:1 key.",
+        "Total storage capacity in decimal GB (1 TB = 1000 GB); core identity.",
         POSITIVE_INTEGER_PATTERN,
         "positive integer",
     ),
@@ -103,9 +105,9 @@ TARGET_MASTER_COLUMNS: tuple[TargetColumn, ...] = (
     ),
     TargetColumn("gpu_type", False, "Graphics type, if verified."),
     TargetColumn("gpu_brand", False, "GPU brand, if verified."),
-    TargetColumn("gpu_model", True, "Exact GPU model; part of the 1:1 key."),
+    TargetColumn("gpu_model", False, "Exact GPU model, when known; secondary."),
     TargetColumn("vram", False, "GPU memory amount/type as stated by the evidence."),
-    TargetColumn("os", True, "Exact preinstalled operating system edition; part of the 1:1 key."),
+    TargetColumn("os", False, "Exact preinstalled OS edition, when known; secondary."),
     TargetColumn("battery_capacity", False, "Battery capacity as stated by the evidence."),
     TargetColumn("build_material", False, "Chassis/build material as stated by the evidence."),
     TargetColumn("manufacturer_model_code", False, "Manufacturer model code/SKU, useful evidence."),
@@ -116,14 +118,18 @@ TARGET_MASTER_COLUMNS: tuple[TargetColumn, ...] = (
     TargetColumn("manufacturer_part_number", False, "Manufacturer SKU or part number."),
     TargetColumn(
         "source_url",
-        True,
-        "Evidence URL a reviewer can use to verify this configuration.",
+        False,
+        "Evidence URL a reviewer can use to verify this configuration, when available.",
         is_url=True,
     ),
     TargetColumn(
-        "reviewer", True, "Named manager or category owner who approved the row."
+        "reviewer",
+        False,
+        "Approval source, e.g. the owner-approved five-core-field rule label.",
     ),
-    TargetColumn("reviewed_at", True, "Approval date.", format_hint="YYYY-MM-DD", is_date=True),
+    TargetColumn(
+        "reviewed_at", False, "Promotion date, if recorded.", format_hint="YYYY-MM-DD", is_date=True
+    ),
     TargetColumn("notes", False, "Free-text notes.", free_text=True),
 )
 
@@ -137,21 +143,10 @@ TARGET_PRODUCT_REQUIRED_COLUMNS = [
     not in {"target_id", "status", "source_url", "reviewer", "reviewed_at"}
 ]
 
-# Exact-configuration identity revised to the user's 1:1 matching fields on 2026-09-29. Brand is
-# retained as a required descriptive field but is not part of this key. Missing key values are
+# Five-field core identity set by the user on 2026-10-05 (supersedes the 2026-09-29 ten-field
+# key). Secondary details are optional and never part of this key. Missing key values are
 # invalid and are never grouped as a matching identity.
-TARGET_IDENTITY_COLUMNS: tuple[str, ...] = (
-    "model",
-    "screen_size_in",
-    "resolution",
-    "display_type",
-    "refresh_rate_hz",
-    "cpu_series",
-    "ram_capacity_gb",
-    "storage_capacity_gb",
-    "gpu_model",
-    "os",
-)
+TARGET_IDENTITY_COLUMNS: tuple[str, ...] = CORE_MATCH_COLUMNS
 
 TARGET_ERROR_COLUMNS = [
     "source_row_number",
@@ -395,7 +390,9 @@ def _add_duplicate_errors(
         values = [str(record[column]) for column in key_columns]
         if any(value.strip() == "" for value in values):
             continue
-        key = tuple(identity_text(value) for value in values)
+        key = tuple(
+            _identity_key(column, value) for column, value in zip(key_columns, values, strict=True)
+        )
         groups.setdefault(key, []).append(int(record["source_row_number"]))  # type: ignore[arg-type]
     for row_numbers in groups.values():
         if len(row_numbers) < 2:
@@ -403,6 +400,16 @@ def _add_duplicate_errors(
         for row_number in row_numbers:
             others = ";".join(str(number) for number in row_numbers if number != row_number)
             add_error(row_number, column_label, "", code, f"{message}; also on row(s) {others}.")
+
+
+def _identity_key(column: str, value: str) -> object:
+    """Core fields use the matcher's comparison key, so ``14`` and ``14.0`` collide here too."""
+    if column in CORE_MATCH_COLUMNS:
+        try:
+            return core_value_key(column, value)
+        except ValueError:
+            pass  # The malformed cell is reported separately; compare its text form instead.
+    return identity_text(value)
 
 
 def read_target_master_csv(path: str | Path) -> list[list[str]]:

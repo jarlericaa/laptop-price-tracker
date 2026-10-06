@@ -1,6 +1,6 @@
 # Planned Price Tracking Output Fields
 
-**Status:** Output fields were recorded on 2026-09-29. On 2026-10-05, the user changed the planned matching priority to five core fields plus lower-priority supporting specifications. This supersedes the earlier ten-field exact-key requirement below. Comparison outputs are not implemented yet; the local target validator and templates still need synchronization.
+**Status:** Output fields were recorded on 2026-09-29. On 2026-10-05, the user changed the planned matching priority to five core fields plus lower-priority supporting specifications. This supersedes the earlier ten-field exact-key requirement below. Comparison outputs are not implemented yet. The local target validators were synchronized with the five-field policy on 2026-10-06.
 
 ## Requested fields
 
@@ -37,6 +37,6 @@ Phase 8 matching must first require agreement on the five core fields after docu
 
 This is a requested downstream output schema, separate from the Phase 6 `OfferObservation` model. The planned Phase 5 target identity uses the five-field core key above. `manufacturer_model_code` and `cpu_model` remain optional evidence fields; they do not determine whether two target rows share a core identity. Keep all requested detail fields in outputs even when they are not part of the core key.
 
-**Implementation gap:** `src/laptop_tracker/target_master.py`, the local templates, and the current `MATCH_REVIEW` validator still use the earlier ten-field key and do not accept the new `COMPLETE` state. They must be updated before local validation or automated matching can enforce this policy.
+**Implementation status (2026-10-06):** `src/laptop_tracker/target_master.py` and the `MATCH_REVIEW` validator now enforce the five-field key and accept `COMPLETE`. Phase 8 offline matching applies the same key; see [MATCHING.md](MATCHING.md). The Phase 9 comparison outputs above are not implemented.
 
 Phase 9 must also define retailer-code names, currencies, units, numeric precision, and missing-price representation before generating comparison files. The retailer price fields are requested as floats; the Phase 6 scraper currently stores observed prices as `Decimal`, so conversion should happen only at a deliberately defined output boundary.

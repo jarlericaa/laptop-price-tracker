@@ -36,7 +36,7 @@ TARGETS = validate_target_master(
     target_values(
         target_row(),
         target_row(target_id="TGT-000002", storage_capacity_gb="2000", status="INACTIVE"),
-        target_row(target_id="TGT-000003", storage_capacity_gb="4000", gpu_model=""),
+        target_row(target_id="TGT-000003", storage_capacity_gb="4000", cpu_series=""),
     )
 )
 
@@ -187,7 +187,7 @@ def test_review_allows_blank_specs_and_header_only_tables() -> None:
     assert validate_match_review([MATCH_REVIEW_HEADERS]).is_valid
     result = validate_match_review([MATCH_REVIEW_HEADERS, review_row()])
     assert result.is_valid
-    assert result.info["rows_with_complete_identity_and_source_url"] == 0
+    assert result.info["rows_with_complete_core_identity"] == 0
 
 
 def test_missing_specs_never_match_each_other() -> None:
@@ -273,9 +273,37 @@ def test_complete_candidates_are_counted_but_never_promoted() -> None:
         [MATCH_REVIEW_HEADERS, review_row(status="REVIEW_REQUIRED", **evidence)]
     )
     assert result.is_valid
-    assert result.info["rows_with_complete_identity_and_source_url"] == 1
+    assert result.info["rows_with_complete_core_identity"] == 1
     assert result.valid_rows.loc[0, "status"] == "REVIEW_REQUIRED"
     assert "target_id" not in result.valid_rows.columns
+
+
+def test_review_evidence_columns_are_the_five_core_fields() -> None:
+    assert MATCH_REVIEW_EVIDENCE_COLUMNS == [
+        "model",
+        "screen_size_in",
+        "cpu_series",
+        "ram_capacity_gb",
+        "storage_capacity_gb",
+    ]
+
+
+def test_complete_status_needs_core_fields_but_not_secondary_or_source_url() -> None:
+    core = {
+        "model": "ExampleBook 14",
+        "screen_size_in": "14",
+        "cpu_series": "Example Series 5",
+        "ram_capacity_gb": "16",
+        "storage_capacity_gb": "1000",
+    }
+    result = validate_match_review([MATCH_REVIEW_HEADERS, review_row(status="COMPLETE", **core)])
+    assert result.is_valid
+    assert result.info["status_COMPLETE"] == 1
+
+    partial = validate_match_review(
+        [MATCH_REVIEW_HEADERS, review_row(status="COMPLETE", **(core | {"cpu_series": ""}))]
+    )
+    assert codes(partial) == [(2, "cpu_series", "MISSING_VALUE")]
 
 
 def test_review_headers_must_match_template_exactly() -> None:

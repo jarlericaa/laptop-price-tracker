@@ -7,6 +7,8 @@ from pathlib import Path
 import pytest
 
 from laptop_tracker.target_master import (
+    REQUIRED_TARGET_COLUMNS,
+    TARGET_IDENTITY_COLUMNS,
     TARGET_MASTER_HEADERS,
     TargetMasterSchemaError,
     read_target_master_csv,
@@ -125,16 +127,31 @@ def test_csv_reader_preserves_strings_and_tolerates_bom(tmp_path: Path) -> None:
 
 def test_missing_required_values_are_reported() -> None:
     result = validate_target_master(
-        target_values(target_row(brand="", cpu_series="   ", os="", reviewer=""))
+        target_values(target_row(model="", cpu_series="   ", ram_capacity_gb="", status=""))
     )
     assert not result.is_valid
     assert error_codes(result) == [
-        (2, "brand", "MISSING_VALUE"),
         (2, "cpu_series", "MISSING_VALUE"),
-        (2, "os", "MISSING_VALUE"),
-        (2, "reviewer", "MISSING_VALUE"),
+        (2, "model", "MISSING_VALUE"),
+        (2, "ram_capacity_gb", "MISSING_VALUE"),
+        (2, "status", "MISSING_VALUE"),
     ]
     assert result.valid_rows.empty
+
+
+def test_only_the_five_core_fields_and_row_control_are_required() -> None:
+    core = ["model", "screen_size_in", "cpu_series", "ram_capacity_gb", "storage_capacity_gb"]
+    assert list(TARGET_IDENTITY_COLUMNS) == core
+    assert REQUIRED_TARGET_COLUMNS == ["target_id", "status", *core]
+
+
+def test_missing_secondary_details_and_audit_fields_do_not_block_validation() -> None:
+    secondary = ("brand", "resolution", "display_type", "refresh_rate_hz", "gpu_model", "os")
+    audit = ("source_url", "reviewer", "reviewed_at")
+    result = validate_target_master(
+        target_values(target_row(**dict.fromkeys((*secondary, *audit), "")))
+    )
+    assert result.is_valid
 
 
 @pytest.mark.parametrize(
@@ -176,20 +193,11 @@ def test_optional_fields_may_be_blank_or_omitted() -> None:
         not in {
             "target_id",
             "status",
-            "brand",
             "model",
             "screen_size_in",
-            "resolution",
-            "display_type",
-            "refresh_rate_hz",
             "cpu_series",
             "ram_capacity_gb",
             "storage_capacity_gb",
-            "gpu_model",
-            "os",
-            "source_url",
-            "reviewer",
-            "reviewed_at",
         }
     }
     blank = validate_target_master(target_values(target_row(**dict.fromkeys(optional, ""))))
@@ -204,9 +212,29 @@ def test_optional_fields_may_be_blank_or_omitted() -> None:
     assert list(omitted.valid_rows.columns) == ["source_row_number", *TARGET_MASTER_HEADERS]
 
 
-def test_required_fields_are_still_format_checked() -> None:
+def test_optional_secondary_fields_are_still_format_checked_when_filled() -> None:
     result = validate_target_master(target_values(target_row(resolution="1920X1080")))
     assert error_codes(result) == [(2, "resolution", "INVALID_FORMAT")]
+
+
+def test_secondary_differences_do_not_create_a_second_configuration() -> None:
+    result = validate_target_master(
+        target_values(
+            target_row(),
+            target_row(target_id="TGT-000002", gpu_model="Other GPU", os="", resolution=""),
+        )
+    )
+    assert [entry[2] for entry in error_codes(result)] == ["DUPLICATE_CONFIGURATION"] * 2
+
+
+def test_duplicate_core_keys_use_the_matcher_normalization() -> None:
+    result = validate_target_master(
+        target_values(
+            target_row(screen_size_in="14"),
+            target_row(target_id="TGT-000002", screen_size_in="14.0", model="ExampleBook™ 14"),
+        )
+    )
+    assert [entry[2] for entry in error_codes(result)] == ["DUPLICATE_CONFIGURATION"] * 2
 
 
 def test_duplicate_configuration_flags_every_row_without_choosing_one() -> None:
@@ -232,8 +260,8 @@ def test_duplicate_configuration_flags_every_row_without_choosing_one() -> None:
 def test_missing_identity_values_do_not_match_each_other() -> None:
     result = validate_target_master(
         target_values(
-            target_row(gpu_model=""),
-            target_row(target_id="TGT-000002", gpu_model=""),
+            target_row(cpu_series=""),
+            target_row(target_id="TGT-000002", cpu_series=""),
         )
     )
     assert not result.is_valid

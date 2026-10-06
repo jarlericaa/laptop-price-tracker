@@ -13,10 +13,10 @@ The Python implementation and CLI are named “Phase 1” (`run_phase1.py` and `
 | 2. Create repository and project structure | COMPLETE | Four grouped commits cover setup, implementation, tests, and initial docs; follow-up commits record the Phase 5 validator and this status refresh. Local business decisions and outputs remain ignored. |
 | 3. Create Google Sheets output structure | COMPLETE | User-reported verification confirms the nine production output tabs and headers. A read-only report for the dedicated test spreadsheet confirmed all nine test tabs and headers, expected synthetic output rows, and `top_100_count=1`. The sequential-write recovery procedure is documented. The test report did not list or inspect `raw`; no production write occurred. |
 | 4. Read raw and generate Top 100 | COMPLETE | The 2026-09-28 read-only run completed in 57.49 seconds and generated 100 targets after 21 historical keys were explicitly excluded. The user accepted the current CSV reports on 2026-09-29; no production Sheets write was made. |
-| 5. Build and validate `TARGET_MASTER` | PARTIALLY_COMPLETE | On 2026-10-05 the user approved rule-based promotion when the five core identity fields are populated and unambiguous. Documentation now records this policy; local templates, validators, and Sheet headers still need synchronization. No current Sheet data was inspected for this update. |
+| 5. Build and validate `TARGET_MASTER` | PARTIALLY_COMPLETE | On 2026-10-05 the user approved rule-based promotion when the five core identity fields are populated and unambiguous. On 2026-10-06 the local validators were synchronized: only the five core fields (plus `target_id`/`status`) are required, and `MATCH_REVIEW` accepts `COMPLETE`. Sheet dropdowns, promotion, and mappings remain outstanding. No Sheet data was read or changed. |
 | 6. Build shared scraping framework | COMPLETE | The retailer-neutral framework (`offers.py`, `scraping.py`) and an offline example-adapter harness were added on 2026-09-29. 203 tests, Ruff, and `compileall` passed. No live request was made. The framework does not read Sheets or match offers to targets. |
 | 7. Implement retailer adapters | COMPLETE | LF, DBZ, PCX, PCC, and OCT adapters meet the Phase 6 contract, have offline tests and documentation, and have live-check evidence recorded. Jarelle Ricaforte is the named maintainer for all five. Unobserved page states remain documented limitations; retailer-policy findings remain separate from the project-owner live-use decision. |
-| 8. Normalize and perform exact matching | NOT_STARTED | No offer normalization or configuration matcher exists. The approved matching key is model, screen size, CPU series, RAM capacity, and storage capacity; other specs are optional corroboration. |
+| 8. Normalize and perform exact matching | COMPLETE (offline) | Per-retailer extraction, the five-field `ExactMatcher`, and `match_offers.py` match saved observation CSVs against a validated `TARGET_MASTER` snapshot and write results, a review queue, and field evidence. Verified on synthetic fixtures only (763 tests, Ruff). See [MATCHING.md](MATCHING.md) for limitations. |
 | 9. Generate comparisons and price history | NOT_STARTED | No comparison or history outputs exist. |
 | 10. Test and run a controlled pilot | BLOCKED | Requires accepted Phase 4 outputs, approved and populated `TARGET_MASTER` configurations, and adapters first. |
 | 11. Add GitHub Actions automation | NOT_STARTED | No workflow exists; this follows a passing controlled pilot. |
@@ -90,8 +90,9 @@ The Python implementation and CLI are named “Phase 1” (`run_phase1.py` and `
     - `seed_match_review.py` produced 100 local `NEW` candidates from the accepted Top 100, with all specifications, URLs, and approvals blank.
     - Three stale `TARGET_MASTER` test expectations were corrected to the approved rules; the validator's rules were unchanged.
     - 129 tests, Ruff, and `compileall` passed on 2026-09-29.
+    - 2026-10-06: `target_master.py` and `supporting_tables.py` now implement the five-field policy. Secondary fields, `brand`, `source_url`, `reviewer`, and `reviewed_at` are optional in `TARGET_MASTER`; duplicate configurations are detected on the five core fields with the matcher's normalization (`14` equals `14.0`). `MATCH_REVIEW` accepts `COMPLETE`, which requires all five core fields. Header templates were already correct and are unchanged.
   - **Not done:**
-    - Synchronize `TARGET_MASTER` and `MATCH_REVIEW` headers, dropdown statuses, local templates, and validators with the five-field policy; this documentation update did not write to Sheets or change code.
+    - Add `COMPLETE` to the Sheet's `MATCH_REVIEW` status dropdown and check the live headers; no Sheet was read or written for the local validator change.
     - Promote eligible rows and populate `SOURCE_MODEL_MAP`; the current state of the live sheet was not checked during this documentation update.
     - No downstream consumer interface or automatic full Top 100 source-ID coverage check exists.
 
@@ -163,12 +164,14 @@ The Python implementation and CLI are named “Phase 1” (`run_phase1.py` and `
 ### Phase 8 — Normalize and perform exact matching
 
 - **Objective:** Match retailer offers only to the correct target configuration.
-- **Tasks:** Normalize attributes; first match exactly on `model`, `screen_size_in`, `cpu_series`, `ram_capacity_gb`, and `storage_capacity_gb`. Use resolution, display type, refresh rate, GPU model, OS, and other known details as corroborating or conflict signals. Missing secondary values do not block a core match. Classify exact, unmatched, and ambiguous offers; do not silently publish ambiguous core matches.
+- **Tasks:** Normalize attributes; first match exactly on `model`, `screen_size_in`, `cpu_series`, `ram_capacity_gb`, and `storage_capacity_gb`. Use resolution, display type, refresh rate, GPU model, OS, and other known details as corroborating or conflict signals. Missing secondary values do not block a core match. Classify exact, unmatched, ambiguous, and review-required offers; do not silently publish ambiguous core matches.
 - **Deliverables:** Normalization rules, exact matcher, match evidence, and review queue.
 - **Dependencies:** Phases 5 and 6; retailer observations from Phase 7.
 - **Validation:** Positive, negative, near-match, and ambiguous fixtures; require exact outcomes for all reviewed test cases.
 - **Definition of done:** No ambiguous or partial match is silently published as exact.
-- **Current status:** `NOT_STARTED`.
+- **Current status:** `COMPLETE` as an offline path (2026-10-06). See [MATCHING.md](MATCHING.md).
+  - **Done:** `extraction.py` maps each adapter's labeled spec rows to canonical core and secondary fields with per-field evidence and fails closed (`MISSING`, `UNPARSEABLE`, `AMBIGUOUS`, `NOT_EXTRACTED` for shared multi-variant descriptions). `ExactMatcher.match_observation()` applies the five-field rule, treats secondary conflicts as review, lists one-field near candidates without assigning them, and never assigns inactive or duplicate-key targets. `match_offers.py` runs the batch offline against a fully valid `TARGET_MASTER` snapshot and writes results, a review queue, and evidence. Synthetic tests cover exact, safe-normalization, one-field near-match, missing/invalid core, duplicate-key, inactive-target, missing-secondary, secondary-conflict, and every retailer extractor, plus the end-to-end command.
+  - **Limitations (not blocking the offline deliverable):** Only Laptop Factory and single-variant PC Central output carries a `model` label, so other retailers' offers always go to review. The `cpu_series` family form and retailer-wording `model` need owner confirmation as `TARGET_MASTER` conventions. No real target snapshot or saved real observation has been matched, and no command persists live observations yet.
 
 ### Phase 9 — Generate comparisons and price history
 

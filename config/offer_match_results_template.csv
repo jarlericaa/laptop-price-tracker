@@ -1,0 +1,1 @@
+source_row_number,retailer_id,offer_url,retrieved_at,offer_index,raw_title,adapter_version,content_sha256,bundle_flag,extractor,match_status,target_id,candidate_target_ids,reason_codes,offer_model,offer_screen_size_in,offer_cpu_series,offer_ram_capacity_gb,offer_storage_capacity_gb

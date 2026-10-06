@@ -11,9 +11,10 @@ from __future__ import annotations
 import json
 import re
 import unicodedata
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from enum import StrEnum
 from urllib.parse import urlsplit, urlunsplit
 
@@ -394,3 +395,115 @@ class OfferObservation:
             else dict.fromkeys(OFFER_DETAIL_COLUMNS, "")
         )
         return self.to_record() | details
+
+
+def observation_from_record(record: Mapping[str, str]) -> OfferObservation:
+    """Rebuild an observation from ``to_record()``/``to_full_record()`` strings (e.g. a CSV row).
+
+    Every ``OBSERVATION_COLUMNS`` key is required; detail columns are optional, and details are
+    ``None`` when all of them are blank. The rebuilt observation is validated exactly like a new
+    one. Errors name the field, never the cell value.
+    """
+    missing = [column for column in OBSERVATION_COLUMNS if column not in record]
+    if missing:
+        raise ObservationValidationError(missing[0], "column is missing")
+
+    def text(name: str) -> str:
+        value = record.get(name)
+        return "" if value is None else str(value)
+
+    def decimal(name: str) -> Decimal | None:
+        value = text(name)
+        if value == "":
+            return None
+        try:
+            return Decimal(value)
+        except InvalidOperation as error:
+            raise ObservationValidationError(name, "must be a decimal number") from error
+
+    def integer(name: str) -> int:
+        value = text(name)
+        if not re.fullmatch(r"-?[0-9]+", value):
+            raise ObservationValidationError(name, "must be an integer")
+        return int(value)
+
+    def enum(name: str, kind: type[StrEnum]):
+        try:
+            return kind(text(name))
+        except ValueError as error:
+            raise ObservationValidationError(name, "is not a recognized value") from error
+
+    def json_texts(name: str) -> list[object]:
+        value = text(name)
+        if value == "":
+            return []
+        try:
+            items = json.loads(value)
+        except json.JSONDecodeError as error:
+            raise ObservationValidationError(name, "must be a JSON list") from error
+        if not isinstance(items, list):
+            raise ObservationValidationError(name, "must be a JSON list")
+        return items
+
+    try:
+        retrieved_at = datetime.fromisoformat(text("retrieved_at"))
+    except ValueError as error:
+        raise ObservationValidationError("retrieved_at", "must be an ISO 8601 time") from error
+
+    details = None
+    if any(text(column) for column in OFFER_DETAIL_COLUMNS):
+        specs = json_texts("raw_specifications")
+        if not all(
+            isinstance(pair, list) and len(pair) == 2 and all(isinstance(p, str) for p in pair)
+            for pair in specs
+        ):
+            raise ObservationValidationError("raw_specifications", "must be (label, value) pairs")
+        lists = {name: json_texts(name) for name in ("raw_categories", "bundle_evidence")}
+        for name, items in lists.items():
+            if not all(isinstance(item, str) for item in items):
+                raise ObservationValidationError(name, "must be a list of text")
+        bundle = text("bundle_flag")
+        if bundle not in {"", "TRUE", "FALSE"}:
+            raise ObservationValidationError("bundle_flag", "must be TRUE, FALSE, or blank")
+        details = OfferDetails(
+            retailer_product_id=text("retailer_product_id"),
+            retailer_sku=text("retailer_sku"),
+            brand=text("brand"),
+            manufacturer_part_number=text("manufacturer_part_number"),
+            price_type=enum("price_type", PriceType) if text("price_type") else None,
+            regular_price=decimal("regular_price"),
+            regular_price_text=text("regular_price_text"),
+            sale_price=decimal("sale_price"),
+            sale_price_text=text("sale_price_text"),
+            raw_specifications=tuple((label, value) for label, value in specs),
+            raw_categories=tuple(lists["raw_categories"]),  # type: ignore[arg-type]
+            bundle_flag={"": None, "TRUE": True, "FALSE": False}[bundle],
+            bundle_evidence=tuple(lists["bundle_evidence"]),  # type: ignore[arg-type]
+        )
+
+    price = decimal("price")
+    if price is None:
+        raise ObservationValidationError("price", "is required")
+    return OfferObservation(
+        retailer_id=text("retailer_id"),
+        offer_url=text("offer_url"),
+        retrieved_at=retrieved_at,
+        raw_title=text("raw_title"),
+        raw_configuration_text=text("raw_configuration_text"),
+        price=price,
+        currency=text("currency"),
+        raw_price_text=text("raw_price_text"),
+        availability=enum("availability", Availability),
+        availability_evidence=text("availability_evidence"),
+        offer_index=integer("offer_index"),
+        source=RetrievalMetadata(
+            requested_url=text("requested_url"),
+            final_url=text("final_url"),
+            http_status=integer("http_status"),
+            attempts=integer("attempts"),
+            content_sha256=text("content_sha256"),
+            content_type=text("content_type"),
+            adapter_version=text("adapter_version"),
+        ),
+        details=details,
+    )

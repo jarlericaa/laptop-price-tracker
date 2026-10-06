@@ -1,6 +1,6 @@
 # `TARGET_MASTER` Schema and Review Workflow
 
-**Policy updated:** On 2026-10-05, the user set a five-field core identity and authorized rule-based promotion of candidates with those fields complete. This supersedes the ten-field identity proposal recorded on 2026-09-29. The Python validators, CSV templates, and Google Sheet have not yet been synchronized; they still implement the earlier rule. Do not treat this document update as a code or Sheets migration.
+**Policy updated:** On 2026-10-05, the user set a five-field core identity and authorized rule-based promotion of candidates with those fields complete. This supersedes the ten-field identity proposal recorded on 2026-09-29. On 2026-10-06 the local Python validators were synchronized with this policy; the CSV header templates already contained every column and are unchanged. The Google Sheet (including its `MATCH_REVIEW` status dropdown) has not been checked or changed.
 
 ## Purpose and authority
 
@@ -12,7 +12,7 @@ The **core identity key** is `model`, `screen_size_in`, `cpu_series`, `ram_capac
 
 ## `TARGET_MASTER` columns under the updated policy
 
-The existing header order is still defined by `config/target_master_template.csv`. Keep the Google Sheet headers unchanged during data updates. The required/optional designations below record the 2026-10-05 policy; the local template and validator have not yet been changed to match it.
+The existing header order is still defined by `config/target_master_template.csv`. Keep the Google Sheet headers unchanged during data updates. The required/optional designations below record the 2026-10-05 policy and are what the local validator enforces.
 
 | Column | Required by updated policy | Meaning and format | Matching role |
 |---|---:|---|---:|
@@ -53,7 +53,7 @@ The existing header order is still defined by `config/target_master_template.csv
 
 The uniqueness key is exactly the five core fields: `model`, `screen_size_in`, `cpu_series`, `ram_capacity_gb`, and `storage_capacity_gb`. Normalize only harmless formatting such as case, surrounding whitespace, and numeric units before comparing. Do not use fuzzy model matching. A missing core value means the row is not core-complete; blanks never match one another.
 
-For duplicate detection, the validator compares identity text case-insensitively and collapses whitespace; it does not rewrite the stored text. This retains the existing validator's comparison convention. `ACTIVE` and `INACTIVE` rows both participate in uniqueness checks. Keep inactive rows so retired `target_id` values cannot be reused.
+For duplicate detection, the validator uses the Phase 8 matcher's comparison rules ([MATCHING.md](MATCHING.md)): text is compared after Unicode NFC, trademark-mark removal, whitespace collapsing, and case-folding, and `screen_size_in` is compared by numeric value (`14` equals `14.0`). It does not rewrite the stored text. `ACTIVE` and `INACTIVE` rows both participate in uniqueness checks. Keep inactive rows so retired `target_id` values cannot be reused.
 
 Specification fields have no controlled vocabulary beyond the formats above. Preserve source wording. Store RAM and storage capacities as integer GB, using decimal units (`1 TB = 1000 GB`). Keep full CPU model, RAM/storage types, and storage layout as additional evidence where available; these are not part of the core identity key.
 
@@ -111,14 +111,14 @@ The initial tracking scope is the accepted Top 100 plus sibling Shopee variation
 
 ### Implementation status
 
-This section describes the validator currently in the repository, which has not been updated for the 2026-10-05 policy. It still requires the previous ten-field identity, requires source URLs and per-row reviewer/date values, and permits only `NEW`, `INCOMPLETE`, `REVIEW_REQUIRED`, and `REJECTED` in `MATCH_REVIEW`. It will reject some rows this policy considers promotable and does not implement automatic target-ID assignment or mapping. Update the templates, validators, and sheet status validation before using local checks or code-driven promotion with this policy.
+Synchronized with the 2026-10-05 policy on 2026-10-06. `TARGET_MASTER` requires only `target_id`, `status`, and the five core fields; secondary fields, `brand`, `source_url`, `reviewer`, and `reviewed_at` may be blank or omitted but are format-checked when filled. Duplicate configurations are grouped on the five core fields only. `MATCH_REVIEW` accepts `COMPLETE`. The validators still do not assign target IDs, promote rows, or create mappings, and the Sheet's status dropdown has not been updated.
 
 `src/laptop_tracker/target_master.py` validates the approved `TARGET_MASTER` schema using exact strings:
 
-- IDs, numeric specifications, dates, status values, and absolute HTTP(S) source URLs are format-checked; values are never coerced or silently trimmed.
+- IDs, numeric specifications, dates, status values, and absolute HTTP(S) source URLs (when present) are format-checked; values are never coerced or silently trimmed.
 - Missing required fields produce `MISSING_VALUE`; invalid formats, values, URLs, and dates produce errors. A row with any error is excluded from the validated output.
 - Duplicate `target_id` values are rejected case-insensitively. Every row in a duplicate configuration group is flagged; the validator never chooses one row over another.
-- Rows missing any identity field fail validation and are skipped by duplicate-identity grouping. Missing specifications are not treated as matching values.
+- Rows missing any of the five core fields fail validation and are skipped by duplicate-identity grouping. Missing specifications are not treated as matching values.
 - `TARGET_MASTER` needs at least one data row to pass validation. A header-only file returns `NO_DATA_ROWS`.
 
 `src/laptop_tracker/supporting_tables.py` validates the two supporting tables with the same exact-string, no-trim conventions and the same error-report columns. Unlike `TARGET_MASTER`, whose optional columns may be omitted, each supporting table's header row must match its `config/` template exactly, including column order.
@@ -133,14 +133,15 @@ This section describes the validator currently in the repository, which has not 
 
 **`MATCH_REVIEW`**
 
-- `status` is required and must be exactly `NEW`, `INCOMPLETE`, `REVIEW_REQUIRED`, or `REJECTED`.
+- `status` is required and must be exactly `NEW`, `INCOMPLETE`, `COMPLETE`, `REVIEW_REQUIRED`, or `REJECTED`.
+- A `COMPLETE` row must have all five core fields (`MISSING_VALUE` otherwise). Secondary fields and `source_url` may stay blank. The validator cannot judge whether values are unambiguous; that remains the reviewer's call.
 - Identity specifications and `source_url` may be blank while research is under way. A nonblank value must meet the same format as its `TARGET_MASTER` column (for example `16` rather than `16GB`, `1000` rather than `1TB`, and `1920x1080`), and must not have surrounding whitespace.
 - `source_model_id` is optional; if present it must be digits only. It may appear on several review rows, so alternative candidate configurations for one ambiguous source ID can be recorded.
 - Blank specifications never match each other: review rows are not grouped, deduplicated, or compared as configurations.
 - `reviewer` and `reviewed_at` are optional but must be recorded together, and `reviewed_at` must be a valid date. A `REJECTED` row requires both, because a rejection is a recorded decision.
 - A nonblank `review_id` must be unique (case-insensitive); blank IDs are allowed.
 - A header-only review table passes.
-- The check reports, for information only, how many rows have every identity field and `source_url` filled in a valid format, and how many rows have each status. These counts never promote, approve, or map a row.
+- The check reports, for information only, how many rows have all five core fields filled in a valid format (`rows_with_complete_core_identity`), and how many rows have each status. These counts never promote, approve, or map a row.
 
 ## Local validation path
 
@@ -166,11 +167,11 @@ python check_target_tables.py --from-sheets
 
 This reads the `TARGET_MASTER`, `SOURCE_MODEL_MAP`, and `MATCH_REVIEW` tabs from the configured spreadsheet using the existing `.env` settings, service-account credentials, and the read-only `spreadsheets.readonly` scope. It calls only `get_all_values()` and runs the same validators and local reports as the CSV path. It never requests the write scope and never writes, clears, or creates tabs. A missing tab is reported with its template path and the check fails. The spreadsheet title and cell values are not printed.
 
-`sheets_source.read_target_table_values()` is the reusable reader. The later exact-matching phase should consume only rows that pass these validators. The first live read-only check on 2026-09-29 found that `TARGET_MASTER` has no header and both supporting tabs are missing. Exact retailer matching remains a later phase.
+`sheets_source.read_target_table_values()` is the reusable reader. The first live read-only check on 2026-09-29 found that `TARGET_MASTER` has no header and both supporting tabs are missing. Phase 8 offline matching (`match_offers.py`, see [MATCHING.md](MATCHING.md)) reads a local `TARGET_MASTER` CSV snapshot and refuses to match unless every row passes this validator. It does not read `SOURCE_MODEL_MAP` or `MATCH_REVIEW`.
 
 ## Unspecified behaviors and chosen defaults
 
-These implementation behaviors are not yet aligned with the 2026-10-05 rule. The current code uses the defaults below until the templates and validators are updated:
+The current code uses the defaults below where no policy has been approved:
 
 | Question | Current behavior |
 |---|---|
@@ -178,13 +179,13 @@ These implementation behaviors are not yet aligned with the 2026-10-05 rule. The
 | May a mapping point to a `TARGET_MASTER` row that fails validation? | Rejected as `TARGET_NOT_VALID`, so downstream code never consumes a link to an unvalidated configuration. Nothing is deleted. |
 | What is the `review_id` scheme? | None is approved. Any text is accepted, nonblank IDs must be unique, and the seeding command leaves the field blank. |
 | Who may review a `SOURCE_MODEL_MAP` link? | The user authorized rule-based promotion. The current validator still requires nonblank reviewer/date values; use the policy label above and actual promotion date after synchronization. |
-| When a candidate is promoted, is its review row removed, kept, or given a new status? | Updated policy: keep it as `COMPLETE` for traceability. Current validator does not yet allow that status. |
-| Must `status` agree with the evidence? For example, a `NEW` row with complete core specifications. | Updated policy: set `COMPLETE` when the five core fields are complete and unambiguous. Current validator only checks allowed values. |
+| When a candidate is promoted, is its review row removed, kept, or given a new status? | Updated policy: keep it as `COMPLETE` for traceability. The validator accepts `COMPLETE` since 2026-10-06. |
+| Must `status` agree with the evidence? For example, a `NEW` row with complete core specifications. | Updated policy: set `COMPLETE` when the five core fields are complete and unambiguous. The validator rejects `COMPLETE` with a blank core field; it does not force other statuses to `COMPLETE`. |
 | Who is `prepared_by` for seeded rows? | Left blank rather than attributed to a person or tool. |
 
 ## Implementation work still required
 
-- Synchronize the local templates, `TARGET_MASTER` and `MATCH_REVIEW` validators, and Sheet dropdowns with the five-core-field rule and `COMPLETE` status.
+- Add `COMPLETE` to the Sheet's `MATCH_REVIEW` status dropdown (local validators were synchronized on 2026-10-06).
 - Implement core-key duplicate grouping, stable target-ID reuse/assignment, and one source-model mapping per eligible Shopee variation.
-- Implement Phase 8 matching: require exact agreement on the five core fields; use available secondary values as corroboration; flag known contradictions for review.
+- Confirm the `TARGET_MASTER` value conventions the Phase 8 matcher expects, especially the `cpu_series` family form (`Core i5`, `Ryzen 7`) and retailer-wording `model` ([MATCHING.md](MATCHING.md)).
 - Add a coverage check showing which in-scope Shopee variation IDs are mapped and which remain incomplete or ambiguous.

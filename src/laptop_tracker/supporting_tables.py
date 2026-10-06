@@ -15,7 +15,6 @@ import pandas as pd
 from .target_master import (
     TARGET_ERROR_COLUMNS,
     TARGET_ID_PATTERN,
-    TARGET_IDENTITY_COLUMNS,
     TARGET_MASTER_COLUMNS,
     TARGET_PRODUCT_REQUIRED_COLUMNS,
     TargetColumn,
@@ -48,7 +47,9 @@ SOURCE_MODEL_MAP_COLUMNS: tuple[TargetColumn, ...] = (
     TargetColumn("notes", False, "Free-text notes.", free_text=True),
 )
 
-MATCH_REVIEW_STATUSES = ("NEW", "INCOMPLETE", "REVIEW_REQUIRED", "REJECTED")
+# COMPLETE (added for the 2026-10-05 five-core-field rule) marks a candidate whose core fields are
+# populated and unambiguous; it stays in MATCH_REVIEW as the trail after manual promotion.
+MATCH_REVIEW_STATUSES = ("NEW", "INCOMPLETE", "COMPLETE", "REVIEW_REQUIRED", "REJECTED")
 
 _TARGET_COLUMNS_BY_NAME = {column.name: column for column in TARGET_MASTER_COLUMNS}
 # Identity specs and source_url reuse the TARGET_MASTER formats but may be blank during research.
@@ -58,9 +59,10 @@ _REVIEW_PRODUCT_COLUMNS = tuple(
     if column.name
     not in {"target_id", "status", "source_url", "reviewer", "reviewed_at", "notes"}
 )
+# TARGET_PRODUCT_REQUIRED_COLUMNS is exactly the five-field core identity.
 _REVIEW_EVIDENCE_COLUMNS = tuple(
     replace(_TARGET_COLUMNS_BY_NAME[name], required=False)
-    for name in (*TARGET_PRODUCT_REQUIRED_COLUMNS, "source_url")
+    for name in TARGET_PRODUCT_REQUIRED_COLUMNS
 )
 
 MATCH_REVIEW_COLUMNS: tuple[TargetColumn, ...] = (
@@ -169,7 +171,8 @@ def validate_source_model_map(
 def validate_match_review(values: Sequence[Sequence[object]]) -> TableResult:
     """Validate candidate rows; blank specs are allowed, nonblank ones use TARGET_MASTER formats.
 
-    Complete evidence is only counted: no row is ever promoted, matched, or mapped here.
+    A ``COMPLETE`` row must have all five core fields; secondary fields and source_url may stay
+    blank. Complete evidence is only counted: no row is ever promoted, matched, or mapped here.
     """
     headers = _validate_exact_headers("MATCH_REVIEW", values, MATCH_REVIEW_HEADERS)
     errors: list[dict[str, object]] = []
@@ -185,6 +188,17 @@ def validate_match_review(values: Sequence[Sequence[object]]) -> TableResult:
             error["column_name"] in MATCH_REVIEW_EVIDENCE_COLUMNS
             for error in errors[errors_before:]
         )
+
+        if record["status"] == "COMPLETE":
+            for name in MATCH_REVIEW_EVIDENCE_COLUMNS:
+                if str(record[name]).strip() == "":
+                    add_error(
+                        row_number,
+                        name,
+                        "",
+                        "MISSING_VALUE",
+                        f"{name} is a core field and is required when status is COMPLETE.",
+                    )
 
         reviewer = str(record["reviewer"]).strip()
         reviewed_at = str(record["reviewed_at"]).strip()
@@ -222,7 +236,7 @@ def validate_match_review(values: Sequence[Sequence[object]]) -> TableResult:
         "review_id is not unique (case-insensitive)",
         add_error,
     )
-    info = {"rows_with_complete_identity_and_source_url": complete_evidence}
+    info = {"rows_with_complete_core_identity": complete_evidence}
     for status in MATCH_REVIEW_STATUSES:
         info[f"status_{status}"] = sum(1 for record in records if record["status"] == status)
     return _result(records, MATCH_REVIEW_HEADERS, errors, info)

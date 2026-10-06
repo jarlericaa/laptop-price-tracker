@@ -52,6 +52,10 @@ The current and planned portions are different deliverables. The shared scraping
 │   ├── config.py
 │   ├── data_quality.py
 │   ├── eligibility.py
+│   ├── extraction.py                 # Retailer spec rows -> canonical match fields (overall Phase 8)
+│   ├── match_run.py                  # Offline batch matching and report records (overall Phase 8)
+│   ├── matching.py                   # Five-field ExactMatcher (overall Phase 8)
+│   ├── normalization.py              # Shared core-key comparison rules (Phases 5 and 8)
 │   ├── offers.py                     # Offer observation model (overall Phase 6)
 │   ├── periods.py
 │   ├── pipeline.py
@@ -69,6 +73,7 @@ The current and planned portions are different deliverables. The shared scraping
 ├── check_target_master.py            # Local TARGET_MASTER CSV check (overall Phase 5)
 ├── check_target_tables.py            # Three-table CSV or read-only sheet check (overall Phase 5)
 ├── seed_match_review.py              # Top 100 -> local MATCH_REVIEW candidates (overall Phase 5)
+├── match_offers.py                   # Offline observation CSV x TARGET_MASTER CSV matching (overall Phase 8)
 ├── run_phase1.py                     # Legacy Phase 1 command name; overall Phase 4 work
 ├── smoke_test.py
 ├── pyproject.toml
@@ -92,12 +97,16 @@ The current and planned portions are different deliverables. The shared scraping
 | `sheets_writer.py` | Enforces the `P1_*` tab allowlist, prevents `raw` from being a destination, preserves the remote decision tab, replaces approved outputs, and appends run logs. |
 | `run_phase1.py` | CLI entry point. Local output is the default; `--write-sheets` opts into the writer. |
 | `smoke_test.py` | Read-only check for spreadsheet access, raw headers, and string-valued sample cells. |
-| `target_master.py` | Holds the approved `TARGET_MASTER` column definitions and identity key. Validates worksheet-shaped values (header row first) for headers, required fields, formats, dates, URLs, and duplicate `target_id` or configuration identity, keeping exact strings. Uses no Google access. |
+| `target_master.py` | Holds the approved `TARGET_MASTER` column definitions and the five-field core identity key. Validates worksheet-shaped values (header row first) for headers, required fields, formats, dates, URLs, and duplicate `target_id` or core identity (compared with `normalization.py`), keeping exact strings. Uses no Google access. |
 | `check_target_master.py` | Local CLI that validates a CSV export. Writes a local error report and, only on a full pass, a validated copy. Prints counts only. |
-| `supporting_tables.py` | Validates `SOURCE_MODEL_MAP` and `MATCH_REVIEW` against their exact `config/` header templates, reusing the `TARGET_MASTER` cell checks. Mapping checks cover one target per source ID and target references to valid master rows. Review checks cover the four statuses and blank-tolerant specs in master formats. Also builds seed candidates from Top 100 values. It never promotes or maps a row. |
+| `supporting_tables.py` | Validates `SOURCE_MODEL_MAP` and `MATCH_REVIEW` against their exact `config/` header templates, reusing the `TARGET_MASTER` cell checks. Mapping checks cover one target per source ID and target references to valid master rows. Review checks cover the five statuses (`COMPLETE` requires the five core fields) and blank-tolerant specs in master formats. Also builds seed candidates from Top 100 values. It never promotes or maps a row. |
 | `check_target_tables.py` | CLI that checks any of the three tables from local CSV snapshots, or with `--from-sheets` from the master sheet through the read-only reader. Writes per-table local reports and prints counts and codes only. |
 | `seed_match_review.py` | CLI that writes one `NEW` candidate per distinct Top 100 model ID to an ignored local file. Specs, URLs, and approvals are left blank, and it refuses to overwrite an existing file. |
 | `offers.py` | Retailer-neutral `OfferObservation` with `Decimal` price, ISO currency, availability evidence, and retrieval metadata, but no `target_id`. It also has optional `OfferDetails`: SKU, regular and sale price with `price_type`, raw specs, categories, and bundle flag. Also holds deterministic helpers for price parsing, text cleanup, and URL redaction. Uses no network or Google access. |
+| `normalization.py` | Comparison-only keys for the five core fields (NFC, trademark marks removed, collapsed whitespace, case-fold; numeric screen size, RAM, and storage). Shared by the `TARGET_MASTER` duplicate check and the matcher. |
+| `extraction.py` | Per-retailer extractors that map an adapter's labeled spec rows and structured details to canonical core and selected secondary fields, recording per-field evidence. Never parses titles or free text; refuses PCC/OCT shared multi-variant descriptions. See [MATCHING.md](MATCHING.md). |
+| `matching.py` | `ExactMatcher`: five-field exact matching with secondary corroboration/conflict, near-candidate hints, and fail-closed `UNMATCHED`/`AMBIGUOUS`/`REVIEW_REQUIRED` outcomes. Never assigns inactive or duplicate-key targets. |
+| `match_run.py` / `match_offers.py` | Offline batch path: rebuilds observations from CSV, refuses a partly invalid `TARGET_MASTER` snapshot, and writes result, review-queue, and evidence CSVs. Prints counts only. No network or Google access. |
 | `scraping.py` | Shared adapter contract (`RetailerAdapter`, `ParsedOffer`), `Fetcher` with timeouts, bounded retries, per-retailer throttling, and redirects checked before they are sent. Injectable `Transport`/`Clock`, a fail-closed live-use gate, the `scrape()` runner, stage-specific failures, and redacted logging. The default transport is the standard-library `urllib`, with redirects disabled. See [SCRAPING_FRAMEWORK.md](SCRAPING_FRAMEWORK.md). |
 | `adapters/laptop_factory.py` | Laptop Factory product-page parser. It prefers JSON-LD and falls back to visible content, gives sale versus regular price, combines stock evidence, flags bundles, and keeps raw Tech Specs. It makes no HTTP calls itself. `live_use_approved = True` under the project-owner policy; retailer permission remains unverified. See [adapters/LAPTOP_FACTORY.md](adapters/LAPTOP_FACTORY.md) and [RETAILER_DATA_USE_REVIEW.md](RETAILER_DATA_USE_REVIEW.md). |
 | `adapters/datablitz.py` | DataBlitz Shopify product-page parser for `ecommerce.datablitz.com.ph`. It prefers JSON-LD and falls back to visible content, separates sale and compare-at prices, combines JSON-LD availability with the add-to-cart button, flags bundle wording, and keeps raw description specs. It ignores the quick-buy `<template>` copy and makes no HTTP calls itself. `live_use_approved = True` under the project-owner policy; retailer permission remains unverified. See [adapters/DATABLITZ.md](adapters/DATABLITZ.md). |
@@ -105,7 +114,7 @@ The current and planned portions are different deliverables. The shared scraping
 | `adapters/pcc.py` | PC Central Shopify (Dawn theme) product-page parser for `pccentralcomputerstore.com`. For a multi-variant product it requires a `?variant=<id>` URL whose variant the page selected; otherwise it fails with `AMBIGUOUS_VARIANT`. It cross-checks the displayed price with the selected JSON-LD offer and the variant JSON. It gives a sale price only for Dawn's on-sale state with a higher compare-at price, and combines JSON-LD, variant, button, and sold-out-state availability. It checks product identity, flags bundle wording, and keeps raw description lines. It makes no HTTP calls itself. `live_use_approved = True` under the project-wide owner decision; the external-policy finding is UNKNOWN. See [adapters/PCC.md](adapters/PCC.md). |
 | `adapters/oct.py` | Octagon Shopify ("Multi" theme) product-page parser for `www.octagon.com.ph`. It cross-checks the displayed `dl.#price` amount with the selected JSON-LD offer and the analytics variant price. It gives a sale price only for `@on-sale` with a higher `@compare` amount, and combines JSON-LD, stock-alert, and button availability. It checks SKU and product-path identity and quotes the theme's invalid leading-zero `gtin12` values before reading JSON-LD. It never takes the store name as brand, follows the PCC `?variant=<id>` rule, flags bundle wording, and keeps raw "Tech Specification" lines. It makes no HTTP calls itself. `live_use_approved = True` under the project-wide owner decision; the external-policy finding is RESTRICTED. See [adapters/OCT.md](adapters/OCT.md). |
 
-Validation runs on local CSV exports or on read-only sheet reads; nothing writes the three Phase 5 tabs. The current `TARGET_MASTER` identity key is documented in [TARGET_MASTER_SCHEMA.md](TARGET_MASTER_SCHEMA.md) and aligned with the requested downstream fields in [PRICE_TRACKING_OUTPUT_SCHEMA.md](PRICE_TRACKING_OUTPUT_SCHEMA.md). Header templates for `TARGET_MASTER`, `SOURCE_MODEL_MAP`, and `MATCH_REVIEW` live under `config/`. No downstream consumer, retailer adapter, exact matcher, comparison-history, or approval-workflow module exists. The Phase 6 scraping framework does not read these tables. Promotion from review to master is a manual, human-approved step.
+Validation runs on local CSV exports or on read-only sheet reads; nothing writes the three Phase 5 tabs. The current `TARGET_MASTER` identity key is documented in [TARGET_MASTER_SCHEMA.md](TARGET_MASTER_SCHEMA.md) and aligned with the requested downstream fields in [PRICE_TRACKING_OUTPUT_SCHEMA.md](PRICE_TRACKING_OUTPUT_SCHEMA.md). Header templates for `TARGET_MASTER`, `SOURCE_MODEL_MAP`, and `MATCH_REVIEW` live under `config/`. The offline Phase 8 matcher reads a local `TARGET_MASTER` CSV snapshot only; no comparison-history or approval-workflow module exists. The Phase 6 scraping framework does not read these tables. Promotion from review to master is a manual, human-approved step.
 
 ## Data-processing flow
 
@@ -157,7 +166,7 @@ The shared framework (overall Phase 6) exists. Five retailer adapters (Phase 7) 
 1. *(Planned)* Read only validated laptop configurations from `TARGET_MASTER`, meaning rows that pass `validate_target_master` under the approved schema, and only `SOURCE_MODEL_MAP` links that pass `validate_source_model_map`. `read_target_table_values()` provides the read-only input. How scrape requests are derived from targets is not yet defined, and the framework does not assume `TARGET_MASTER` is populated.
 2. *(Implemented)* `scrape()` takes a `ScrapeRequest` (retailer ID and URL) and fetches through the shared `Fetcher`. The adapter parses the page into `ParsedOffer` values. Nothing changes any sheet.
 3. *(Implemented)* The framework returns `OfferObservation` values with retailer, offer URL, UTC retrieval time, raw product and configuration text, `Decimal` price, ISO currency, availability evidence, and retrieval metadata, plus stage-specific `ScrapeFailure` records.
-4. *(Planned, Phase 8)* Pass normalized observations to a shared exact-configuration matcher. Ambiguous or partial matches must be review cases, not silent matches. Observations carry no `target_id`.
+4. *(Implemented offline, Phase 8)* `match_offers.py` matches saved observations (a CSV of `to_full_record()` rows) against a validated `TARGET_MASTER` snapshot through `extraction.py` and `ExactMatcher`. Ambiguous or partial matches are review-queue rows, not silent matches. Observations themselves still carry no `target_id`, and nothing yet persists live observations for this step. See [MATCHING.md](MATCHING.md).
 5. *(Planned, Phase 9)* Send confirmed comparisons to the future weekly comparison and price-history outputs defined by [PRICE_TRACKING_OUTPUT_SCHEMA.md](PRICE_TRACKING_OUTPUT_SCHEMA.md).
 
 ```mermaid
@@ -167,7 +176,9 @@ flowchart LR
     FE --> AD[RetailerAdapter.parse: LF, DBZ, PCX, PCC, OCT adapters; example adapter in tests]
     AD --> BO[build_observation: normalize and validate]
     BO --> OB[OfferObservation, no target_id]
-    OB -. planned Phase 8 .-> MX[exact matcher]
+    OB -. saved CSV, offline .-> EX[extraction.py: canonical fields + evidence]
+    EX --> MX[ExactMatcher vs validated TARGET_MASTER snapshot]
+    MX --> MR[results, review queue, evidence CSVs]
 ```
 
 The framework is standalone: no pipeline, CLI, or Sheets code calls it yet, and it stores no observations.
