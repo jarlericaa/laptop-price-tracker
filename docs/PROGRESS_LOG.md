@@ -11,7 +11,7 @@ Append new dated rows as work is verified. Keep earlier rows as historical evide
 - **`TARGET_MASTER` (Phase 5):** PARTIALLY_COMPLETE. On 2026-10-05 the user approved rule-based promotion when the five core identity fields (`model`, `screen_size_in`, `cpu_series`, `ram_capacity_gb`, `storage_capacity_gb`) are present and unambiguous. Missing resolution, display type, refresh rate, GPU model, OS, or source URL does not block promotion. On 2026-10-06 the local validators were synchronized with this policy (five required core fields, optional secondary/audit fields, `COMPLETE` review status); header templates were already correct. The Sheet's status dropdown, promotion, and mappings remain outstanding. No Sheet rows were changed or checked.
 - **Sheet outputs (Phase 3):** COMPLETE based on user-reported production-tab verification, synthetic writer completion, and a read-only inspection report for the dedicated test spreadsheet. All nine approved tabs and headers were reported present; the synthetic laptop appeared in `P1_TOP_100_TARGETS`, the charger in `P1_EXCLUDED_LISTINGS`, and `P1_RUN_LOG.top_100_count` was 1. The recovery procedure is documented. The report did not list or inspect a `raw` tab. No production write or `run_phase1.py --write-sheets` run has occurred.
 - **Scraping framework (Phase 6):** COMPLETE as an offline, retailer-neutral framework on 2026-09-29. It covers the adapter contract, normalized `OfferObservation` (`Decimal` price, no `target_id`), timeouts, bounded retries, per-retailer throttling, stage-specific failures, redacted logging, and an offline example-adapter harness. 203 tests passed. No live request was made, and no Sheets or Phase 5 data was touched.
-- **Exact matching (Phase 8):** COMPLETE as an offline path on 2026-10-06. Per-retailer extraction maps each adapter's labeled spec rows to canonical fields with evidence; `ExactMatcher` applies the five-field rule and fails closed on missing, ambiguous, inactive, duplicate-key, or secondary-conflict cases; `match_offers.py` matches saved observation CSVs against a fully valid `TARGET_MASTER` snapshot and writes results, a review queue, and evidence. Verified on synthetic fixtures only. Only LF and single-variant PCC output supplies `model`; no real snapshot has been matched and no command persists live observations. See [MATCHING.md](MATCHING.md).
+- **Exact matching (Phase 8):** COMPLETE as an offline path on 2026-10-06. Per-retailer extraction maps each adapter's labeled spec rows to canonical fields with evidence; `ExactMatcher` applies the five-field rule and fails closed on missing, ambiguous, inactive, duplicate-key, or secondary-conflict cases; `match_offers.py` matches saved observation CSVs against a fully valid `TARGET_MASTER` snapshot and writes results, a review queue, and evidence. The capacity parser counts repeated mentions before accepting a total, preventing false exact matches for multi-component RAM/storage. All 763 tests pass; Ruff and `compileall` pass. Verified on synthetic fixtures only. Only LF and single-variant PCC output supplies `model`; no real snapshot has been matched and no command persists live observations. See [MATCHING.md](MATCHING.md).
 - **Downstream comparison fields (Phase 9):** Requirements are in [PRICE_TRACKING_OUTPUT_SCHEMA.md](PRICE_TRACKING_OUTPUT_SCHEMA.md). Currency, unit, precision, cadence, and missing-price rules remain to be settled.
 - **Retailer adapters (Phase 7):** COMPLETE. LF, DBZ, PCX, PCC, and OCT have offline tests, adapter documentation, and live-check evidence recorded. Jarelle Ricaforte is the named maintainer for all five. Known unobserved page states remain documented limitations; external-policy findings remain recorded separately from project-owner authorization.
 - **Automation and scraping:** No scheduled retailer collection, observation store, history output, or GitHub Actions workflow exists. The Phase 8 matcher runs only offline on saved CSVs. The live smoke-test observation was not persisted.
@@ -88,12 +88,13 @@ The user authorized internal retailer collection under the assumption that retai
 
 The user reported a successful live call to `scrape()` for an Acer Nitro V 15 ANV15-42-R2UH product page. It returned one observation at PHP 69,999.00 with `IN_STOCK`, `result.ok == True`, and no failures. The `url` variable's printed representation contained Markdown link syntax (`[url](url)`), so the exact requested URL was not a clean product URL; the final and offer URLs were not inspected. Treat this as evidence that the live fetch-and-parse path returned an observation, and confirm attribution by rerunning with a bare URL. No observation was persisted and no Sheets data was touched. The full test suite has not been rerun after enabling live use.
 
-## Current blockers
+## Current next steps
 
-1. Synchronize the `TARGET_MASTER` and `MATCH_REVIEW` Sheet headers/status choices and local CSV templates/validators with the five-field promotion policy.
-2. Promote eligible candidates and create or verify a `SOURCE_MODEL_MAP` row for each in-scope Shopee source model ID. The live Sheet contents were not checked for this documentation update.
-3. Implement an automatic check covering the accepted Top 100 and sibling source IDs explicitly included in the review scope, then build the Phase 8 matcher using the same five-field key.
-4. The latest full raw-to-output run took 57.49 seconds. Stage-level timings are unavailable if runtime needs further optimization.
+1. Reconcile the live `TARGET_MASTER` and `MATCH_REVIEW` headers with the local templates and add `COMPLETE` to the Sheet status dropdown. The latest user-provided inspection found a `MATCH_REVIEW` header mismatch; no Sheet edits have been made or rechecked.
+2. Confirm the live five-field values use the model and CPU-series forms required by [MATCHING.md](MATCHING.md), then promote only complete, unambiguous candidates and create or verify one `SOURCE_MODEL_MAP` row per in-scope source model ID.
+3. Decide how pilot runs will save observations for `match_offers.py`, then test the offline reports on an approved, limited data set before any broader operation.
+4. Define Phase 9 comparison and history rules: retailer currencies, capacity/price units, precision, cadence, and missing-price representation.
+5. The latest Phase 4 run took 57.49 seconds. Add stage timings only if that runtime needs operational improvement.
 
 ## Facts not reverified
 
@@ -126,9 +127,8 @@ No further page-state checks were run. A sold-out, pre-order, multi-variant, or 
 
 ## Recommended next actions
 
-1. Synchronize the live `TARGET_MASTER` and `MATCH_REVIEW` headers/status choices and the local templates/validators with the five-field rule.
-2. Promote each unambiguous `MATCH_REVIEW` row with all five core fields populated. Reuse a target with the same exact core key; otherwise create a row with the next unused stable `target_id`. Add or verify one `SOURCE_MODEL_MAP` entry per source model ID, preserving and reporting mapping conflicts.
-3. Add a coverage check for all accepted Top 100 and explicitly included sibling source IDs. Implement Phase 8 matching with the same five core fields; use known secondary specs to corroborate or flag disagreements.
-4. If the 57-second runtime is too long for operations, add temporary stage timings for validation, duplicate handling, eligibility, and aggregation before making further performance changes.
-5. Keep local decisions, credentials, seeded candidates, and generated business-data outputs out of commits; they remain ignored by Git.
-6. Phase 7 is COMPLETE. Jarelle Ricaforte maintains LF, DBZ, PCX, PCC, and OCT. Review additional page states if suitable products are identified; this is optional follow-up.
+1. Reconcile the production Sheet headers and status dropdown with the five-field target policy.
+2. Review candidates and promote complete, unambiguous configurations; record their source model mappings.
+3. Confirm target value conventions and prepare a controlled offline matching run with saved observations.
+4. Define and implement the Phase 9 comparison/history rules, then run the supervised pilot before planning automation.
+5. Keep credentials, user business data, and generated local reports out of Git.

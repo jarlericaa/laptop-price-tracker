@@ -22,10 +22,13 @@ flowchart LR
     T -->|"--from-sheets (read-only scope)"| C
     C --> TM[target_master and supporting_tables validators]
     TM --> TL[local error reports and validated copies]
-    TM -. validated rows only; integration planned .-> X[future retailer adapters, exact matching, comparison]
+    TM -. local validated CSV export .-> MO[match_offers.py]
+    SO[saved OfferObservation CSV] --> MO
+    MO --> MR[local match results, review queue, field evidence]
+    TM -. future comparison consumer .-> X[Phase 9 comparison and history]
 ```
 
-The current and planned portions are different deliverables. The shared scraping framework (overall Phase 6) and five retailer adapters, Laptop Factory, DataBlitz, PC Express, PC Central, and Octagon (Phase 7), are implemented and tested offline. All five are enabled for live use under project-owner decisions. Laptop Factory and DataBlitz each have one user-reported live check; a user-reported PC Express check returned one in-stock Acer offer. Controlled 2026-10-01 checks confirmed plain-string URLs for Laptop Factory (bare-URL recheck) and PC Express (`repr()` of the offer URL). PC Express's external-policy finding remains RESTRICTED under the retailer's terms. PC Central's finding is UNKNOWN; a bare-URL check failed safely with `AMBIGUOUS_VARIANT`, and a selected-variant check returned one in-stock offer. Octagon's finding is RESTRICTED under its terms; a user-reported live check returned one in-stock HP offer. They are not connected to the pipeline above. Exact configuration matching, price history, and GitHub Actions are not implemented.
+The current and planned portions are different deliverables. The shared scraping framework (overall Phase 6) and five retailer adapters, Laptop Factory, DataBlitz, PC Express, PC Central, and Octagon (Phase 7), are implemented and tested offline. All five are enabled for live use under project-owner decisions. Laptop Factory and DataBlitz each have one user-reported live check; a user-reported PC Express check returned one in-stock Acer offer. Controlled 2026-10-01 checks confirmed plain-string URLs for Laptop Factory (bare-URL recheck) and PC Express (`repr()` of the offer URL). PC Express's external-policy finding remains RESTRICTED under the retailer's terms. PC Central's finding is UNKNOWN; a bare-URL check failed safely with `AMBIGUOUS_VARIANT`, and a selected-variant check returned one in-stock offer. Octagon's finding is RESTRICTED under its terms; a user-reported live check returned one in-stock HP offer. These retailer paths remain separate from the Phase 4 Shopee pipeline. Phase 8 matching is implemented offline for saved observations and validated target CSV snapshots. Price history and GitHub Actions are not implemented.
 
 ## Repository structure
 
