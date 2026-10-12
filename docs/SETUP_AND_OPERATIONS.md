@@ -87,7 +87,7 @@ The command reads the configured raw tab, validates the required headers, report
 python check_target_tables.py --from-sheets
 ```
 
-This command reads `TARGET_MASTER`, `SOURCE_MODEL_MAP`, and `MATCH_REVIEW` from the configured spreadsheet using the read-only scope and `get_all_values()` only. It validates each tab against the current templates and writes local reports under `data/output/`. It prints table names, counts, and error codes, but never the spreadsheet title or cell values. A missing tab is reported and fails the check. The command never creates, clears, or writes tabs. On 2026-10-12 it passed all three tabs (205 targets, 360 mappings, 5,154 review rows). Each passing table also gets a `<table>_validated.csv` copy, which downstream commands (`match_offers.py` and `build_verified_top_100.py`) read.
+This command reads `TARGET_MASTER`, `SOURCE_MODEL_MAP`, and `MATCH_REVIEW` from the configured spreadsheet using the read-only scope and `get_all_values()` only. It validates each tab against the current templates and writes local reports under `data/output/`. It prints table names, counts, and error codes, but never the spreadsheet title or cell values. A missing tab is reported and fails the check. The command never creates, clears, or writes tabs. On 2026-10-12 it passed all three tabs (205 targets, 360 mappings, 5,154 review rows). Each passing table also gets a `<table>_validated.csv` copy, which downstream commands (`match_offers.py`, `build_verified_top_100.py`, and `track_prices.py`) read.
 
 ## Local Phase 5 CSV checks and candidate seeding
 
@@ -121,6 +121,31 @@ python seed_match_review.py
 ```
 
 This writes `data/review/match_review_candidates.csv` with one `NEW` row per distinct Top 100 model ID. All specifications, URLs, and approvals are blank. The command refuses to overwrite an existing file and stops without writing if `data/output/top_100_targets.csv` is missing; run `python run_phase1.py --dry-run` first. It never touches Google Sheets or creates `TARGET_MASTER` or mapping rows.
+
+## Offline price comparisons and history (overall Phase 9)
+
+```bash
+python track_prices.py \
+  --observations data/output/pilot_matching_2026-10-08/observations.csv \
+  --week-start 2026-10-05 --as-of 2026-10-12T09:00:00+08:00
+```
+
+The command:
+
+1. Validates the three catalog snapshots (`data/output/*_validated.csv` by default), the selected list (`data/output/verified_top_100/top_100_verified_configurations.csv`), and its contribution ledger, then reads every `--observations` file completely. Any failure stops the run before the store is touched.
+2. Imports each observation file into `data/history/price_history.sqlite3` in one transaction. Exact repeats are counted, not stored again; a record that contradicts a stored one refuses the whole file.
+3. Matches every stored observation that has no result under the current matching context (catalog SHA-256 plus rule version) with the five-field `ExactMatcher`.
+4. Writes the weekly comparison, retailer selections, weekly series, price history, review queue, configuration-to-source ledger, and run summary under `data/output/price_tracking/week_<week-start>/`.
+
+- `--week-start` must be a Monday; weeks run Monday 00:00 to Monday 00:00 in Asia/Singapore.
+- `--as-of` is required and needs a UTC offset. It is the cut-off for observations, so a rerun with the same dates gives the same reports. Use a time after the week's end for a closed (historical) week.
+- `--observations` is optional and repeatable. Without it, the run reports from what the store already holds.
+- `--history-start <Monday>` limits the history window; the default is the first week with a stored observation.
+- `--sales-ranking` (default `data/output/eligible_model_ranking.csv`, used only if present) adds each source's Shopee snapshot price to the ledger; `--no-sales-ranking` skips it. It must be the same sales run as the list.
+- The console shows counts only. Reports and the store contain business data and stay Git-ignored.
+- Rerunning is safe. To start a history from scratch, move the store file aside; never edit it, because the tables are append-only by design.
+
+Policies, identities, and file columns are in [PRICE_TRACKING_OUTPUT_SCHEMA.md](PRICE_TRACKING_OUTPUT_SCHEMA.md#phase-9-implementation-2026-10-12). A supervised collector can call `persist_scrape_results()` from `laptop_tracker.observation_store` to store `scrape()` results directly; no such collector or schedule exists yet.
 
 ## Offline scraping framework and adapter tests (overall Phases 6-7)
 
@@ -195,6 +220,8 @@ This reads the same raw source, completes local processing first, then requests 
 | `check_target_tables.py` reports a header error for `SOURCE_MODEL_MAP` or `MATCH_REVIEW` | `SOURCE_MODEL_MAP` must match its `config/` template exactly, including column order. `MATCH_REVIEW` may use any column order, but it must have exactly the template's columns (or the pre-tracking-mode set), with no blank, duplicate, misspelled, or extra header; the error lists which. |
 | `check_target_tables.py --from-sheets` reports a worksheet not found | Create the tab manually with the template headers. The command never creates tabs. |
 | `check_target_master.py` reports header or row errors | Compare the header with `config/target_master_template.csv`, then review the local `target_master_validation_errors.csv`. Duplicates are never resolved automatically; correct or remove rows in the source. |
+| `track_prices.py` stops "before any store write" | A catalog table, the selected list, the contribution ledger, or an observation file failed validation. Rerun `check_target_tables.py`, or rebuild and audit the verified list, before retrying. |
+| `track_prices.py` reports observations that "contradict stored records" | The file repeats an observation identity (same offer and retrieval time) with different content. Nothing from the file was stored. Investigate the source of the file; never edit the store to force it in. |
 | Pipeline appears slow | Unit aggregation performance does not represent total runtime. Time each processing stage on a safe local-only run before changing the implementation. |
 | Write-enabled run does not create outputs | Check for a pipeline safety failure first; unresolved conflicts stop before Sheets writes. Confirm service-account Editor access only for the intended test spreadsheet. |
 
@@ -205,7 +232,7 @@ This reads the same raw source, completes local processing first, then requests 
 - [ ] The service account is shared only on the required spreadsheet with the minimum needed access.
 - [ ] Read-only commands use the read-only scope; no write test targets production.
 - [ ] `raw` remains unchanged.
-- [ ] Local `data/output/` reports are treated as private business data.
+- [ ] Local `data/output/` reports and the `data/history/` store are treated as private business data.
 - [ ] No raw rows, spreadsheet IDs, service-account emails, or credential values are copied into docs, logs, commits, or support messages.
 - [ ] `--write-sheets` is used only after review and with an explicitly chosen destination.
 

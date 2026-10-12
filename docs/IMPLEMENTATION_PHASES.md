@@ -17,8 +17,8 @@ The Python implementation and CLI are named “Phase 1” (`run_phase1.py` and `
 | 6. Build shared scraping framework | COMPLETE | The retailer-neutral framework (`offers.py`, `scraping.py`) and an offline example-adapter harness were added on 2026-09-29. 203 tests, Ruff, and `compileall` passed. No live request was made. The framework does not read Sheets or match offers to targets. |
 | 7. Implement retailer adapters | COMPLETE | LF, DBZ, PCX, PCC, and OCT adapters meet the Phase 6 contract, have offline tests and documentation, and have live-check evidence recorded. Jarelle Ricaforte is the named maintainer for all five. Unobserved page states remain documented limitations; retailer-policy findings remain separate from the project-owner live-use decision. |
 | 8. Normalize and perform exact matching | COMPLETE (offline) | Per-retailer extraction, the five-field `ExactMatcher`, and `match_offers.py` match saved observation CSVs against a validated `TARGET_MASTER` snapshot and write results, a review queue, and field evidence. Verified on synthetic fixtures (763 tests, Ruff) and on the nine saved Laptop Factory observations from 2026-10-08: the replay against the current 205-target catalog gives 9 `EXACT` (2026-10-12). The CPU identity is matched at family level (owner policy 2026-10-12). See [MATCHING.md](MATCHING.md) for limitations. |
-| 9. Generate comparisons and price history | NOT_STARTED | No comparison or history outputs exist. |
-| 10. Test and run a controlled pilot | BLOCKED | Phases 4-8 are complete; the pilot still needs Phase 9 comparison and history outputs. |
+| 9. Generate comparisons and price history | COMPLETE (offline) | 2026-10-12: `track_prices.py` with an append-only SQLite observation store, matching contexts, weekly Asia/Singapore comparisons over the published working list, retailer selections, weekly series, per-observation history, review queue, and source ledger. Verified on synthetic tests and two demonstration runs over the nine saved 2026-10-08 observations (historical week 2026-10-05; no duplicated history). Live collection and pilot acceptance are Phase 10. |
+| 10. Test and run a controlled pilot | NOT_STARTED | Phases 4-9 are complete offline. Next: supervised collection of fresh offers into the Phase 9 store. |
 | 11. Add GitHub Actions automation | NOT_STARTED | No workflow exists; this follows a passing controlled pilot. |
 | 12. Production operation and maintenance | NOT_STARTED | Operational automation and ownership are future work. |
 
@@ -201,7 +201,13 @@ The Python implementation and CLI are named “Phase 1” (`run_phase1.py` and `
 - **Dependencies:** Validated `TARGET_MASTER`, adapter observations, and exact matches.
 - **Validation:** Reconcile sample comparisons to source observations; test missing offers, price changes, duplicates, and reruns.
 - **Definition of done:** Repeated runs produce traceable comparisons without losing observation provenance.
-- **Current status:** `NOT_STARTED`.
+- **Current status:** `COMPLETE (offline)` on 2026-10-12. This is an offline implementation; live-pilot acceptance and automation remain Phases 10–11.
+  - **Done:** Policy, store, and outputs are in [PRICE_TRACKING_OUTPUT_SCHEMA.md](PRICE_TRACKING_OUTPUT_SCHEMA.md#phase-9-implementation-2026-10-12) and the command in [SETUP_AND_OPERATIONS.md](SETUP_AND_OPERATIONS.md#offline-price-comparisons-and-history-overall-phase-9).
+    - `observation_store.py`: an append-only local SQLite store (`data/history/`, Git-ignored). Observation identity is retailer + offer URL + offer index + UTC retrieval time. Batches are validated and written in one transaction; duplicates are counted, and contradictions refuse the batch. Matching contexts record the catalog SHA-256 and the matching-rule version and fingerprint, and results under earlier contexts are kept. `persist_scrape_results()` accepts production `scrape()` results.
+    - `price_tracking.py` and `track_prices.py`: PHP only, with exact decimal text. Weeks run Monday to Monday in Asia/Singapore with an explicit `--as-of` cut-off. A price is comparable only for an `EXACT`, selected, `IN_STOCK`, non-bundle offer in PHP with a known price type. Each offer is represented by its latest observation in the week, and the lowest price is selected with deterministic ties. Stale prices are never carried forward, and missing prices are blank with a reason. The outputs are one comparison row per selected configuration (with `DBZ_Price`, `LF_Price`, `PCX_Price`, `PCC_Price`, `OCT_Price`), selections with URL, time, and reason, a weekly series, per-observation history with comparable-only price changes, a review queue, a configuration-to-source ledger, and a summary.
+    - 58 new synthetic tests (1,145 in total); Ruff and `compileall` passed.
+    - Demonstration on the nine saved 2026-10-08 observations, week 2026-10-05 (`CLOSED_HISTORICAL`), run twice: 9 observations stored once (second run 0 new, identical CSVs); 9 `EXACT`; 7 selected targets observed; 3 comparable LF prices; 4 out of stock; 2 `EXACT` offers for catalog targets outside the selected list.
+  - **Not done:** live supervised collection, prices from retailers other than LF, review of the starting rules after real use, and any Sheets output.
 
 ### Phase 10 — Test and run a controlled pilot
 
@@ -211,7 +217,7 @@ The Python implementation and CLI are named “Phase 1” (`run_phase1.py` and `
 - **Dependencies:** Phases 4-9 complete enough for an end-to-end pilot.
 - **Validation:** Reconcile target, source offers, matches, comparisons, and output tabs with human reviewers.
 - **Definition of done:** Stakeholders accept the pilot results and residual risks before automation.
-- **Current status:** `BLOCKED`. It was originally blocked by incomplete Phase 5 and unstarted Phases 7-9. As of 2026-10-12, Phases 4-8 are complete and only Phase 9 remains.
+- **Current status:** `NOT_STARTED`. It was originally blocked by incomplete Phase 5 and unstarted Phases 7-9. As of 2026-10-12, Phases 4-8 are complete and Phase 9 is complete offline, so the pilot can be planned. Suggested first cycle: agree a small set of selected targets and retailers, collect fresh offers under supervision, persist them with `persist_scrape_results()`, run `track_prices.py` for that week, and reconcile the outputs with a reviewer.
 
 ### Phase 11 — Add GitHub Actions automation
 

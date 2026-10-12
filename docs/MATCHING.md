@@ -255,8 +255,10 @@ prices. The `model`-convention blocker described above is resolved for these off
   wording is identical.
 - **Model coverage.** Only Laptop Factory and single-variant PC Central offers can supply `model`.
   DataBlitz, PC Express, Octagon, and multi-variant PC Central offers always go to review.
-- **No observation store.** No command yet saves live adapter observations to the CSV this command
-  reads; persisting collected observations is pilot/Phase 9 work.
+- **No live collector.** No command yet collects live adapter observations. Since 2026-10-12, the
+  Phase 9 store (`observation_store.py`) can persist `scrape()` results and saved CSVs, and
+  `track_prices.py` matches them under a recorded matching context; a supervised collector is
+  pilot work.
 - Unsupported CPU lines (Pentium, Athlon, incomplete Intel numbers), multi-drive storage, RAM
   breakdowns that do not sum to one stated total, display rows without a unit outside the narrow
   size-label form, and variant-specific RAM/storage go to review rather than being guessed. The

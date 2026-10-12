@@ -11,8 +11,9 @@ and PC Express also have a controlled 2026-10-01 check with plain-string URLs. T
 external-policy findings for PC Express and Octagon are RESTRICTED under the retailers' terms.
 PC Central's bare-URL check failed safely; a selected-variant live check returned one in-stock
 offer. A user-reported OCT live check returned one in-stock HP 15-FC0413AU offer at PHP 37,999.
-Exact configuration matching (overall Phase 8) runs offline over saved observations. Price
-comparison and GitHub Actions automation are not implemented.
+Exact configuration matching (overall Phase 8) and weekly price comparisons with price history
+(overall Phase 9) run offline over saved observations. Live collection, the controlled pilot,
+and GitHub Actions automation are not implemented.
 
 The latest read-only live dry run completed in 57.49 seconds and generated 100 targets. The
 21 historical conflicting keys had fingerprint-matched `EXCLUDE_KEY` decisions; their source
@@ -40,6 +41,13 @@ tracker's working list is the **Top 100 verified configurations**: 128 configura
 Phase 8 is COMPLETE as an offline path. Replaying the nine Laptop Factory observations saved on
 2026-10-08 against the current catalog gives 9 `EXACT` matches. That is one retailer and nine
 offers, not a pilot. See [docs/MATCHING.md](docs/MATCHING.md).
+
+Phase 9 is COMPLETE as an offline path (2026-10-12). `track_prices.py` stores observations in an
+append-only local SQLite history and matches them under a recorded catalog and rule version. It
+then writes a weekly comparison (Monday to Monday, Asia/Singapore) for the selected working list,
+with `DBZ_Price`, `LF_Price`, `PCX_Price`, `PCC_Price`, and `OCT_Price`, plus price history. On the
+nine saved 2026-10-08 observations, 3 of the 100 selected configurations get a comparable price.
+See [docs/PRICE_TRACKING_OUTPUT_SCHEMA.md](docs/PRICE_TRACKING_OUTPUT_SCHEMA.md).
 
 Phase 6 is COMPLETE as a framework. `src/laptop_tracker/offers.py` and
 `src/laptop_tracker/scraping.py` define the adapter contract and the normalized offer
@@ -162,6 +170,25 @@ catalog. See [docs/SHEET_MIGRATION_MODEL_CPU_CONVENTIONS.md](docs/SHEET_MIGRATIO
 - **Sales periods.** The GMV comes from the historical sales snapshot that Phase 4 extracted. A
   new build date does not make the sales current.
 
+```bash
+python track_prices.py --observations data/output/pilot_matching_2026-10-08/observations.csv \
+  --week-start 2026-10-05 --as-of 2026-10-12T09:00:00+08:00
+```
+
+`track_prices.py` (Phase 9, offline) does four things:
+
+- **Validates** the three catalog snapshots, the published selected list, and its contribution
+  ledger.
+- **Imports** observation CSVs into `data/history/price_history.sqlite3`. Exact repeats are
+  skipped, and a contradicting record refuses the file.
+- **Matches** stored observations under the current catalog and rule version.
+- **Writes** the weekly comparison, retailer selections (URL, retrieval time, and reason), a
+  weekly series, per-observation history, a review queue, a configuration-to-source ledger, and a
+  summary under `data/output/price_tracking/week_<date>/`.
+
+Dates are explicit, and the output prints counts only. It makes no retailer requests and never
+touches Sheets. See [docs/SETUP_AND_OPERATIONS.md](docs/SETUP_AND_OPERATIONS.md#offline-price-comparisons-and-history-overall-phase-9).
+
 `audit_verified_top_100.py` independently checks a run: unique targets, ACTIVE `CONFIGURATION`
 status, complete identities, valid contributors, totals, deterministic order, and the catalog
 version used. See [docs/TARGET_MASTER_SCHEMA.md](docs/TARGET_MASTER_SCHEMA.md#top-100-verified-configurations-2026-10-12).
@@ -215,7 +242,7 @@ The latest live dry run took 57.49 seconds and did not write to any Google Sheet
 ```bash
 python -m pytest -q
 python -m ruff check .
-python -m compileall src run_phase1.py smoke_test.py check_target_master.py check_target_tables.py seed_match_review.py match_offers.py audit_top_100_coverage.py propose_catalog_conventions.py build_verified_top_100.py audit_verified_top_100.py
+python -m compileall src run_phase1.py smoke_test.py check_target_master.py check_target_tables.py seed_match_review.py match_offers.py audit_top_100_coverage.py propose_catalog_conventions.py build_verified_top_100.py audit_verified_top_100.py track_prices.py
 python smoke_test.py
 python run_phase1.py --dry-run
 ```

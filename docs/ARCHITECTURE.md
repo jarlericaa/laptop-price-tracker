@@ -25,10 +25,14 @@ flowchart LR
     TM -. local validated CSV export .-> MO[match_offers.py]
     SO[saved OfferObservation CSV] --> MO
     MO --> MR[local match results, review queue, field evidence]
-    TM -. future comparison consumer .-> X[Phase 9 comparison and history]
+    SO --> TP[track_prices.py]
+    TM -. validated snapshots .-> TP
+    VT[verified Top 100 list + contribution ledger] --> TP
+    TP <--> HS[(local SQLite history store, append-only)]
+    TP --> PR[local weekly comparison, selections, series, history, review, source ledger]
 ```
 
-The current and planned portions are different deliverables. The shared scraping framework (overall Phase 6) and five retailer adapters, Laptop Factory, DataBlitz, PC Express, PC Central, and Octagon (Phase 7), are implemented and tested offline. All five are enabled for live use under project-owner decisions. Laptop Factory and DataBlitz each have one user-reported live check; a user-reported PC Express check returned one in-stock Acer offer. Controlled 2026-10-01 checks confirmed plain-string URLs for Laptop Factory (bare-URL recheck) and PC Express (`repr()` of the offer URL). PC Express's external-policy finding remains RESTRICTED under the retailer's terms. PC Central's finding is UNKNOWN; a bare-URL check failed safely with `AMBIGUOUS_VARIANT`, and a selected-variant check returned one in-stock offer. Octagon's finding is RESTRICTED under its terms; a user-reported live check returned one in-stock HP offer. These retailer paths remain separate from the Phase 4 Shopee pipeline. Phase 8 matching is implemented offline for saved observations and validated target CSV snapshots. Price history and GitHub Actions are not implemented.
+The current and planned portions are different deliverables. The shared scraping framework (overall Phase 6) and five retailer adapters, Laptop Factory, DataBlitz, PC Express, PC Central, and Octagon (Phase 7), are implemented and tested offline. All five are enabled for live use under project-owner decisions. Laptop Factory and DataBlitz each have one user-reported live check; a user-reported PC Express check returned one in-stock Acer offer. Controlled 2026-10-01 checks confirmed plain-string URLs for Laptop Factory (bare-URL recheck) and PC Express (`repr()` of the offer URL). PC Express's external-policy finding remains RESTRICTED under the retailer's terms. PC Central's finding is UNKNOWN; a bare-URL check failed safely with `AMBIGUOUS_VARIANT`, and a selected-variant check returned one in-stock offer. Octagon's finding is RESTRICTED under its terms; a user-reported live check returned one in-stock HP offer. These retailer paths remain separate from the Phase 4 Shopee pipeline. Phase 8 matching is implemented offline for saved observations and validated target CSV snapshots. Phase 9 (2026-10-12) adds an offline observation store, weekly comparisons, and price history over the published Top 100 verified configurations; it has no live collector or schedule. GitHub Actions is not implemented.
 
 ## Repository structure
 
@@ -62,7 +66,9 @@ The current and planned portions are different deliverables. The shared scraping
 │   ├── match_run.py                  # Offline batch matching and report records (overall Phase 8)
 │   ├── matching.py                   # Five-field ExactMatcher (overall Phase 8)
 │   ├── normalization.py              # Shared core-key comparison rules (Phases 5 and 8)
+│   ├── observation_store.py          # Append-only SQLite observation/match store (overall Phase 9)
 │   ├── offers.py                     # Offer observation model (overall Phase 6)
+│   ├── price_tracking.py             # Weekly comparison, selection, and history rules (Phase 9)
 │   ├── periods.py
 │   ├── pipeline.py
 │   ├── ranking.py
@@ -84,13 +90,14 @@ The current and planned portions are different deliverables. The shared scraping
 ├── propose_catalog_conventions.py    # Local model/cpu_series correction proposals (read-only)
 ├── build_verified_top_100.py         # Top 100 verified configurations working list (Phase 5)
 ├── audit_verified_top_100.py         # Independent audit of a verified-configuration run
+├── track_prices.py                   # Offline weekly comparisons and price history (Phase 9)
 ├── run_phase1.py                     # Legacy Phase 1 command name; overall Phase 4 work
 ├── smoke_test.py
 ├── pyproject.toml
 └── requirements.txt
 ```
 
-`data/output/`, `data/review/` (including seeded review candidates), credentials, and local decision CSVs are ignored by Git. The project setup, implementation, tests, and initial docs are recorded in four purpose-based commits; the Phase 5 validator and this status refresh are recorded in follow-up feature and documentation commits. Generated reports and local decisions remain ignored; see [the progress log](PROGRESS_LOG.md).
+`data/output/`, `data/review/` (including seeded review candidates), `data/history/` (the Phase 9 SQLite store; `*.sqlite`, `*.sqlite3`, and `*.db` are also ignored), credentials, and local decision CSVs are ignored by Git. The project setup, implementation, tests, and initial docs are recorded in four purpose-based commits; the Phase 5 validator and this status refresh are recorded in follow-up feature and documentation commits. Generated reports and local decisions remain ignored; see [the progress log](PROGRESS_LOG.md).
 
 ## Current components
 
@@ -121,6 +128,8 @@ The current and planned portions are different deliverables. The shared scraping
 | `matching.py` | `ExactMatcher`: five-field exact matching with secondary corroboration/conflict, near-candidate hints, and fail-closed `UNMATCHED`/`AMBIGUOUS`/`REVIEW_REQUIRED` outcomes. Never assigns inactive or duplicate-key targets. |
 | `coverage.py` / `audit_top_100_coverage.py` | Phase 5 coverage audit. It classifies each accepted Top 100 `model_id` (exact text) against validated `TARGET_MASTER`, `SOURCE_MODEL_MAP`, and `MATCH_REVIEW` snapshots or read-only tabs, and lists `COMPLETE` review rows without an ACTIVE mapping. It writes local reports, prints counts only, and never promotes or maps. |
 | `match_run.py` / `match_offers.py` | Batch matching path: rebuilds observations from CSV, reads `TARGET_MASTER` from a local snapshot (an export or a validated copy) or from the live tab read-only (`--target-master-from-sheets`), refuses a partly invalid `TARGET_MASTER`, and writes result, review-queue, and evidence CSVs. Prints counts only. No network access except the optional read-only `TARGET_MASTER` tab read; never reads `raw` or writes Sheets. |
+| `observation_store.py` | Phase 9 SQLite store. Deterministic observation identity (offer + retrieval time) and offer key; batch validation and single-transaction imports; duplicate counting and conflict refusal; append-only triggers; matching contexts (catalog SHA-256 + rule version/fingerprint) with one result per observation and context. `persist_scrape_results()` accepts `scrape()` results directly. No network or Sheets access. |
+| `price_tracking.py` / `track_prices.py` | Phase 9 offline reporting. Validates the selected list against the catalog and contribution ledger, matches pending stored observations, classifies comparability (EXACT, in scope, IN_STOCK, non-bundle, PHP, known price type), selects the lowest comparable price per target and retailer per Asia/Singapore week with deterministic ties, and writes the comparison, selections, weekly series, per-observation history with price changes, review queue, source ledger, and run summary. Prints counts only. See [PRICE_TRACKING_OUTPUT_SCHEMA.md](PRICE_TRACKING_OUTPUT_SCHEMA.md#phase-9-implementation-2026-10-12). |
 | `scraping.py` | Shared adapter contract (`RetailerAdapter`, `ParsedOffer`), `Fetcher` with timeouts, bounded retries, per-retailer throttling, and redirects checked before they are sent. Injectable `Transport`/`Clock`, a fail-closed live-use gate, the `scrape()` runner, stage-specific failures, and redacted logging. The default transport is the standard-library `urllib`, with redirects disabled. See [SCRAPING_FRAMEWORK.md](SCRAPING_FRAMEWORK.md). |
 | `adapters/laptop_factory.py` | Laptop Factory product-page parser. It prefers JSON-LD and falls back to visible content, gives sale versus regular price, combines stock evidence, flags bundles, and keeps raw Tech Specs. It makes no HTTP calls itself. `live_use_approved = True` under the project-owner policy; retailer permission remains unverified. See [adapters/LAPTOP_FACTORY.md](adapters/LAPTOP_FACTORY.md) and [RETAILER_DATA_USE_REVIEW.md](RETAILER_DATA_USE_REVIEW.md). |
 | `adapters/datablitz.py` | DataBlitz Shopify product-page parser for `ecommerce.datablitz.com.ph`. It prefers JSON-LD and falls back to visible content, separates sale and compare-at prices, combines JSON-LD availability with the add-to-cart button, flags bundle wording, and keeps raw description specs. It ignores the quick-buy `<template>` copy and makes no HTTP calls itself. `live_use_approved = True` under the project-owner policy; retailer permission remains unverified. See [adapters/DATABLITZ.md](adapters/DATABLITZ.md). |
@@ -128,7 +137,7 @@ The current and planned portions are different deliverables. The shared scraping
 | `adapters/pcc.py` | PC Central Shopify (Dawn theme) product-page parser for `pccentralcomputerstore.com`. For a multi-variant product it requires a `?variant=<id>` URL whose variant the page selected; otherwise it fails with `AMBIGUOUS_VARIANT`. It cross-checks the displayed price with the selected JSON-LD offer and the variant JSON. It gives a sale price only for Dawn's on-sale state with a higher compare-at price, and combines JSON-LD, variant, button, and sold-out-state availability. It checks product identity, flags bundle wording, and keeps raw description lines. It makes no HTTP calls itself. `live_use_approved = True` under the project-wide owner decision; the external-policy finding is UNKNOWN. See [adapters/PCC.md](adapters/PCC.md). |
 | `adapters/oct.py` | Octagon Shopify ("Multi" theme) product-page parser for `www.octagon.com.ph`. It cross-checks the displayed `dl.#price` amount with the selected JSON-LD offer and the analytics variant price. It gives a sale price only for `@on-sale` with a higher `@compare` amount, and combines JSON-LD, stock-alert, and button availability. It checks SKU and product-path identity and quotes the theme's invalid leading-zero `gtin12` values before reading JSON-LD. It never takes the store name as brand, follows the PCC `?variant=<id>` rule, flags bundle wording, and keeps raw "Tech Specification" lines. It makes no HTTP calls itself. `live_use_approved = True` under the project-wide owner decision; the external-policy finding is RESTRICTED. See [adapters/OCT.md](adapters/OCT.md). |
 
-Validation runs on local CSV exports or on read-only sheet reads; nothing writes the three Phase 5 tabs. The current `TARGET_MASTER` identity key is documented in [TARGET_MASTER_SCHEMA.md](TARGET_MASTER_SCHEMA.md) and aligned with the requested downstream fields in [PRICE_TRACKING_OUTPUT_SCHEMA.md](PRICE_TRACKING_OUTPUT_SCHEMA.md). Header templates for `TARGET_MASTER`, `SOURCE_MODEL_MAP`, and `MATCH_REVIEW` live under `config/`. The offline Phase 8 matcher reads a local `TARGET_MASTER` CSV snapshot only; no comparison-history or approval-workflow module exists. The Phase 6 scraping framework does not read these tables. Promotion from review to master is a manual, human-approved step.
+Validation runs on local CSV exports or on read-only sheet reads; nothing writes the three Phase 5 tabs. The current `TARGET_MASTER` identity key is documented in [TARGET_MASTER_SCHEMA.md](TARGET_MASTER_SCHEMA.md) and aligned with the requested downstream fields in [PRICE_TRACKING_OUTPUT_SCHEMA.md](PRICE_TRACKING_OUTPUT_SCHEMA.md). Header templates for `TARGET_MASTER`, `SOURCE_MODEL_MAP`, and `MATCH_REVIEW` live under `config/`. The offline Phase 8 matcher reads a local `TARGET_MASTER` CSV snapshot only. The offline Phase 9 path (`track_prices.py`) reads the three validated snapshots plus the selected list; no approval-workflow module exists. The Phase 6 scraping framework does not read these tables. Promotion from review to master is a manual, human-approved step.
 
 ## Data-processing flow
 
@@ -181,7 +190,7 @@ The shared framework (overall Phase 6) exists. Five retailer adapters (Phase 7) 
 2. *(Implemented)* `scrape()` takes a `ScrapeRequest` (retailer ID and URL) and fetches through the shared `Fetcher`. The adapter parses the page into `ParsedOffer` values. Nothing changes any sheet.
 3. *(Implemented)* The framework returns `OfferObservation` values with retailer, offer URL, UTC retrieval time, raw product and configuration text, `Decimal` price, ISO currency, availability evidence, and retrieval metadata, plus stage-specific `ScrapeFailure` records.
 4. *(Implemented offline, Phase 8)* `match_offers.py` matches saved observations (a CSV of `to_full_record()` rows) against a validated `TARGET_MASTER` snapshot through `extraction.py` and `ExactMatcher`. Ambiguous or partial matches are review-queue rows, not silent matches. Observations themselves still carry no `target_id`, and nothing yet persists live observations for this step. See [MATCHING.md](MATCHING.md).
-5. *(Planned, Phase 9)* Send confirmed comparisons to the future weekly comparison and price-history outputs defined by [PRICE_TRACKING_OUTPUT_SCHEMA.md](PRICE_TRACKING_OUTPUT_SCHEMA.md).
+5. *(Implemented offline, Phase 9)* `track_prices.py` stores saved observations in the local SQLite history store, matches them under a recorded matching context, and writes the weekly comparison and price-history outputs defined in [PRICE_TRACKING_OUTPUT_SCHEMA.md](PRICE_TRACKING_OUTPUT_SCHEMA.md). A future supervised collector can call `persist_scrape_results()`; none is scheduled.
 
 ```mermaid
 flowchart LR
@@ -195,4 +204,4 @@ flowchart LR
     MX --> MR[results, review queue, evidence CSVs]
 ```
 
-The framework is standalone: no pipeline, CLI, or Sheets code calls it yet, and it stores no observations.
+The framework is standalone: no pipeline, CLI, or Sheets code calls it yet. Its observations can be stored with `observation_store.persist_scrape_results()` (Phase 9), but no collector does so yet.

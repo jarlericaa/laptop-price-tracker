@@ -170,4 +170,4 @@ The tests use a fake transport and a fake clock, so no real time passes. A no-ne
 - **Phase 7:** COMPLETE. Jarelle Ricaforte is the named maintainer for LF, DBZ, PCX, PCC, and OCT. Live-check evidence and known coverage limitations are recorded in the adapter docs and [PROGRESS_LOG.md](PROGRESS_LOG.md). Review additional page states when suitable products are identified; this is optional follow-up. External-policy findings remain separate from project-owner live-use decisions.
 - **Phase 7 or 8:** Decide how scrape requests are built, for example from `TARGET_MASTER` search terms or retailer URLs, without assuming the table is populated.
 - **Phase 8:** Exact configuration matching of observations to `target_id`s. Observations deliberately carry no target.
-- **Phase 9:** Observation storage, output schema, and history. No observations are persisted today.
+- **Phase 9:** Observation storage, output schema, and history. *Implemented offline 2026-10-12:* `observation_store.persist_scrape_results()` stores `scrape()` observations in the local append-only SQLite store, and `track_prices.py` reports from it. No collector calls it yet.
