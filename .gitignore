@@ -15,6 +15,11 @@ __pycache__/
 data/output/
 data/review/
 data/raw/
+data/history/
+*.sqlite
+*.sqlite3
+*.sqlite3-journal
+*.db
 config/duplicate_decisions.csv
 config/eligibility_decisions.csv
 config/identity_review_register.csv
