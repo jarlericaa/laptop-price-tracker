@@ -51,4 +51,10 @@ Dates are recorded as **Date not recorded** when the repository or project conte
   - **Identity and storage.** Observation identity is retailer + offer URL + offer index + retrieval time, and conflicting content refuses the batch. The store is append-only with indefinite retention.
   - **Matching contexts.** A context is the catalog SHA-256 plus the rule version and a fingerprint of the rule modules.
   - **Shopee fields.** `Item_ID`/`Model_ID`/`Shop_ID` and the Shopee price are kept per source in a ledger instead of choosing one listing.
+- Manual collection implementation defaults, 2026-10-12 (not owner decisions):
+  - **Manifest.** Header `request_id,retailer_id,product_url,expected_target_id,enabled`, exact text, `enabled` `TRUE`/`FALSE`. The whole file is refused on any issue, and duplicate pages are refused.
+  - **Mode.** `--preview` or `--live` must be chosen; preview never opens the store.
+  - **Expected target.** A hint only. Outcomes are labelled `AS_EXPECTED`, `DIFFERENT_TARGET`, or `NOT_EXACT`, and the last two go to review.
+  - **Exit codes.** `0` success or preview, `2` partial success, `1` failure. A run with no valid observation stores nothing.
+  - **Run directories.** A new directory per run that is never reused. Collected observations go to `data/history/price_history.sqlite3` unless `--store` is given.
 - New decisions should be added to this log with their actual decision date. Do not infer dates from file timestamps or this documentation date.

@@ -243,6 +243,13 @@ the result is the same: **9 `EXACT`**, 0 `UNMATCHED`, 0 `REVIEW_REQUIRED` (TGT-0
 -030, -034, -095, -031, -017, -258). These are saved observations from 2026-10-08, not fresh
 prices. The `model`-convention blocker described above is resolved for these offers.
 
+**Live manual check (2026-10-12).** `collect_and_match.py --live` fetched one Laptop Factory page
+(`acer-aspire-ai-14-a14-11m-x3bp`) at 2026-10-12T08:37:55Z. It was a fresh retrieval, not a
+replay: HTTP 200 on attempt 1, with a new page hash. The offer matched **EXACT** to TGT-000226 (as
+hinted; selected rank 39) with no reason codes, and was `IN_STOCK` at a PHP 45,999.00 sale price
+(regular 50,999.00). The exported CSV re-matched EXACT through `match_offers.py`. One page from
+one retailer; not a pilot.
+
 ## Limitations
 
 - **Little real evidence.** Extraction rules were derived from the adapters' synthetic fixtures
@@ -255,10 +262,11 @@ prices. The `model`-convention blocker described above is resolved for these off
   wording is identical.
 - **Model coverage.** Only Laptop Factory and single-variant PC Central offers can supply `model`.
   DataBlitz, PC Express, Octagon, and multi-variant PC Central offers always go to review.
-- **No live collector.** No command yet collects live adapter observations. Since 2026-10-12, the
-  Phase 9 store (`observation_store.py`) can persist `scrape()` results and saved CSVs, and
-  `track_prices.py` matches them under a recorded matching context; a supervised collector is
-  pilot work.
+- **Manual collection only.** Since 2026-10-12, `collect_and_match.py` fetches explicitly listed
+  product pages, stores them in the Phase 9 store, and matches them with this matcher under a
+  recorded context. `expected_target_id` in its manifest is a hint that is compared with the
+  outcome, never used to assign it. Nothing schedules collection. One live Laptop Factory page
+  has been checked this way (EXACT, TGT-000226).
 - Unsupported CPU lines (Pentium, Athlon, incomplete Intel numbers), multi-drive storage, RAM
   breakdowns that do not sum to one stated total, display rows without a unit outside the narrow
   size-label form, and variant-specific RAM/storage go to review rather than being guessed. The

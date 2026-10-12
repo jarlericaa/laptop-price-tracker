@@ -12,8 +12,9 @@ external-policy findings for PC Express and Octagon are RESTRICTED under the ret
 PC Central's bare-URL check failed safely; a selected-variant live check returned one in-stock
 offer. A user-reported OCT live check returned one in-stock HP 15-FC0413AU offer at PHP 37,999.
 Exact configuration matching (overall Phase 8) and weekly price comparisons with price history
-(overall Phase 9) run offline over saved observations. Live collection, the controlled pilot,
-and GitHub Actions automation are not implemented.
+(overall Phase 9) run offline over saved observations. `collect_and_match.py` adds manual
+online collection of explicitly listed product pages into the same store and matcher. The
+multi-retailer controlled pilot and GitHub Actions automation are not implemented.
 
 The latest read-only live dry run completed in 57.49 seconds and generated 100 targets. The
 21 historical conflicting keys had fingerprint-matched `EXCLUDE_KEY` decisions; their source
@@ -189,6 +190,25 @@ python track_prices.py --observations data/output/pilot_matching_2026-10-08/obse
 Dates are explicit, and the output prints counts only. It makes no retailer requests and never
 touches Sheets. See [docs/SETUP_AND_OPERATIONS.md](docs/SETUP_AND_OPERATIONS.md#offline-price-comparisons-and-history-overall-phase-9).
 
+```bash
+python collect_and_match.py --preview --manifest config/collection_manifest.csv
+python collect_and_match.py --live --manifest config/collection_manifest.csv
+```
+
+`collect_and_match.py` is **manual online collection and matching** of explicitly listed product
+pages. The manifest (`request_id,retailer_id,product_url,expected_target_id,enabled`; synthetic
+template in `config/collection_manifest_template.csv`) is validated as a whole, together with the
+catalog and the selected list, before any request. `--preview` sends nothing. `--live` fetches
+each enabled page once through the existing adapters and shared `Fetcher`, stores valid
+observations in the Phase 9 history store, matches them with the five-field `ExactMatcher`, and
+writes a new run directory under `data/output/collection_runs/`: request report, failures, an
+observation CSV usable by `match_offers.py` and `track_prices.py`, match results, a review queue,
+field evidence, and a run summary. `expected_target_id` is only a hint; a different outcome is
+flagged for review. Exit codes: 0 success or preview, 2 partial success, 1 failure. One Laptop
+Factory product page was checked live on 2026-10-12. The broader multi-retailer, multi-week pilot
+and scheduled automation are separate work. See
+[docs/SETUP_AND_OPERATIONS.md](docs/SETUP_AND_OPERATIONS.md#manual-online-collection-and-matching).
+
 `audit_verified_top_100.py` independently checks a run: unique targets, ACTIVE `CONFIGURATION`
 status, complete identities, valid contributors, totals, deterministic order, and the catalog
 version used. See [docs/TARGET_MASTER_SCHEMA.md](docs/TARGET_MASTER_SCHEMA.md#top-100-verified-configurations-2026-10-12).
@@ -242,7 +262,7 @@ The latest live dry run took 57.49 seconds and did not write to any Google Sheet
 ```bash
 python -m pytest -q
 python -m ruff check .
-python -m compileall src run_phase1.py smoke_test.py check_target_master.py check_target_tables.py seed_match_review.py match_offers.py audit_top_100_coverage.py propose_catalog_conventions.py build_verified_top_100.py audit_verified_top_100.py track_prices.py
+python -m compileall src run_phase1.py smoke_test.py check_target_master.py check_target_tables.py seed_match_review.py match_offers.py audit_top_100_coverage.py propose_catalog_conventions.py build_verified_top_100.py audit_verified_top_100.py track_prices.py collect_and_match.py
 python smoke_test.py
 python run_phase1.py --dry-run
 ```

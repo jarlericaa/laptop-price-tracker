@@ -66,6 +66,7 @@ The current and planned portions are different deliverables. The shared scraping
 │   ├── match_run.py                  # Offline batch matching and report records (overall Phase 8)
 │   ├── matching.py                   # Five-field ExactMatcher (overall Phase 8)
 │   ├── normalization.py              # Shared core-key comparison rules (Phases 5 and 8)
+│   ├── collection.py                 # URL manifest, adapter routing, collection, match reports
 │   ├── observation_store.py          # Append-only SQLite observation/match store (overall Phase 9)
 │   ├── offers.py                     # Offer observation model (overall Phase 6)
 │   ├── price_tracking.py             # Weekly comparison, selection, and history rules (Phase 9)
@@ -91,6 +92,7 @@ The current and planned portions are different deliverables. The shared scraping
 ├── build_verified_top_100.py         # Top 100 verified configurations working list (Phase 5)
 ├── audit_verified_top_100.py         # Independent audit of a verified-configuration run
 ├── track_prices.py                   # Offline weekly comparisons and price history (Phase 9)
+├── collect_and_match.py              # Manual online collection of listed pages + matching
 ├── run_phase1.py                     # Legacy Phase 1 command name; overall Phase 4 work
 ├── smoke_test.py
 ├── pyproject.toml
@@ -128,6 +130,7 @@ The current and planned portions are different deliverables. The shared scraping
 | `matching.py` | `ExactMatcher`: five-field exact matching with secondary corroboration/conflict, near-candidate hints, and fail-closed `UNMATCHED`/`AMBIGUOUS`/`REVIEW_REQUIRED` outcomes. Never assigns inactive or duplicate-key targets. |
 | `coverage.py` / `audit_top_100_coverage.py` | Phase 5 coverage audit. It classifies each accepted Top 100 `model_id` (exact text) against validated `TARGET_MASTER`, `SOURCE_MODEL_MAP`, and `MATCH_REVIEW` snapshots or read-only tabs, and lists `COMPLETE` review rows without an ACTIVE mapping. It writes local reports, prints counts only, and never promotes or maps. |
 | `match_run.py` / `match_offers.py` | Batch matching path: rebuilds observations from CSV, reads `TARGET_MASTER` from a local snapshot (an export or a validated copy) or from the live tab read-only (`--target-master-from-sheets`), refuses a partly invalid `TARGET_MASTER`, and writes result, review-queue, and evidence CSVs. Prints counts only. No network access except the optional read-only `TARGET_MASTER` tab read; never reads `raw` or writes Sheets. |
+| `collection.py` / `collect_and_match.py` | Manual online collection and matching (2026-10-12). Validates a five-column URL manifest as a whole against each adapter's `product_request()` and the selected working list, routes each enabled row to its adapter, and collects with `scrape_one()` on one shared `Fetcher` (host, live-use, timeout, retry, redirect, and throttle controls unchanged). Persists with `persist_scrape_results()`, matches under the current matching context, and writes a new run directory with request and failure reports, an observation CSV, match results, a review queue, field evidence, and a summary. `--preview` sends nothing. No search, crawling, or URL discovery. |
 | `observation_store.py` | Phase 9 SQLite store. Deterministic observation identity (offer + retrieval time) and offer key; batch validation and single-transaction imports; duplicate counting and conflict refusal; append-only triggers; matching contexts (catalog SHA-256 + rule version/fingerprint) with one result per observation and context. `persist_scrape_results()` accepts `scrape()` results directly. No network or Sheets access. |
 | `price_tracking.py` / `track_prices.py` | Phase 9 offline reporting. Validates the selected list against the catalog and contribution ledger, matches pending stored observations, classifies comparability (EXACT, in scope, IN_STOCK, non-bundle, PHP, known price type), selects the lowest comparable price per target and retailer per Asia/Singapore week with deterministic ties, and writes the comparison, selections, weekly series, per-observation history with price changes, review queue, source ledger, and run summary. Prints counts only. See [PRICE_TRACKING_OUTPUT_SCHEMA.md](PRICE_TRACKING_OUTPUT_SCHEMA.md#phase-9-implementation-2026-10-12). |
 | `scraping.py` | Shared adapter contract (`RetailerAdapter`, `ParsedOffer`), `Fetcher` with timeouts, bounded retries, per-retailer throttling, and redirects checked before they are sent. Injectable `Transport`/`Clock`, a fail-closed live-use gate, the `scrape()` runner, stage-specific failures, and redacted logging. The default transport is the standard-library `urllib`, with redirects disabled. See [SCRAPING_FRAMEWORK.md](SCRAPING_FRAMEWORK.md). |
@@ -204,4 +207,4 @@ flowchart LR
     MX --> MR[results, review queue, evidence CSVs]
 ```
 
-The framework is standalone: no pipeline, CLI, or Sheets code calls it yet. Its observations can be stored with `observation_store.persist_scrape_results()` (Phase 9), but no collector does so yet.
+The framework is called by one command, `collect_and_match.py`, for explicitly listed product pages; no scheduled job or Sheets code calls it. Its observations are stored with `observation_store.persist_scrape_results()` (Phase 9).

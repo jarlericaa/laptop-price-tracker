@@ -23,3 +23,6 @@ data/history/
 config/duplicate_decisions.csv
 config/eligibility_decisions.csv
 config/identity_review_register.csv
+config/collection_manifest*.csv
+!config/collection_manifest_template.csv
+data/collection/

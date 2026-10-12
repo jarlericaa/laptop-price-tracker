@@ -1,0 +1,6 @@
+request_id,retailer_id,product_url,expected_target_id,enabled
+example-lf-1,laptop_factory,https://laptopfactory.com.ph/product/example-notebook-14-ex14-0001/,,FALSE
+example-dbz-1,datablitz,https://ecommerce.datablitz.com.ph/products/example-notebook-15-ex15-0002,,FALSE
+example-pcx-1,pcx,https://pcx.com.ph/products/example-notebook-14-ex14-0003-laptop,,FALSE
+example-pcc-1,pcc,https://pccentralcomputerstore.com/products/example-notebook-15-ex15-0004?variant=50000000000001,,FALSE
+example-oct-1,oct,https://www.octagon.com.ph/products/example-notebook-16-ex16-0005?variant=50000000000002,,FALSE

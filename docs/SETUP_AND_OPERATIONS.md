@@ -147,6 +147,70 @@ The command:
 
 Policies, identities, and file columns are in [PRICE_TRACKING_OUTPUT_SCHEMA.md](PRICE_TRACKING_OUTPUT_SCHEMA.md#phase-9-implementation-2026-10-12). A supervised collector can call `persist_scrape_results()` from `laptop_tracker.observation_store` to store `scrape()` results directly; no such collector or schedule exists yet.
 
+## Manual online collection and matching
+
+This is a manual, supervised path for a short list of known product pages. It is not the
+multi-retailer, multi-week pilot and has no schedule.
+
+**1. Write a manifest.** Copy `config/collection_manifest_template.csv` to a Git-ignored path, such
+as `config/collection_manifest.csv` or a folder under `data/collection/`.
+
+| Column | Rule |
+|---|---|
+| `request_id` | Required and unique: letters, digits, `_`, `.`, or `-`, starting with a letter or digit, at most 64 characters. |
+| `retailer_id` | `laptop_factory`, `datablitz`, `pcx`, `pcc`, or `oct`. |
+| `product_url` | One product page, accepted unchanged by that retailer's `product_request()`. For example, Laptop Factory needs `https://laptopfactory.com.ph/product/<slug>/` with no query. PC Central and Octagon accept only `?variant=<digits>`; a variant is never added or guessed, and a bare multi-variant URL fails with `AMBIGUOUS_VARIANT`. |
+| `expected_target_id` | Optional verification hint. If given, it must be in the selected working list (an ACTIVE `CONFIGURATION`). It never decides the match. |
+| `enabled` | `TRUE` or `FALSE`. Disabled rows are still validated. |
+
+Cells must have no surrounding spaces. Two rows for the same page (host case and trailing slash
+ignored) are refused, and so is a manifest with no enabled row. Any issue refuses the whole file
+before a request is sent; messages name the row, field, and code, never the value.
+
+**2. Preview, then collect.**
+
+```bash
+python collect_and_match.py --preview --manifest config/collection_manifest.csv
+python collect_and_match.py --live --manifest config/collection_manifest.csv
+```
+
+- **Preview** validates `TARGET_MASTER` (default `data/output/target_master_validated.csv`, or
+  `--target-master-from-sheets` read-only), the selected list and its contribution ledger, and
+  the manifest. It writes the request plan. It sends no request and does not open the store.
+- **Live** repeats the validation, then fetches each enabled page once, in manifest order. It uses
+  one shared `Fetcher`, so the per-retailer throttle (at least 10 s), timeouts, bounded retries,
+  checked redirects, host allowlists, and the live-use gate apply unchanged.
+- Valid observations are stored with `persist_scrape_results()` in `--store` (default
+  `data/history/price_history.sqlite3`). They are matched under the current matching context;
+  results under earlier contexts are kept.
+- Failed requests become rows in `request_failures.csv` with the stage, code, attempts, and HTTP
+  status. A failure never becomes a price, a stock status, or an observation.
+
+**3. Read the run directory.** Each run gets a new directory,
+`data/output/collection_runs/<UTC timestamp>_<mode>/` (or `--output-dir`, which must not exist):
+
+| File | Contents |
+|---|---|
+| `request_report.csv` | One row per manifest row: `SUCCEEDED`, `PARTIAL`, `FAILED`, `NO_OFFERS`, `SKIPPED_DISABLED`, or `NOT_SENT_PREVIEW`, with observation IDs and failure codes. |
+| `request_failures.csv` | One row per failure: request ID, URL, redacted URL, stage, code, message, attempts, HTTP status. |
+| `observations.csv` | `to_full_record()` columns; accepted by `match_offers.py` and `track_prices.py`. |
+| `match_results.csv` | `match_offers.py` result columns plus request ID, `expected_target_check` (`NO_EXPECTATION`, `AS_EXPECTED`, `DIFFERENT_TARGET`, `NOT_EXACT`), `selected_list_status` (`SELECTED`, `NOT_IN_SELECTED_LIST`), observation ID, matching context, price, currency, price type, and availability. |
+| `match_review_queue.csv` | Results with `review_reasons`: `MATCH_<status>`, `EXPECTED_TARGET_DIFFERS`, `EXPECTED_TARGET_NOT_MATCHED`, `EXACT_TARGET_NOT_IN_SELECTED_LIST`. |
+| `match_evidence.csv` | Extraction and match evidence per field. |
+| `collection_run_summary.json` | Timestamps, input SHA-256 values, matching context, adapter versions and live-use flags, fetch settings, store counts and import statistics, and outcome counts. |
+
+The console shows counts and codes only. Exit codes: `0` success or preview, `2` partial success,
+`1` failure (including no valid observation). All files, manifests, and stores stay Git-ignored.
+
+DataBlitz, PC Express, and Octagon pages have no model label, so their observations are kept as
+`REVIEW_REQUIRED` with `MISSING_MODEL`. No model is taken from a title or URL.
+
+**Smoke check (2026-10-12).** One Laptop Factory page,
+`https://laptopfactory.com.ph/product/acer-aspire-ai-14-a14-11m-x3bp/`, with hint TGT-000226. It
+used a separate store (`data/history/smoke/`) and run directory
+(`data/output/collection_runs/smoke_lf_2026-10-12/`). Results are in
+[PROGRESS_LOG.md](PROGRESS_LOG.md).
+
 ## Offline scraping framework and adapter tests (overall Phases 6-7)
 
 ```bash
@@ -154,9 +218,9 @@ python -m pytest -q tests/test_offers.py tests/test_scraping.py tests/test_lapto
 python -m pytest -q tests/test_datablitz.py tests/test_pcx.py tests/test_pcc.py tests/test_oct.py
 ```
 
-These tests use fixtures under `tests/scraping_fixtures/`, a fake transport, and a fake clock. They need no credentials and no network; any socket connection fails the test. There is no scraping command or CLI.
+These tests use fixtures under `tests/scraping_fixtures/`, a fake transport, and a fake clock. They need no credentials and no network; any socket connection fails the test. The only collection command is `collect_and_match.py`; see [Manual online collection and matching](#manual-online-collection-and-matching).
 
-Laptop Factory live use is enabled under the project-owner policy in [DECISIONS.md](DECISIONS.md). Its external-policy finding remains UNKNOWN, so this is not a claim that retailer permission was verified. The user reported one live smoke test, and a controlled bare-URL check on 2026-10-01 confirmed clean URL attribution. Build its requests with `product_request(url)` and a bare `https://laptopfactory.com.ph/product/<slug>/` URL; queries, fragments, and `http` are refused. There is no scraping CLI: a Python call using `scrape(..., Fetcher())` can send live requests. Maintenance notes are in [adapters/LAPTOP_FACTORY.md](adapters/LAPTOP_FACTORY.md). DataBlitz (`DataBlitzAdapter`, host `ecommerce.datablitz.com.ph`) is enabled the same way, with the same UNKNOWN external-policy finding, and the user reported a one-product live spot check. Its notes are in [adapters/DATABLITZ.md](adapters/DATABLITZ.md). PC Express (`PCXAdapter`, host `pcx.com.ph`) is enabled by an explicit project-owner decision. Its external-policy finding remains RESTRICTED because the retailer's terms require written consent for automated collection; no written consent is recorded. A user-reported call returned one in-stock Acer offer, and a controlled 2026-10-01 check confirmed with `repr()` that the offer URL is a plain string. Its notes are in [adapters/PCX.md](adapters/PCX.md). PC Central (`PCCAdapter`, host `pccentralcomputerstore.com`) is enabled under the project-wide owner decision. Its external-policy finding is UNKNOWN. Build its requests with `product_request(url)`. A product sold in several variants needs `?variant=<id>` (or `product_request(url, variant_id)`); a bare URL for such a product fails with `AMBIGUOUS_VARIANT`. A bare-URL check returned that failure; a selected-variant live check returned one in-stock ASUS VivoBook offer. Never use the old `pccentral.com.ph` domain, which redirected to an unrelated site on 2026-10-01. Its notes are in [adapters/PCC.md](adapters/PCC.md). Octagon (`OCTAdapter`, host `www.octagon.com.ph`) is enabled under the project-wide owner decision. Its external-policy finding is RESTRICTED, because Octagon's terms prohibit scraping; no Octagon permission is recorded. Build its requests with `product_request(url)` on the `www` host; the apex `octagon.com.ph` is refused. The same `?variant=<id>` rule as PC Central applies to multi-variant products. A user-reported live check returned one in-stock HP 15-FC0413AU offer at PHP 37,999. Its notes are in [adapters/OCT.md](adapters/OCT.md). The retrieval defaults (20 s timeout, 3 attempts, 5/10 s backoff capped at 60 s, and at least 10 s between requests per retailer) are documented in [SCRAPING_FRAMEWORK.md](SCRAPING_FRAMEWORK.md#retrieval-defaults). Scraping log lines use the `laptop_tracker.scraping` logger and contain redacted URLs and error codes only.
+Laptop Factory live use is enabled under the project-owner policy in [DECISIONS.md](DECISIONS.md). Its external-policy finding remains UNKNOWN, so this is not a claim that retailer permission was verified. The user reported one live smoke test, and a controlled bare-URL check on 2026-10-01 confirmed clean URL attribution. Build its requests with `product_request(url)` and a bare `https://laptopfactory.com.ph/product/<slug>/` URL; queries, fragments, and `http` are refused. For listed product pages, use `collect_and_match.py` (manual online collection); a direct Python call using `scrape(..., Fetcher())` can also send live requests. Maintenance notes are in [adapters/LAPTOP_FACTORY.md](adapters/LAPTOP_FACTORY.md). DataBlitz (`DataBlitzAdapter`, host `ecommerce.datablitz.com.ph`) is enabled the same way, with the same UNKNOWN external-policy finding, and the user reported a one-product live spot check. Its notes are in [adapters/DATABLITZ.md](adapters/DATABLITZ.md). PC Express (`PCXAdapter`, host `pcx.com.ph`) is enabled by an explicit project-owner decision. Its external-policy finding remains RESTRICTED because the retailer's terms require written consent for automated collection; no written consent is recorded. A user-reported call returned one in-stock Acer offer, and a controlled 2026-10-01 check confirmed with `repr()` that the offer URL is a plain string. Its notes are in [adapters/PCX.md](adapters/PCX.md). PC Central (`PCCAdapter`, host `pccentralcomputerstore.com`) is enabled under the project-wide owner decision. Its external-policy finding is UNKNOWN. Build its requests with `product_request(url)`. A product sold in several variants needs `?variant=<id>` (or `product_request(url, variant_id)`); a bare URL for such a product fails with `AMBIGUOUS_VARIANT`. A bare-URL check returned that failure; a selected-variant live check returned one in-stock ASUS VivoBook offer. Never use the old `pccentral.com.ph` domain, which redirected to an unrelated site on 2026-10-01. Its notes are in [adapters/PCC.md](adapters/PCC.md). Octagon (`OCTAdapter`, host `www.octagon.com.ph`) is enabled under the project-wide owner decision. Its external-policy finding is RESTRICTED, because Octagon's terms prohibit scraping; no Octagon permission is recorded. Build its requests with `product_request(url)` on the `www` host; the apex `octagon.com.ph` is refused. The same `?variant=<id>` rule as PC Central applies to multi-variant products. A user-reported live check returned one in-stock HP 15-FC0413AU offer at PHP 37,999. Its notes are in [adapters/OCT.md](adapters/OCT.md). The retrieval defaults (20 s timeout, 3 attempts, 5/10 s backoff capped at 60 s, and at least 10 s between requests per retailer) are documented in [SCRAPING_FRAMEWORK.md](SCRAPING_FRAMEWORK.md#retrieval-defaults). Scraping log lines use the `laptop_tracker.scraping` logger and contain redacted URLs and error codes only.
 
 ## Safe test-tab write
 
@@ -222,6 +286,8 @@ This reads the same raw source, completes local processing first, then requests 
 | `check_target_master.py` reports header or row errors | Compare the header with `config/target_master_template.csv`, then review the local `target_master_validation_errors.csv`. Duplicates are never resolved automatically; correct or remove rows in the source. |
 | `track_prices.py` stops "before any store write" | A catalog table, the selected list, the contribution ledger, or an observation file failed validation. Rerun `check_target_tables.py`, or rebuild and audit the verified list, before retrying. |
 | `track_prices.py` reports observations that "contradict stored records" | The file repeats an observation identity (same offer and retrieval time) with different content. Nothing from the file was stored. Investigate the source of the file; never edit the store to force it in. |
+| `collect_and_match.py` stops "before any retailer request" | The catalog, selected list, ledger, or manifest failed validation. The message lists rows, fields, and codes; fix the manifest or rerun the catalog checks. Nothing was sent or stored. |
+| `collect_and_match.py` exits with 2 or 1 | Partial success or failure. Read `request_failures.csv`; retry only the failed rows in a new manifest and run. |
 | Pipeline appears slow | Unit aggregation performance does not represent total runtime. Time each processing stage on a safe local-only run before changing the implementation. |
 | Write-enabled run does not create outputs | Check for a pipeline safety failure first; unresolved conflicts stop before Sheets writes. Confirm service-account Editor access only for the intended test spreadsheet. |
 
