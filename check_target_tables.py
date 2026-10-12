@@ -23,7 +23,7 @@ from laptop_tracker.supporting_tables import (
 from laptop_tracker.target_master import (
     TARGET_ERROR_COLUMNS,
     TargetMasterSchemaError,
-    read_target_master_csv,
+    read_table_snapshot_csv,
     validate_target_master,
 )
 
@@ -81,7 +81,7 @@ def load_tables(args: argparse.Namespace) -> dict[str, list[list[str]] | None]:
         "SOURCE_MODEL_MAP": args.source_model_map,
         "MATCH_REVIEW": args.match_review,
     }
-    return {name: read_target_master_csv(path) for name, path in paths.items() if path}
+    return {name: read_table_snapshot_csv(path) for name, path in paths.items() if path}
 
 
 def main(argv: list[str] | None = None) -> int:

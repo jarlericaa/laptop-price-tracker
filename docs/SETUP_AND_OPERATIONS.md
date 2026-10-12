@@ -63,8 +63,9 @@ SKIP_FRESHNESS_CHECK=false
 ## Required and future worksheet tabs
 
 - **`raw`:** Production source of truth. It must remain read-only for this pipeline.
-- **`TARGET_MASTER`:** Master copy of approved configurations. The user later reported that the tab has its header and no data rows. The local target header was revised on 2026-09-29; replace the existing header with `config/target_master_template.csv` before validating against the current schema.
-- **`SOURCE_MODEL_MAP` and `MATCH_REVIEW`:** Supporting Phase 5 tabs. The user reported that both tabs have their template headers and no data rows. The local `MATCH_REVIEW` template was expanded with the current product detail fields; update that tab's header from `config/match_review_template.csv`. `check_target_tables.py --from-sheets` reads these tabs but never creates or changes them.
+- **`TARGET_MASTER`:** Master copy of approved configurations. Its header matches `config/target_master_template.csv`; on 2026-10-12 it held 205 targets (193 `CONFIGURATION`, 12 `LISTING_ONLY`).
+- **`SOURCE_MODEL_MAP` and `MATCH_REVIEW`:** Supporting Phase 5 tabs, with 360 mappings and 5,154 review rows on 2026-10-12. Their headers match the `config/` templates (`MATCH_REVIEW` may use any column order). `check_target_tables.py --from-sheets` reads these tabs but never creates or changes them.
+- **`P1_TOP_100_CONFIGURATIONS`:** The published **Top 100 verified configurations** working list (owner publication, 2026-10-12; header in row 10, data in A11:U110). No repository command writes this tab.
 - **`P1_*` outputs:** The user reported that all nine approved output tabs were created header-only and verified in the real spreadsheet on 2026-09-29. A separate synthetic writer test completed, and a user-provided read-only report confirmed all nine test tabs and headers, one synthetic laptop in the target outputs, the charger in excluded listings, and a run-log `top_100_count` of 1. The report did not list or inspect `raw`.
 - **Eligibility and duplicate decisions:** Current run inputs are local CSV files under `config/`. The remote `P1_ELIGIBILITY_DECISIONS` tab is preserved/merged by the optional writer but is not loaded into current-run classification.
 
@@ -86,7 +87,7 @@ The command reads the configured raw tab, validates the required headers, report
 python check_target_tables.py --from-sheets
 ```
 
-This command reads `TARGET_MASTER`, `SOURCE_MODEL_MAP`, and `MATCH_REVIEW` from the configured spreadsheet using the read-only scope and `get_all_values()` only. It validates each tab against the current templates and writes local reports under `data/output/`. It prints table names, counts, and error codes, but never the spreadsheet title or cell values. A missing tab is reported and fails the check. The command never creates, clears, or writes tabs. The user reported all three tabs were created with headers and no data rows; the current local `TARGET_MASTER` and `MATCH_REVIEW` templates have since changed. Update those two sheet headers manually to match `config/target_master_template.csv` and `config/match_review_template.csv`, then run the check. Expect `NO_DATA_ROWS` from `TARGET_MASTER` until approved rows are added.
+This command reads `TARGET_MASTER`, `SOURCE_MODEL_MAP`, and `MATCH_REVIEW` from the configured spreadsheet using the read-only scope and `get_all_values()` only. It validates each tab against the current templates and writes local reports under `data/output/`. It prints table names, counts, and error codes, but never the spreadsheet title or cell values. A missing tab is reported and fails the check. The command never creates, clears, or writes tabs. On 2026-10-12 it passed all three tabs (205 targets, 360 mappings, 5,154 review rows). Each passing table also gets a `<table>_validated.csv` copy, which downstream commands (`match_offers.py` and `build_verified_top_100.py`) read.
 
 ## Local Phase 5 CSV checks and candidate seeding
 
@@ -190,8 +191,8 @@ This reads the same raw source, completes local processing first, then requests 
 | Stale source month | Confirm the source includes current Manila-month data. Disable freshness only for intentional historical test fixtures. |
 | Too many validation errors | Review the private `validation_errors.csv`; fix the source or reviewed data-quality issue before increasing the threshold. |
 | Unresolved duplicate/model-identity conflicts | Review the private conflict report and redacted `duplicate_review.csv`; record an authorized decision in `config/duplicate_decisions.csv`. Stale fingerprints require a new review. |
-| `TARGET_MASTER` check reports a header error | Ensure the sheet header exactly matches `config/target_master_template.csv`. The current target header was revised to the new 1:1 matching fields. |
-| `check_target_tables.py` reports a header error for `SOURCE_MODEL_MAP` or `MATCH_REVIEW` | These headers must match the `config/` template exactly, including column order. |
+| `TARGET_MASTER` check reports a header error | Ensure the sheet header exactly matches `config/target_master_template.csv` (or the pre-tracking-mode legacy header). |
+| `check_target_tables.py` reports a header error for `SOURCE_MODEL_MAP` or `MATCH_REVIEW` | `SOURCE_MODEL_MAP` must match its `config/` template exactly, including column order. `MATCH_REVIEW` may use any column order, but it must have exactly the template's columns (or the pre-tracking-mode set), with no blank, duplicate, misspelled, or extra header; the error lists which. |
 | `check_target_tables.py --from-sheets` reports a worksheet not found | Create the tab manually with the template headers. The command never creates tabs. |
 | `check_target_master.py` reports header or row errors | Compare the header with `config/target_master_template.csv`, then review the local `target_master_validation_errors.csv`. Duplicates are never resolved automatically; correct or remove rows in the source. |
 | Pipeline appears slow | Unit aggregation performance does not represent total runtime. Time each processing stage on a safe local-only run before changing the implementation. |

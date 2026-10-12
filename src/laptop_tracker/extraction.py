@@ -11,12 +11,12 @@ review. Nothing here guesses, fuzzily matches, or assigns a ``target_id``.
 from __future__ import annotations
 
 import re
-import unicodedata
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 from enum import StrEnum
 
+from .conventions import cpu_series_forms, model_codes, parse_text
 from .normalization import CORE_MATCH_COLUMNS
 from .offers import OfferObservation, clean_text
 
@@ -125,25 +125,8 @@ EXTRACTED_SECONDARY_FIELDS: tuple[str, ...] = (
     "refresh_rate_hz",
 )
 
-# Trademark marks are replaced by a space so "Qualcomm®Snapdragon" splits into two words.
+# Trademark marks are removed from a model value; model-code and CPU rules are in conventions.py.
 _MARKS = re.compile("[®™℠]")
-
-# CPU series rules: (pattern, canonical form). Manufacturer names are omitted from the form.
-_CPU_SERIES_RULES: tuple[tuple[re.Pattern[str], Callable[[re.Match[str]], str]], ...] = (
-    (re.compile(r"\bCore\s+Ultra\s+([3579])\b", re.I), lambda m: f"Core Ultra {m[1]}"),
-    (re.compile(r"\bCore\s+i([3579])\b", re.I), lambda m: f"Core i{m[1]}"),
-    (re.compile(r"\bCore\s+([3579])\b", re.I), lambda m: f"Core {m[1]}"),
-    (re.compile(r"\bRyzen\s+AI\s+([3579])\b", re.I), lambda m: f"Ryzen AI {m[1]}"),
-    (re.compile(r"\bRyzen\s+([3579])\b", re.I), lambda m: f"Ryzen {m[1]}"),
-    (
-        re.compile(r"\bSnapdragon\s+X(?:\s+(Elite|Plus))?\b(?![-0-9])", re.I),
-        lambda m: "Snapdragon X" + (f" {m[1].title()}" if m[1] else ""),
-    ),
-    (
-        re.compile(r"\bApple\s+M([1-9])(?:\s+(Pro|Max|Ultra))?\b", re.I),
-        lambda m: f"Apple M{m[1]}" + (f" {m[2].title()}" if m[2] else ""),
-    ),
-)
 
 # Inch markers: straight or curly double quote, double prime, two single quotes, or "inch".
 _SCREEN_SIZE = re.compile(
@@ -163,6 +146,22 @@ _SIZE_BY_COUNT = re.compile(
 )
 _CAPACITY = re.compile(r"(?<![0-9.])([0-9]+(?:\.[0-9]+)?)\s*(GB|TB)\b", re.I)
 
+# A RAM total followed by its own component breakdown: "DDR5 16GB (8GB on board + 8GB SO-DIMM)".
+_BREAKDOWN = re.compile(r"\(([^()]*)\)")
+# Words that make a row a range, an alternative, or an upgrade path rather than one fitted total.
+_NOT_ONE_TOTAL = re.compile(
+    r"\b(?:or|up\s+to|max(?:imum)?|expand\w*|upgrad\w*|support\w*|extra|additional)\b|/", re.I
+)
+
+# Size-labeled display rows (LF "Display Size") open with the diagonal. One reviewed row states
+# it without a unit ("14.0 display, WUXGA 1920 x 1200"); see _screen_size_row.
+_SIZE_LABEL = re.compile(r"\bsize\b", re.I)
+_LEADING_DIAGONAL = re.compile(r"([0-9]{2}(?:\.[0-9]{1,2})?)\s+display\b", re.I)
+# The same shape anywhere in the row, used only to detect a second stated size. A number glued to
+# a preceding digit or decimal point (the "44" of "144 display") is not a separate size.
+_STATED_DIAGONAL = re.compile(r"(?<![0-9.])([0-9]{2}(?:\.[0-9]{1,2})?)\s+display\b", re.I)
+_LAPTOP_DIAGONAL_INCHES = (Decimal("10"), Decimal("18.4"))
+
 
 class _Unparseable(ValueError):
     pass
@@ -176,18 +175,26 @@ class _MultipleValues(ValueError):
         self.values = values
 
 
-def _parse_text(text: str) -> str:
-    return re.sub(r"\s+", " ", _MARKS.sub(" ", unicodedata.normalize("NFC", text))).strip()
+_parse_text = parse_text
 
 
 def _model(text: str) -> set[str]:
+    """The labeled value's one model code, or its stated name when it contains no code.
+
+    ``Acer Nitro V 15 ANV15-42-R2UH`` gives ``ANV15-42-R2UH``; the full wording stays in the
+    evidence. Two different codes in one value are ambiguous and go to review.
+    """
     value = clean_text(_MARKS.sub("", text))
-    return {value} if value else set()
+    if not value:
+        return set()
+    codes = model_codes(value)
+    if len(codes) > 1:
+        raise _MultipleValues(codes)
+    return {codes[0] if codes else value}
 
 
 def _cpu_series(text: str) -> set[str]:
-    text = _parse_text(text)
-    return {form(match) for pattern, form in _CPU_SERIES_RULES for match in pattern.finditer(text)}
+    return cpu_series_forms(text)
 
 
 def _screen_size(text: str) -> set[str]:
@@ -197,6 +204,47 @@ def _screen_size(text: str) -> set[str]:
         if number > 0:
             values.add(format(number.normalize(), "f"))
     return values
+
+
+def _inches(number: str) -> str:
+    return format(Decimal(number).normalize(), "f")
+
+
+def _screen_size_row(label: str, text: str) -> set[str]:
+    """Inch-marked sizes; else, under a size label only, a leading ``NN[.N] display`` diagonal.
+
+    In a size-labeled row, every stated size is collected first: each inch-marked size and each
+    ``NN[.N] display`` diagonal, wherever it appears and whatever separates it (a space, ``/``,
+    ``,``, ``;``, ``|``, or parentheses). More than one distinct size is ``AMBIGUOUS``, so an
+    alternative such as ``14.0 display/16.0 display`` or ``14" / 16.0 display`` is never read as
+    its first size. Repeats of the same size are one size.
+
+    The unit-less form is then accepted only when all of these hold: no inch-marked size is
+    present; the row's label names a size (``Display Size``, not a generic ``Display``); the value
+    *opens* with the number; the next word is ``display``; and the number is a laptop diagonal
+    (10 to 18.4). Resolutions, refresh rates, titles, and numbers elsewhere are never used.
+    """
+    if not _SIZE_LABEL.search(label):
+        return _screen_size(text)
+    text = _parse_text(text)
+    inch_marked = [
+        (match.start(), _inches(match[1]))
+        for match in _SCREEN_SIZE.finditer(text)
+        if Decimal(match[1]) > 0
+    ]
+    unit_less = [(match.start(), _inches(match[1])) for match in _STATED_DIAGONAL.finditer(text)]
+    distinct = list(dict.fromkeys(value for _, value in sorted(inch_marked + unit_less)))
+    if unit_less and len(distinct) > 1:
+        raise _MultipleValues(distinct)
+    if inch_marked:
+        # Inch-marked sizes only: several distinct ones are AMBIGUOUS in _extract_field, as before.
+        return {value for _, value in inch_marked}
+    match = _LEADING_DIAGONAL.match(text)
+    if not match:
+        return set()
+    number = Decimal(match[1])
+    low, high = _LAPTOP_DIAGONAL_INCHES
+    return {_inches(match[1])} if low <= number <= high else set()
 
 
 def _gigabytes(amount: str, unit: str, *, allow_tb: bool) -> int:
@@ -254,8 +302,43 @@ def _capacities(text: str, *, allow_tb: bool) -> set[str]:
     raise _MultipleValues([str(total) for _, total in mentions])
 
 
+def _ram_total_with_breakdown(text: str) -> str | None:
+    """The stated total of ``<total> (<amount> <words> + <amount> <words> ...)``, or None.
+
+    Accepted only when the row has exactly one parenthesized group, exactly one amount outside
+    it (the total, before the group), at least two ``+``-joined components inside it with exactly
+    one amount each, no count-by-size layout, no alternative/upgrade wording, and a component sum
+    equal to the total. Anything else returns None and falls back to ``_capacities``, which
+    reports several mentions as ambiguous. RAM only: drives are separate components.
+    """
+    text = _parse_text(text)
+    groups = list(_BREAKDOWN.finditer(text))
+    if (
+        len(groups) != 1
+        or text.count("(") != 1
+        or text.count(")") != 1
+        or _NOT_ONE_TOTAL.search(text)
+        or _COUNT_BY_SIZE.search(text)
+        or _SIZE_BY_COUNT.search(text)
+    ):
+        return None
+    group = groups[0]
+    before, inside, after = text[: group.start()], group[1], text[group.end() :]
+    totals = list(_CAPACITY.finditer(before))
+    if len(totals) != 1 or _CAPACITY.search(after) or "+" in before + after:
+        return None
+    parts = inside.split("+")
+    amounts = [list(_CAPACITY.finditer(part)) for part in parts]
+    if len(parts) < 2 or any(len(found) != 1 for found in amounts):
+        return None
+    total = _gigabytes(totals[0][1], totals[0][2], allow_tb=False)
+    components = [_gigabytes(found[0][1], found[0][2], allow_tb=False) for found in amounts]
+    return str(total) if sum(components) == total else None
+
+
 def _ram(text: str) -> set[str]:
-    return _capacities(text, allow_tb=False)
+    total = _ram_total_with_breakdown(text)
+    return {total} if total is not None else _capacities(text, allow_tb=False)
 
 
 def _storage(text: str) -> set[str]:
@@ -277,15 +360,17 @@ def _display_type(text: str) -> set[str]:
 def _extract_field(
     field: str,
     rows: list[tuple[str, str]],
-    parse: Callable[[str], set[str]],
+    parse: Callable[..., set[str]],
     *,
     required: bool,
     one_row: bool = False,
+    with_label: bool = False,
 ) -> FieldExtraction | None:
     """Apply one parser to the labeled rows; returns ``None`` for an absent optional field.
 
     ``one_row`` is for capacities: several rows may be several components (two drives, two
-    memory rows), so they are ambiguous even when their amounts are equal.
+    memory rows), so they are ambiguous even when their amounts are equal. ``with_label`` passes
+    each row's label to the parser as its first argument.
     """
     label = "; ".join(dict.fromkeys(row_label for row_label, _ in rows))
     text = " | ".join(value for _, value in rows) if one_row else " | ".join(
@@ -296,7 +381,9 @@ def _extract_field(
             return None
         return FieldExtraction(field, ExtractionStatus.MISSING, "", "", "")
     try:
-        per_row = [parse(value) for _, value in rows]
+        per_row = [
+            parse(row_label, value) if with_label else parse(value) for row_label, value in rows
+        ]
     except _Unparseable:
         return FieldExtraction(field, ExtractionStatus.UNPARSEABLE, "", label, text)
     except _MultipleValues as multiple:
@@ -350,9 +437,9 @@ def extract_offer_attributes(offer: OfferObservation) -> ExtractedAttributes:
         return [(label, value) for label, value in labeled if label.casefold() in names]
 
     display_rows = rows(labels.display)
-    core_plan: tuple[tuple[str, list[tuple[str, str]], Callable[[str], set[str]], bool], ...] = (
+    core_plan: tuple[tuple[str, list[tuple[str, str]], Callable[..., set[str]], bool], ...] = (
         ("model", rows(labels.model), _model, False),
-        ("screen_size_in", display_rows, _screen_size, False),
+        ("screen_size_in", display_rows, _screen_size_row, False),
         ("cpu_series", rows(labels.cpu), _cpu_series, False),
         ("ram_capacity_gb", rows(labels.memory), _ram, True),
         ("storage_capacity_gb", rows(labels.storage), _storage, True),
@@ -362,7 +449,14 @@ def extract_offer_attributes(offer: OfferObservation) -> ExtractedAttributes:
 
     evidence: list[FieldExtraction] = []
     for field, field_rows, parse, one_row in core_plan:
-        item = _extract_field(field, field_rows, parse, required=True, one_row=one_row)
+        item = _extract_field(
+            field,
+            field_rows,
+            parse,
+            required=True,
+            one_row=one_row,
+            with_label=parse is _screen_size_row,
+        )
         assert item is not None
         if shared and item.status is ExtractionStatus.EXTRACTED:
             # The value may describe another variant of the product, so it cannot be trusted.

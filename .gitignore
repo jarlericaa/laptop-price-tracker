@@ -17,3 +17,4 @@ data/review/
 data/raw/
 config/duplicate_decisions.csv
 config/eligibility_decisions.csv
+config/identity_review_register.csv

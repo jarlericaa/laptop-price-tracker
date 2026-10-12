@@ -23,6 +23,7 @@ from .extraction import (
 )
 from .normalization import CORE_MATCH_COLUMNS, core_key, is_blank, positive_integer, text_key
 from .offers import OfferObservation
+from .target_master import CONFIGURATION, LISTING_ONLY, effective_tracking_mode
 
 SECONDARY_MATCH_COLUMNS: tuple[str, ...] = (
     "brand",
@@ -125,6 +126,10 @@ class ExactMatcher:
     ``offer_attributes`` must contain the canonical Phase 8 field names. Core numeric fields
     must already be expressed as inches, GB, or a bare positive integer as named by the field.
     ``match`` never parses ``raw_title`` or ``raw_specifications``.
+
+    Only CONFIGURATION rows (``tracking_mode`` blank or ``CONFIGURATION``) are indexed.
+    LISTING_ONLY rows are counted in ``excluded_listing_only`` and never produce exact matches,
+    near-match candidates, or ambiguity. An unknown tracking mode is rejected.
     """
 
     def __init__(self, targets: Iterable[Mapping[str, object]] | pd.DataFrame) -> None:
@@ -134,6 +139,7 @@ class ExactMatcher:
             else list(targets)
         )
         self._targets: list[_PreparedTarget] = []
+        self.excluded_listing_only = 0
         seen_ids: set[str] = set()
         for row_number, row in enumerate(rows, start=1):
             target_id = text_key(row.get("target_id"))
@@ -145,6 +151,13 @@ class ExactMatcher:
             seen_ids.add(target_id)
             if status not in {"active", "inactive"}:
                 raise ValueError(f"Target row {row_number} has an invalid status.")
+            mode = effective_tracking_mode(row.get("tracking_mode"))
+            if mode == LISTING_ONLY:
+                # Tracked as one listing only; never part of cross-retailer matching.
+                self.excluded_listing_only += 1
+                continue
+            if mode != CONFIGURATION:
+                raise ValueError(f"Target row {row_number} has an unknown tracking_mode.")
             key, issues = core_key(row)
             if key is None:
                 raise ValueError(
@@ -156,6 +169,10 @@ class ExactMatcher:
                     target_id=str(row["target_id"]), status=status, row=row, core_key=key
                 )
             )
+
+    @property
+    def configuration_target_count(self) -> int:
+        return len(self._targets)
 
     def match_observation(self, offer: OfferObservation) -> MatchResult:
         """Extract the offer's canonical fields with its retailer extractor, then match them."""

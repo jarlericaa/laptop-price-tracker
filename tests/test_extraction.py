@@ -188,7 +188,7 @@ def test_laptop_factory_extracts_a_complete_labeled_core() -> None:
     extracted = extract_offer_attributes(fixture_offer("lf_sale"))
     assert extracted.extractor == "laptop_factory"
     assert extracted.values == {
-        "model": "Acer Aspire AI 14 A14-11M-X3BP (Steam Blue)",
+        "model": "A14-11M-X3BP",
         "screen_size_in": "14",
         "cpu_series": "Snapdragon X",
         "ram_capacity_gb": "16",
@@ -204,7 +204,7 @@ def test_laptop_factory_extracts_a_complete_labeled_core() -> None:
 
 def test_laptop_factory_unrecognized_cpu_and_missing_rows_stay_missing() -> None:
     assert statuses("lf_regular") == {
-        "model": (E, "Example Notebook 15 EN15-01"),
+        "model": (E, "EN15-01"),
         "screen_size_in": (E, "15.6"),
         "cpu_series": (U, ""),
         "ram_capacity_gb": (E, "8"),
@@ -277,7 +277,7 @@ def test_octagon_multi_variant_shared_description_is_not_trusted() -> None:
 def test_pc_central_single_variant_extracts_model_and_secondary_details() -> None:
     extracted = extract_offer_attributes(fixture_offer("pcc_single"))
     assert extracted.values == {
-        "model": "Example Nitro 15 EN15-0002",
+        "model": "EN15-0002",
         "screen_size_in": "15.6",
         "cpu_series": "Core 5",
         "ram_capacity_gb": "16",
@@ -332,7 +332,8 @@ def test_pc_express_layout_and_total_capacity_must_agree() -> None:
         ("Processor", "AMD Ryzen™ AI 9 HX 370", "cpu_series", (E, "Ryzen AI 9")),
         ("Processor", "Snapdragon® X Elite X1E-78-100", "cpu_series", (E, "Snapdragon X Elite")),
         ("Processor", "Apple M3 Pro chip", "cpu_series", (E, "Apple M3 Pro")),
-        ("Processor", "Intel Celeron N4500", "cpu_series", (U, "")),
+        ("Processor", "Intel Celeron N4500", "cpu_series", (E, "Celeron N4500")),
+        ("Processor", "Intel Celeron processor", "cpu_series", (U, "")),
         ("Processor", "Core i5 or Core i7", "cpu_series", (A, "Core i5 | Core i7")),
         ("Model Name", "ExampleBook™ 14", "model", (E, "ExampleBook 14")),
     ],
@@ -394,7 +395,7 @@ def test_multiple_components_never_match_a_single_component_target(
     label: str, value: str, field: str, target_override: dict[str, str]
 ) -> None:
     specs = {
-        "Model Name": LF_TARGET["model"],
+        "Model Name": "Acer Aspire AI 14 A14-11M-X3BP (Steam Blue)",
         "Processor": "Snapdragon X X1-26-100",
         "RAM": "16GB",
         "Storage": "512GB SSD",
@@ -440,7 +441,7 @@ def test_multi_variant_detection_applies_only_to_shared_description_retailers() 
 LF_TARGET = {
     "target_id": "TGT-000001",
     "status": "ACTIVE",
-    "model": "Acer Aspire AI 14 A14-11M-X3BP (Steam Blue)",
+    "model": "A14-11M-X3BP",
     "screen_size_in": "14.0",
     "cpu_series": "Snapdragon X",
     "ram_capacity_gb": "16",
@@ -468,7 +469,7 @@ def test_extracted_ambiguous_secondary_goes_to_review() -> None:
     offer = synthetic_offer(
         "laptop_factory",
         (
-            ("Model Name", LF_TARGET["model"]),
+            ("Model Name", "Acer Aspire AI 14 A14-11M-X3BP (Steam Blue)"),
             ("Processor", "Snapdragon X X1-26-100"),
             ("RAM", "16GB"),
             ("Storage", "512GB SSD"),

@@ -5,8 +5,10 @@ from __future__ import annotations
 import csv
 import importlib.util
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
+from conftest import settings
 from scraping_fakes import no_network  # noqa: F401
 from test_extraction import fixture_offer
 from test_target_master import target_row, target_values
@@ -29,7 +31,7 @@ FULL_COLUMNS = [*OBSERVATION_COLUMNS, *OFFER_DETAIL_COLUMNS]
 LF_TARGET = {
     "target_id": "TGT-000001",
     "brand": "",
-    "model": "Acer Aspire AI 14 A14-11M-X3BP (Steam Blue)",
+    "model": "A14-11M-X3BP",
     "screen_size_in": "14",
     "cpu_series": "Snapdragon X",
     "ram_capacity_gb": "16",
@@ -43,7 +45,7 @@ TARGET_ROWS = [
     target_row(**LF_TARGET),
     target_row(
         target_id="TGT-000002",
-        model="Example Nitro 15 EN15-0002",
+        model="EN15-0002",
         screen_size_in="15.6",
         cpu_series="Core 5",
         ram_capacity_gb="16",
@@ -54,7 +56,7 @@ TARGET_ROWS = [
     target_row(
         target_id="TGT-000003",
         status="INACTIVE",
-        model="Example Notebook 15 EN15-01",
+        model="EN15-01",
         screen_size_in="15.6",
         cpu_series="Core 5",
         ram_capacity_gb="8",
@@ -204,7 +206,7 @@ def test_cli_inactive_target_is_reported_unmatched(tmp_path: Path) -> None:
     inactive = target_row(
         target_id="TGT-000009",
         status="INACTIVE",
-        model="Example Nitro 15 EN15-0002",
+        model="EN15-0002",
         screen_size_in="15.6",
         cpu_series="Core 5",
         ram_capacity_gb="16",
@@ -270,3 +272,75 @@ def test_cli_requires_observation_columns(tmp_path: Path, capsys) -> None:
     argv = ["--target-master", str(targets), "--observations", str(observations)]
     assert load_cli().main([*argv, "--output-dir", str(tmp_path / "out")]) == 1
     assert "missing columns" in capsys.readouterr().err
+
+
+# Phase 5 -> Phase 8 TARGET_MASTER handoff
+
+
+def write_validated_copy(path: Path, values: list[list[str]]) -> Path:
+    """The shape check_target_tables.py writes: a source_row_number column, then the template."""
+    rows = [["source_row_number", *values[0]]]
+    rows += [[str(number), *row] for number, row in enumerate(values[1:], start=2)]
+    return write_rows(path, rows)
+
+
+def test_cli_accepts_check_target_tables_validated_copy(tmp_path: Path) -> None:
+    targets = write_validated_copy(
+        tmp_path / "target_master_validated.csv", target_values(*TARGET_ROWS)
+    )
+    observations = write_observations(tmp_path / "obs.csv", "lf_sale")
+    out = tmp_path / "out"
+    argv = ["--target-master", str(targets), "--observations", str(observations)]
+    assert load_cli().main([*argv, "--output-dir", str(out)]) == 0
+    [row] = read_dicts(out / "offer_match_results.csv")
+    assert (row["match_status"], row["target_id"]) == ("EXACT", "TGT-000001")
+
+
+def from_sheets(tmp_path: Path, tables: dict[str, list[list[str]] | None]):
+    cli = load_cli()
+    observations = write_observations(tmp_path / "obs.csv", "lf_sale")
+    argv = ["--target-master-from-sheets", "--observations", str(observations)]
+    argv += ["--output-dir", str(tmp_path / "out")]
+    with (
+        patch.object(cli.Settings, "from_env", return_value=settings()),
+        patch.object(cli, "read_target_table_values", return_value=tables) as reader,
+    ):
+        code = cli.main(argv)
+    return code, reader
+
+
+def test_cli_reads_only_the_live_target_master_tab_read_only(tmp_path: Path) -> None:
+    code, reader = from_sheets(tmp_path, {"TARGET_MASTER": target_values(*TARGET_ROWS)})
+    assert code == 0
+    assert reader.call_args.args[1] == ("TARGET_MASTER",)
+    [row] = read_dicts(tmp_path / "out" / "offer_match_results.csv")
+    assert row["target_id"] == "TGT-000001"
+
+
+def test_cli_live_target_master_failing_validation_produces_no_results(
+    tmp_path: Path, capsys
+) -> None:
+    duplicate = target_row(**(LF_TARGET | {"target_id": "TGT-000002"}))
+    code, _ = from_sheets(tmp_path, {"TARGET_MASTER": target_values(TARGET_ROWS[0], duplicate)})
+    assert code == 1
+    captured = capsys.readouterr()
+    assert "DUPLICATE_CONFIGURATION: 2" in captured.out
+    assert "did not pass validation" in captured.err
+    assert not (tmp_path / "out" / "offer_match_results.csv").exists()
+
+
+def test_cli_missing_live_target_master_tab_stops(tmp_path: Path, capsys) -> None:
+    code, _ = from_sheets(tmp_path, {"TARGET_MASTER": None})
+    assert code == 1
+    assert "TARGET_MASTER worksheet not found" in capsys.readouterr().err
+    assert not (tmp_path / "out" / "offer_match_results.csv").exists()
+
+
+def test_cli_target_master_sources_are_mutually_exclusive(tmp_path: Path) -> None:
+    observations = ["--observations", str(tmp_path / "obs.csv")]
+    with pytest.raises(SystemExit):
+        load_cli().parse_args(observations)
+    with pytest.raises(SystemExit):
+        load_cli().parse_args(
+            ["--target-master", "tm.csv", "--target-master-from-sheets", *observations]
+        )

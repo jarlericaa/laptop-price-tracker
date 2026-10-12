@@ -53,6 +53,13 @@ BASE_ROW = {
     "reviewer": "analyst",
     "reviewed_at": "2026-09-28",
     "notes": "",
+    # Blank tracking mode: a CONFIGURATION row, exactly like every pre-2026-10-08 row.
+    "tracking_mode": "",
+    "shop_id": "",
+    "item_id": "",
+    "source_model_id": "",
+    "tracking_mode_reason": "",
+    "classification_evidence": "",
 }
 
 

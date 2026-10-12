@@ -10,8 +10,9 @@ Laptop Factory, DataBlitz, and PC Express each have a user-reported live check; 
 and PC Express also have a controlled 2026-10-01 check with plain-string URLs. The
 external-policy findings for PC Express and Octagon are RESTRICTED under the retailers' terms.
 PC Central's bare-URL check failed safely; a selected-variant live check returned one in-stock
-offer. A user-reported OCT live check returned one in-stock HP 15-FC0413AU offer at PHP 37,999. Exact configuration matching, price comparison, and
-GitHub Actions automation are planned; they are not implemented.
+offer. A user-reported OCT live check returned one in-stock HP 15-FC0413AU offer at PHP 37,999.
+Exact configuration matching (overall Phase 8) runs offline over saved observations. Price
+comparison and GitHub Actions automation are not implemented.
 
 The latest read-only live dry run completed in 57.49 seconds and generated 100 targets. The
 21 historical conflicting keys had fingerprint-matched `EXCLUDE_KEY` decisions; their source
@@ -21,18 +22,24 @@ production tabs were created with headers only and verified on 2026-09-29. A syn
 writer test completed on a dedicated test spreadsheet; a read-only report confirmed the nine
 tabs and headers, expected synthetic rows, and a run-log count of 1. The full
 `run_phase1.py --write-sheets` command has not been run, and no production sheet write has
-occurred. The user later reported the three Phase 5 tabs have header rows and no data. The local
-`TARGET_MASTER` and `MATCH_REVIEW` headers have since changed to the revised identity schema and
-need to be copied to the Sheet.
+occurred.
 
-Phase 5 is PARTIALLY_COMPLETE. The user revised the `TARGET_MASTER` identity key on 2026-09-29
-to match the requested 1:1 product fields. Local validators exist for `TARGET_MASTER`,
-`SOURCE_MODEL_MAP`, and `MATCH_REVIEW`, along with a
-read-only Google Sheets reader for those tabs. A command seeds the Top 100 into a local
-`MATCH_REVIEW` candidate file. No real configurations or mappings have been entered, no approver
-has been named. The current local templates need to be reflected in the master Sheet before the
-read-only validator will accept its `TARGET_MASTER` and `MATCH_REVIEW` headers. See
+Phase 5 is COMPLETE (2026-10-12). The `TARGET_MASTER` identity is the five-field core key approved
+on 2026-10-05 (`model`, `screen_size_in`, `cpu_series` at CPU-family level, `ram_capacity_gb`,
+`storage_capacity_gb`), and the local validators for `TARGET_MASTER`, `SOURCE_MODEL_MAP`, and
+`MATCH_REVIEW` enforce it. Rows have a tracking mode: `CONFIGURATION` (the default) uses the
+five-field identity and exact retailer matching; `LISTING_ONLY` covers products confirmed to have
+no verifiable model, is tracked by `shop_id` + `item_id` + `source_model_id`, and is never matched
+across retailers. On 2026-10-12 the catalog held 205 targets (193 `CONFIGURATION`, 12
+`LISTING_ONLY`), 360 mappings, and 5,154 review rows, all passing the read-only validator. The
+tracker's working list is the **Top 100 verified configurations**: 128 configurations qualify,
+100 are selected, and the list is published in the `P1_TOP_100_CONFIGURATIONS` tab. It excludes
+`LISTING_ONLY` targets and unresolved identities. See
 [docs/TARGET_MASTER_SCHEMA.md](docs/TARGET_MASTER_SCHEMA.md).
+
+Phase 8 is COMPLETE as an offline path. Replaying the nine Laptop Factory observations saved on
+2026-10-08 against the current catalog gives 9 `EXACT` matches. That is one retailer and nine
+offers, not a pilot. See [docs/MATCHING.md](docs/MATCHING.md).
 
 Phase 6 is COMPLETE as a framework. `src/laptop_tracker/offers.py` and
 `src/laptop_tracker/scraping.py` define the adapter contract and the normalized offer
@@ -112,12 +119,52 @@ paths and print counts only.
 
 ```bash
 python match_offers.py --target-master tm.csv --observations offer_observations.csv
+python match_offers.py --target-master-from-sheets --observations offer_observations.csv
+python audit_top_100_coverage.py --from-sheets
+python propose_catalog_conventions.py --target-master data/output/target_master_validated.csv
+python build_verified_top_100.py            # add --from-sheets to read the three catalog tabs
+python audit_verified_top_100.py
 ```
 
+`audit_top_100_coverage.py` classifies each accepted Phase 4 Top 100 `model_id` (exact text) as
+mapped to an ACTIVE target, mapped to an inactive or invalid target, unmapped but in
+`MATCH_REVIEW` (by status), or missing. It also lists `COMPLETE` review rows without an ACTIVE
+mapping. It accepts the same three local snapshots as `check_target_tables.py` (exports or
+validated copies) or reads the tabs read-only, writes local reports under `data/output/`, and
+prints counts only. It never reads `raw` or `P1_TOP_100_TARGETS` and never writes to Sheets.
+
 `match_offers.py` (Phase 8) matches saved retailer offer observations to a fully valid
-`TARGET_MASTER` snapshot using the five-field exact rule, offline. It writes
+`TARGET_MASTER` using the five-field exact rule. `--target-master` accepts a sheet export or a
+`check_target_tables.py` validated copy; `--target-master-from-sheets` reads only the live
+`TARGET_MASTER` tab with the read-only scope instead. It writes
 `offer_match_results.csv`, `offer_match_review_queue.csv`, and `offer_match_evidence.csv` under
 `data/output/` and prints counts only. See [docs/MATCHING.md](docs/MATCHING.md).
+
+`propose_catalog_conventions.py` proposes `model`/`cpu_series` corrections under the 2026-10-08
+conventions for each `target_id` in a validated snapshot. Optional mapping and review snapshots,
+Top 100 coverage, and saved observations add evidence. It writes local reports under
+`data/output/catalog_conventions/`, including a sheet correction report, and never edits the
+catalog. See [docs/SHEET_MIGRATION_MODEL_CPU_CONVENTIONS.md](docs/SHEET_MIGRATION_MODEL_CPU_CONVENTIONS.md).
+
+`build_verified_top_100.py` produces the **Top 100 verified configurations** (owner decision
+2026-10-12). This is the tracker's working list, not the overall sales Top 100:
+
+- **Members.** It contains unique ACTIVE `CONFIGURATION` targets with complete, unconflicted
+  five-field identities.
+- **Ranking.** Targets are ranked by the combined M-1 + MTD GMV of their eligible, approved
+  mapped variations. Each target is counted once, and GMV is summed exactly from the Phase 4 text.
+- **Inputs.** It reads the full Phase 4 eligible ranking (`eligible_model_ranking.csv`), checks
+  it against the accepted source Top 100 (kept unchanged as a reference), and reads the three
+  validated catalog tables. With `--from-sheets`, the catalog tabs are read with the read-only
+  scope.
+- **Outputs.** It writes the full ranking, the Top 100, a contribution ledger, exclusions, a
+  review-priority queue, and a run summary under `data/output/verified_top_100/`.
+- **Sales periods.** The GMV comes from the historical sales snapshot that Phase 4 extracted. A
+  new build date does not make the sales current.
+
+`audit_verified_top_100.py` independently checks a run: unique targets, ACTIVE `CONFIGURATION`
+status, complete identities, valid contributors, totals, deterministic order, and the catalog
+version used. See [docs/TARGET_MASTER_SCHEMA.md](docs/TARGET_MASTER_SCHEMA.md#top-100-verified-configurations-2026-10-12).
 
 ## Conflicting duplicates
 
@@ -159,13 +206,16 @@ The latest live dry run took 57.49 seconds and did not write to any Google Sheet
 - [PC Central adapter (Phase 7)](docs/adapters/PCC.md)
 - [Octagon adapter (Phase 7)](docs/adapters/OCT.md)
 - [Exact offer matching (Phase 8)](docs/MATCHING.md)
+- [Sheet migration for tracking modes](docs/SHEET_MIGRATION_TRACKING_MODES.md)
+- [Sheet migration for model/CPU conventions](docs/SHEET_MIGRATION_MODEL_CPU_CONVENTIONS.md)
+- [Price tracking output schema](docs/PRICE_TRACKING_OUTPUT_SCHEMA.md)
 
 ## Local verification
 
 ```bash
 python -m pytest -q
 python -m ruff check .
-python -m compileall src run_phase1.py smoke_test.py check_target_master.py check_target_tables.py seed_match_review.py match_offers.py
+python -m compileall src run_phase1.py smoke_test.py check_target_master.py check_target_tables.py seed_match_review.py match_offers.py audit_top_100_coverage.py propose_catalog_conventions.py build_verified_top_100.py audit_verified_top_100.py
 python smoke_test.py
 python run_phase1.py --dry-run
 ```

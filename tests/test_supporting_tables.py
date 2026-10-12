@@ -13,6 +13,7 @@ from test_target_master import target_row, target_values
 
 from laptop_tracker import sheets_source
 from laptop_tracker.supporting_tables import (
+    LEGACY_MATCH_REVIEW_HEADERS,
     MATCH_REVIEW_EVIDENCE_COLUMNS,
     MATCH_REVIEW_HEADERS,
     SOURCE_MODEL_MAP_HEADERS,
@@ -306,9 +307,112 @@ def test_complete_status_needs_core_fields_but_not_secondary_or_source_url() -> 
     assert codes(partial) == [(2, "cpu_series", "MISSING_VALUE")]
 
 
-def test_review_headers_must_match_template_exactly() -> None:
-    with pytest.raises(TargetMasterSchemaError, match="MATCH_REVIEW headers"):
-        validate_match_review([[*MATCH_REVIEW_HEADERS[1:], "review_id"]])
+def reorder(values: list[list[str]], headers: list[str]) -> list[list[str]]:
+    """Rearrange worksheet columns to ``headers`` order, moving every cell with its header."""
+    positions = [values[0].index(name) for name in headers]
+    return [[row[position] for position in positions] for row in values]
+
+
+REVIEW_CORE = {
+    "model": "ExampleBook 14",
+    "screen_size_in": "14",
+    "cpu_series": "Example Series 5",
+    "ram_capacity_gb": "16",
+    "storage_capacity_gb": "1000",
+}
+LISTING_CANDIDATE = {
+    "tracking_mode": "LISTING_ONLY",
+    "shop_id": "10",
+    "item_id": "20",
+    "tracking_mode_reason": "Seller and listing show no product model name or code.",
+    "classification_evidence": "Listing title, variation names, and seller specs checked.",
+}
+
+
+def review_sample() -> list[list[str]]:
+    """Rows that exercise each rule: valid, a core gap, a listing candidate, a bad value."""
+    return [
+        MATCH_REVIEW_HEADERS,
+        review_row(review_id="R1", status="COMPLETE", **REVIEW_CORE),
+        review_row(review_id="R2", status="COMPLETE", **(REVIEW_CORE | {"model": ""})),
+        review_row(review_id="R3", status="COMPLETE", source_model_id="0042", **LISTING_CANDIDATE),
+        review_row(review_id="R4", ram_capacity_gb="16GB", reviewer="synthetic reviewer"),
+    ]
+
+
+@pytest.mark.parametrize(
+    "order",
+    [
+        list(reversed(MATCH_REVIEW_HEADERS)),
+        # The tracking-mode columns placed before notes, as a worksheet edit could leave them.
+        [
+            *[name for name in MATCH_REVIEW_HEADERS if name not in LISTING_CANDIDATE],
+            *LISTING_CANDIDATE,
+        ],
+        sorted(MATCH_REVIEW_HEADERS),
+    ],
+    ids=["reversed", "tracking-columns-moved", "alphabetical"],
+)
+def test_review_columns_are_read_by_header_name(order: list[str]) -> None:
+    expected = validate_match_review(review_sample())
+    result = validate_match_review(reorder(review_sample(), order))
+
+    # Same row checks and tracking-mode rules, and the output stays in template order.
+    assert codes(result) == codes(expected) == [
+        (3, "model", "MISSING_VALUE"),
+        (5, "ram_capacity_gb", "INVALID_FORMAT"),
+        (5, "reviewed_at", "MISSING_VALUE"),
+    ]
+    assert list(result.rows.columns) == ["source_row_number", *MATCH_REVIEW_HEADERS]
+    assert result.rows.equals(expected.rows)
+    assert result.valid_rows.equals(expected.valid_rows)
+    assert result.info == expected.info
+    assert result.valid_rows.loc[1, "tracking_mode"] == "LISTING_ONLY"
+    assert result.valid_rows.loc[1, "item_id"] == "20"
+
+
+def test_reordered_legacy_review_header_is_read_as_configuration_candidates() -> None:
+    legacy = [MATCH_REVIEW_HEADERS[:-5]] + [row[:-5] for row in review_sample()[1:3]]
+    assert legacy[0] == LEGACY_MATCH_REVIEW_HEADERS
+    result = validate_match_review(reorder(legacy, list(reversed(LEGACY_MATCH_REVIEW_HEADERS))))
+    assert codes(result) == [(3, "model", "MISSING_VALUE")]
+    assert list(result.rows.columns) == ["source_row_number", *MATCH_REVIEW_HEADERS]
+    assert result.valid_rows.loc[0, "model"] == "ExampleBook 14"
+    assert result.rows["tracking_mode"].tolist() == ["", ""]
+
+
+@pytest.mark.parametrize(
+    ("headers", "message"),
+    [
+        ([], "no header row"),
+        (["", "  "], "no header row"),
+        ([name for name in MATCH_REVIEW_HEADERS if name != "model"], "missing: model"),
+        (
+            [name for name in LEGACY_MATCH_REVIEW_HEADERS if name != "status"][::-1],
+            "missing: status",
+        ),
+        ([*MATCH_REVIEW_HEADERS, "notes"], "duplicate: notes"),
+        ([*reversed(LEGACY_MATCH_REVIEW_HEADERS), "review_id"], "duplicate: review_id"),
+        (
+            [*MATCH_REVIEW_HEADERS[:5], "", *MATCH_REVIEW_HEADERS[5:]],
+            r"blank header in column\(s\) 6",
+        ),
+        ([*MATCH_REVIEW_HEADERS, None], r"blank header in column\(s\) 44"),
+        ([*MATCH_REVIEW_HEADERS, "extra"], "unknown: extra"),
+        # A misspelt header is unknown and leaves its real column missing.
+        (
+            ["Status" if name == "status" else name for name in MATCH_REVIEW_HEADERS],
+            "unknown: Status; missing: status",
+        ),
+        # A TARGET_MASTER-only column is not a MATCH_REVIEW column.
+        ([*MATCH_REVIEW_HEADERS, "target_id"], "unknown: target_id"),
+        # Some, but not all, tracking-mode columns: neither the legacy nor the current schema.
+        ([*LEGACY_MATCH_REVIEW_HEADERS, "tracking_mode"], "missing: shop_id, item_id"),
+    ],
+)
+def test_malformed_review_headers_are_rejected(headers: list, message: str) -> None:
+    with pytest.raises(TargetMasterSchemaError, match=message):
+        validate_match_review([headers] if headers else [])
 
 
 def test_mapped_ids_still_open_in_review_are_counted() -> None:

@@ -13,15 +13,20 @@ from dataclasses import dataclass, field, replace
 import pandas as pd
 
 from .target_master import (
+    CONFIGURATION,
+    LISTING_ONLY,
     TARGET_ERROR_COLUMNS,
     TARGET_ID_PATTERN,
     TARGET_MASTER_COLUMNS,
     TARGET_PRODUCT_REQUIRED_COLUMNS,
+    TRACKING_MODE_COLUMNS,
     TargetColumn,
     TargetMasterResult,
     TargetMasterSchemaError,
     _add_duplicate_errors,
     check_cell,
+    check_tracking_mode,
+    effective_tracking_mode,
 )
 
 # Shopee model IDs are digit-only strings in `raw` (see schema.py); leading zeroes are kept.
@@ -58,6 +63,7 @@ _REVIEW_PRODUCT_COLUMNS = tuple(
     for column in TARGET_MASTER_COLUMNS
     if column.name
     not in {"target_id", "status", "source_url", "reviewer", "reviewed_at", "notes"}
+    and column.name not in TRACKING_MODE_COLUMNS
 )
 # TARGET_PRODUCT_REQUIRED_COLUMNS is exactly the five-field core identity.
 _REVIEW_EVIDENCE_COLUMNS = tuple(
@@ -84,10 +90,25 @@ MATCH_REVIEW_COLUMNS: tuple[TargetColumn, ...] = (
     TargetColumn("reviewer", False, "Person who recorded the review decision."),
     TargetColumn("reviewed_at", False, "Review date.", format_hint="YYYY-MM-DD", is_date=True),
     TargetColumn("notes", False, "Free-text notes.", free_text=True),
+    # Tracking-mode columns (2026-10-08), after `notes` so existing sheet columns do not move.
+    # source_model_id above is the listing variation for LISTING_ONLY candidates.
+    replace(_TARGET_COLUMNS_BY_NAME["tracking_mode"], required=False),
+    replace(_TARGET_COLUMNS_BY_NAME["shop_id"], required=False),
+    replace(_TARGET_COLUMNS_BY_NAME["item_id"], required=False),
+    replace(_TARGET_COLUMNS_BY_NAME["tracking_mode_reason"], required=False),
+    replace(_TARGET_COLUMNS_BY_NAME["classification_evidence"], required=False),
 )
 
 SOURCE_MODEL_MAP_HEADERS = [column.name for column in SOURCE_MODEL_MAP_COLUMNS]
 MATCH_REVIEW_HEADERS = [column.name for column in MATCH_REVIEW_COLUMNS]
+# Header order of every MATCH_REVIEW snapshot made before tracking modes existed; its rows are
+# read with blank tracking-mode columns (that is, as CONFIGURATION candidates).
+MATCH_REVIEW_TRACKING_COLUMNS: tuple[str, ...] = tuple(
+    name for name in TRACKING_MODE_COLUMNS if name != "source_model_id"
+)
+LEGACY_MATCH_REVIEW_HEADERS = [
+    name for name in MATCH_REVIEW_HEADERS if name not in MATCH_REVIEW_TRACKING_COLUMNS
+]
 MATCH_REVIEW_EVIDENCE_COLUMNS = [column.name for column in _REVIEW_EVIDENCE_COLUMNS]
 
 
@@ -113,6 +134,9 @@ def validate_source_model_map(
     A source_model_id may appear on only one row; several may share a target_id. A target_id must
     exist in TARGET_MASTER, and a link to a TARGET_MASTER row that failed validation is rejected.
     Links to INACTIVE targets are counted but not rejected, because no policy has been approved.
+    A link may point to a CONFIGURATION or a LISTING_ONLY target. A LISTING_ONLY target accepts
+    only its own source_model_id (LISTING_TARGET_MISMATCH otherwise), and that source_model_id may
+    not link to any other target (LISTING_SOURCE_MAPPED_ELSEWHERE).
     """
     headers = _validate_exact_headers("SOURCE_MODEL_MAP", values, SOURCE_MODEL_MAP_HEADERS)
     errors: list[dict[str, object]] = []
@@ -139,9 +163,20 @@ def validate_source_model_map(
             target_master.valid_rows["status"].eq("INACTIVE"), "target_id"
         ].astype(str)
     )
-    inactive_links = 0
+    # A LISTING_ONLY target is one source listing: only its own source_model_id may link to it,
+    # and that source_model_id may not link anywhere else. IDs are compared as exact text.
+    listing_source_by_target = {
+        str(row.target_id): str(row.source_model_id)
+        for row in target_master.valid_rows.itertuples(index=False)
+        if effective_tracking_mode(row.tracking_mode) == LISTING_ONLY
+    }
+    listing_target_by_source = {
+        source: target for target, source in listing_source_by_target.items()
+    }
+    inactive_links = listing_links = 0
     for record in records:
         target_id = str(record["target_id"])
+        source_id = str(record["source_model_id"])
         row_number = int(record["source_row_number"])  # type: ignore[arg-type]
         if target_id.strip() == "" or target_id != target_id.strip():
             continue  # Already reported as missing or whitespace.
@@ -153,7 +188,8 @@ def validate_source_model_map(
                 "UNKNOWN_TARGET_ID",
                 "target_id does not exist in TARGET_MASTER.",
             )
-        elif target_id not in valid_targets:
+            continue
+        if target_id not in valid_targets:
             add_error(
                 row_number,
                 "target_id",
@@ -161,24 +197,64 @@ def validate_source_model_map(
                 "TARGET_NOT_VALID",
                 "target_id refers to a TARGET_MASTER row that failed validation.",
             )
-        elif target_id in inactive_targets:
+            continue
+        if target_id in inactive_targets:
             inactive_links += 1
+        if target_id in listing_source_by_target:
+            if source_id != listing_source_by_target[target_id]:
+                add_error(
+                    row_number,
+                    "source_model_id",
+                    source_id,
+                    "LISTING_TARGET_MISMATCH",
+                    "A LISTING_ONLY target may only be linked from its own source_model_id.",
+                )
+            else:
+                listing_links += 1
+        elif source_id in listing_target_by_source:
+            add_error(
+                row_number,
+                "target_id",
+                target_id,
+                "LISTING_SOURCE_MAPPED_ELSEWHERE",
+                "This source_model_id is the identity of a LISTING_ONLY target, so it must link "
+                "to that target.",
+            )
 
-    info = {"links_to_inactive_targets": inactive_links}
+    linked_listing_targets = {
+        str(record["target_id"])
+        for record in records
+        if listing_source_by_target.get(str(record["target_id"])) == str(record["source_model_id"])
+    }
+    info = {
+        "links_to_inactive_targets": inactive_links,
+        "links_to_listing_only_targets": listing_links,
+        "listing_only_targets_without_mapping": len(
+            set(listing_source_by_target) - linked_listing_targets
+        ),
+    }
     return _result(records, SOURCE_MODEL_MAP_HEADERS, errors, info)
 
 
 def validate_match_review(values: Sequence[Sequence[object]]) -> TableResult:
     """Validate candidate rows; blank specs are allowed, nonblank ones use TARGET_MASTER formats.
 
-    A ``COMPLETE`` row must have all five core fields; secondary fields and source_url may stay
-    blank. Complete evidence is only counted: no row is ever promoted, matched, or mapped here.
+    A ``COMPLETE`` row must meet its tracking mode's promotion requirements. CONFIGURATION (or a
+    blank, legacy mode) needs all five core fields; LISTING_ONLY needs shop_id, item_id,
+    source_model_id, a reason, and evidence, with model fields blank. Secondary fields and
+    source_url may stay blank. Columns are read by header name, so the current or the
+    pre-tracking-mode header set is accepted in any column order; output uses template order.
+    Complete evidence is only counted: no row is ever promoted, matched, or mapped here.
     """
-    headers = _validate_exact_headers("MATCH_REVIEW", values, MATCH_REVIEW_HEADERS)
+    headers = _validate_match_review_headers(values)
     errors: list[dict[str, object]] = []
     add_error = _error_collector(errors)
     records = _records(values, headers, add_error)
+    for record in records:
+        for name in MATCH_REVIEW_HEADERS:
+            record.setdefault(name, "")  # Legacy snapshots: no tracking-mode columns.
     complete_evidence = 0
+    complete_listing_only = 0
     for record in records:
         row_number = int(record["source_row_number"])  # type: ignore[arg-type]
         errors_before = len(errors)
@@ -189,16 +265,24 @@ def validate_match_review(values: Sequence[Sequence[object]]) -> TableResult:
             for error in errors[errors_before:]
         )
 
+        mode = effective_tracking_mode(record["tracking_mode"])
         if record["status"] == "COMPLETE":
-            for name in MATCH_REVIEW_EVIDENCE_COLUMNS:
-                if str(record[name]).strip() == "":
-                    add_error(
-                        row_number,
-                        name,
-                        "",
-                        "MISSING_VALUE",
-                        f"{name} is a core field and is required when status is COMPLETE.",
-                    )
+            # COMPLETE means the candidate meets its own tracking mode's promotion requirements.
+            # Other statuses may hold unresolved classification or identity conflicts.
+            if mode == CONFIGURATION:
+                for name in MATCH_REVIEW_EVIDENCE_COLUMNS:
+                    if str(record[name]).strip() == "":
+                        add_error(
+                            row_number,
+                            name,
+                            "",
+                            "MISSING_VALUE",
+                            f"{name} is a core field and is required when a CONFIGURATION "
+                            "candidate is COMPLETE.",
+                        )
+            elif mode == LISTING_ONLY:
+                complete_listing_only += 1
+            check_tracking_mode(row_number, record, add_error, configuration_allows_listing=True)
 
         reviewer = str(record["reviewer"]).strip()
         reviewed_at = str(record["reviewed_at"]).strip()
@@ -236,7 +320,10 @@ def validate_match_review(values: Sequence[Sequence[object]]) -> TableResult:
         "review_id is not unique (case-insensitive)",
         add_error,
     )
-    info = {"rows_with_complete_core_identity": complete_evidence}
+    info = {
+        "rows_with_complete_core_identity": complete_evidence,
+        "complete_listing_only_rows": complete_listing_only,
+    }
     for status in MATCH_REVIEW_STATUSES:
         info[f"status_{status}"] = sum(1 for record in records if record["status"] == status)
     return _result(records, MATCH_REVIEW_HEADERS, errors, info)
@@ -316,9 +403,50 @@ def build_match_review_candidates(top_100_values: Sequence[Sequence[object]]) ->
     return [list(MATCH_REVIEW_HEADERS), *rows]
 
 
+def _validate_match_review_headers(values: Sequence[Sequence[object]]) -> list[str]:
+    """Accept the current or legacy MATCH_REVIEW header set in any column order.
+
+    Rows are read by header name, so the worksheet may order its columns differently from the
+    template (the live tab does). Every header must be nonblank, unique, and known, and the set
+    must be exactly the current template or exactly the pre-tracking-mode template: a partial set
+    of tracking-mode columns is reported as missing columns rather than read as blank.
+    """
+    if not values:
+        raise TargetMasterSchemaError("MATCH_REVIEW has no header row.")
+    headers = ["" if header is None else str(header).strip() for header in values[0]]
+    if all(header == "" for header in headers):
+        raise TargetMasterSchemaError("MATCH_REVIEW has no header row.")
+    details = []
+    blank = [str(position) for position, header in enumerate(headers, start=1) if not header]
+    if blank:
+        details.append(f"blank header in column(s) {', '.join(blank)}")
+    duplicates = sorted({header for header in headers if header and headers.count(header) > 1})
+    if duplicates:
+        details.append(f"duplicate: {', '.join(duplicates)}")
+    unknown = [header for header in headers if header and header not in MATCH_REVIEW_HEADERS]
+    if unknown:
+        details.append(f"unknown: {', '.join(unknown)}")
+    # Any tracking-mode column means the current schema; none means the legacy schema.
+    expected = (
+        MATCH_REVIEW_HEADERS
+        if any(name in headers for name in MATCH_REVIEW_TRACKING_COLUMNS)
+        else LEGACY_MATCH_REVIEW_HEADERS
+    )
+    missing = [name for name in expected if name not in headers]
+    if missing:
+        details.append(f"missing: {', '.join(missing)}")
+    if details:
+        raise TargetMasterSchemaError(
+            "MATCH_REVIEW headers must be the config template columns, in any order "
+            f"({'; '.join(details)})."
+        )
+    return headers
+
+
 def _validate_exact_headers(
     table: str, values: Sequence[Sequence[object]], expected: list[str]
 ) -> list[str]:
+    """Accept only the exact template header, in template order."""
     if not values:
         raise TargetMasterSchemaError(f"{table} has no header row.")
     headers = ["" if header is None else str(header).strip() for header in values[0]]

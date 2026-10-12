@@ -10,6 +10,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent / "src"))
 
+from laptop_tracker.config import Settings
 from laptop_tracker.match_run import (
     MATCH_EVIDENCE_COLUMNS,
     MATCH_RESULT_COLUMNS,
@@ -23,9 +24,10 @@ from laptop_tracker.match_run import (
     result_record,
     write_records,
 )
+from laptop_tracker.sheets_source import SheetsSourceError, read_target_table_values
 from laptop_tracker.target_master import (
     TargetMasterSchemaError,
-    read_target_master_csv,
+    read_table_snapshot_csv,
     validate_target_master,
 )
 
@@ -38,12 +40,20 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
             "Match saved offer observations (OfferObservation.to_full_record() CSV columns) "
-            "against a local TARGET_MASTER CSV snapshot using the five-field exact rule. Writes "
-            "local result, review-queue, and evidence reports and prints counts only. Makes no "
-            "network or Google Sheets calls and never creates targets or mappings."
+            "against TARGET_MASTER using the five-field exact rule. TARGET_MASTER comes from a "
+            "local CSV (a sheet export or check_target_tables.py's validated copy) or, with "
+            "--target-master-from-sheets, from the master sheet tab using the read-only scope. "
+            "Writes local result, review-queue, and evidence reports and prints counts only. "
+            "Never reads raw, never writes to Google Sheets, and never creates targets or mappings."
         )
     )
-    parser.add_argument("--target-master", type=Path, required=True, help="TARGET_MASTER CSV.")
+    source = parser.add_mutually_exclusive_group(required=True)
+    source.add_argument("--target-master", type=Path, help="TARGET_MASTER CSV snapshot.")
+    source.add_argument(
+        "--target-master-from-sheets",
+        action="store_true",
+        help="Read only the TARGET_MASTER tab from the configured spreadsheet (read-only).",
+    )
     parser.add_argument(
         "--observations", type=Path, required=True, help="Offer observation CSV."
     )
@@ -54,6 +64,17 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Directory for local reports (default: data/output, ignored by Git).",
     )
     return parser.parse_args(argv)
+
+
+def load_target_master(args: argparse.Namespace) -> list[list[str]]:
+    if not args.target_master_from_sheets:
+        return read_table_snapshot_csv(args.target_master)
+    values = read_target_table_values(Settings.from_env(), ("TARGET_MASTER",))["TARGET_MASTER"]
+    if values is None:
+        raise SheetsSourceError(
+            "TARGET_MASTER worksheet not found; this command never creates tabs."
+        )
+    return values
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -67,7 +88,8 @@ def main(argv: list[str] | None = None) -> int:
         path.unlink(missing_ok=True)
 
     try:
-        targets = validate_target_master(read_target_master_csv(args.target_master))
+        targets = validate_target_master(load_target_master(args))
+        # Stops here, before any result is produced, unless every TARGET_MASTER row passed.
         matcher = matcher_from_validated(targets)
         observations = read_observations_csv(args.observations)
     except TargetSnapshotError as exc:
@@ -79,6 +101,8 @@ def main(argv: list[str] | None = None) -> int:
     except (
         FileNotFoundError,
         UnicodeDecodeError,
+        ValueError,
+        SheetsSourceError,
         TargetMasterSchemaError,
         ObservationFileError,
     ) as exc:
@@ -103,7 +127,18 @@ def main(argv: list[str] | None = None) -> int:
     # Counts and codes only: offer text and target values stay in the local reports.
     statuses = Counter(result.status.value for _, result in matched)
     reasons = Counter(code for _, result in matched for code in result.reason_codes)
-    print(f"Observations matched: {len(matched)}; targets indexed: {len(targets.valid_rows)}.")
+    print(
+        f"Observations matched: {len(matched)}; CONFIGURATION targets indexed: "
+        f"{matcher.configuration_target_count}; LISTING_ONLY targets excluded from "
+        f"configuration matching: {matcher.excluded_listing_only}."
+    )
+    if matcher.configuration_target_count == 0:
+        print(
+            "TARGET_MASTER has no CONFIGURATION rows, so no offer can match a target; every "
+            "offer is reported UNMATCHED or REVIEW_REQUIRED. LISTING_ONLY rows are never matched "
+            "across retailers.",
+            file=sys.stderr,
+        )
     for status, count in sorted(statuses.items()):
         print(f"  {status}: {count}")
     for code, count in sorted(reasons.items()):

@@ -1,4 +1,4 @@
-"""Approved TARGET_MASTER schema and local, credential-free configuration validator.
+"""Approved TARGET_MASTER schema and local, credential-free catalog validator.
 
 Schema decisions are documented in docs/TARGET_MASTER_SCHEMA.md. Values are never coerced: every
 cell stays the exact string that was read, and comparison-only normalization is used solely to
@@ -10,14 +10,14 @@ from __future__ import annotations
 import csv
 import re
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date
 from pathlib import Path
 from urllib.parse import urlsplit
 
 import pandas as pd
 
-from .normalization import CORE_MATCH_COLUMNS, core_value_key
+from .normalization import CORE_MATCH_COLUMNS, core_value_key, is_blank
 
 
 @dataclass(frozen=True)
@@ -35,6 +35,44 @@ class TargetColumn:
 
 TARGET_ID_PATTERN = r"TGT-[0-9]{6}"
 POSITIVE_INTEGER_PATTERN = r"[1-9][0-9]*"
+
+CONFIGURATION = "CONFIGURATION"
+LISTING_ONLY = "LISTING_ONLY"
+TRACKING_MODES = (CONFIGURATION, LISTING_ONLY)
+# A LISTING_ONLY target is identified by its Shopee listing variation, exactly as text.
+LISTING_IDENTITY_COLUMNS: tuple[str, ...] = ("shop_id", "item_id", "source_model_id")
+LISTING_CLASSIFICATION_COLUMNS: tuple[str, ...] = (
+    "tracking_mode_reason",
+    "classification_evidence",
+)
+# A LISTING_ONLY product has no verifiable model name/code, so these must stay blank.
+LISTING_ONLY_BLANK_COLUMNS: tuple[str, ...] = ("model", "manufacturer_model_code")
+# Placeholder words are not product models; never accept them as one (policy 2026-10-08).
+PLACEHOLDER_MODEL_TEXT = frozenset(
+    {
+        "generic",
+        "unbranded",
+        "no brand",
+        "nobrand",
+        "non-branded",
+        "oem",
+        "none",
+        "n/a",
+        "na",
+        "unknown",
+        "no model",
+        "-",
+    }
+)
+
+
+def effective_tracking_mode(value: object) -> str:
+    """Blank (legacy) means CONFIGURATION; any other text is returned unchanged for checking."""
+    return CONFIGURATION if is_blank(value) else str(value)
+
+
+def is_placeholder_model(value: str) -> bool:
+    return re.sub(r"\s+", " ", value).strip().casefold() in PLACEHOLDER_MODEL_TEXT
 
 # Order is the approved worksheet header order (config/target_master_template.csv).
 TARGET_MASTER_COLUMNS: tuple[TargetColumn, ...] = (
@@ -131,9 +169,54 @@ TARGET_MASTER_COLUMNS: tuple[TargetColumn, ...] = (
         "reviewed_at", False, "Promotion date, if recorded.", format_hint="YYYY-MM-DD", is_date=True
     ),
     TargetColumn("notes", False, "Free-text notes.", free_text=True),
+    # Tracking-mode columns (approved 2026-10-08). They follow `notes` so existing sheet columns
+    # keep their positions; older snapshots without them are read as CONFIGURATION rows.
+    TargetColumn(
+        "tracking_mode",
+        False,
+        "CONFIGURATION or LISTING_ONLY; blank means CONFIGURATION (legacy rows).",
+        allowed=TRACKING_MODES,
+    ),
+    TargetColumn(
+        "shop_id", False, "LISTING_ONLY: Shopee shop ID, kept as text.", r"[0-9]+", "digits only"
+    ),
+    TargetColumn(
+        "item_id", False, "LISTING_ONLY: Shopee item ID, kept as text.", r"[0-9]+", "digits only"
+    ),
+    TargetColumn(
+        "source_model_id",
+        False,
+        "LISTING_ONLY: Shopee variation/model ID, kept as text.",
+        r"[0-9]+",
+        "digits only",
+    ),
+    TargetColumn(
+        "tracking_mode_reason",
+        False,
+        "LISTING_ONLY: why no verifiable product model name/code exists.",
+        free_text=True,
+    ),
+    TargetColumn(
+        "classification_evidence",
+        False,
+        "LISTING_ONLY: evidence supporting the classification (what was checked).",
+        free_text=True,
+    ),
 )
 
 TARGET_MASTER_HEADERS = [column.name for column in TARGET_MASTER_COLUMNS]
+TRACKING_MODE_COLUMNS: tuple[str, ...] = (
+    "tracking_mode",
+    "shop_id",
+    "item_id",
+    "source_model_id",
+    "tracking_mode_reason",
+    "classification_evidence",
+)
+# Header order of every TARGET_MASTER snapshot made before tracking modes existed.
+LEGACY_TARGET_MASTER_HEADERS = [
+    name for name in TARGET_MASTER_HEADERS if name not in TRACKING_MODE_COLUMNS
+]
 REQUIRED_TARGET_COLUMNS = [column.name for column in TARGET_MASTER_COLUMNS if column.required]
 TARGET_PRODUCT_REQUIRED_COLUMNS = [
     column.name
@@ -254,8 +337,13 @@ def validate_target_master(
 
     for record in records:
         row_number = int(record["source_row_number"])  # type: ignore[arg-type]
+        mode = effective_tracking_mode(record["tracking_mode"])
         for column in TARGET_MASTER_COLUMNS:
+            if mode == LISTING_ONLY and column.name in CORE_MATCH_COLUMNS:
+                # Listing-only products keep unavailable specifications blank.
+                column = replace(column, required=False)
             check_cell(row_number, column, str(record[column.name]), add_error)
+        check_tracking_mode(row_number, record, add_error, configuration_allows_listing=False)
 
     _add_duplicate_errors(
         records,
@@ -265,12 +353,17 @@ def validate_target_master(
         "target_id is not unique (case-insensitive)",
         add_error,
     )
+    # Only CONFIGURATION rows share the five-field key; listing-only rows never take part.
     _add_duplicate_errors(
-        records,
+        [r for r in records if effective_tracking_mode(r["tracking_mode"]) == CONFIGURATION],
         list(identity_columns),
         "configuration_identity",
         "DUPLICATE_CONFIGURATION",
         "Configuration identity (" + ", ".join(identity_columns) + ") is not unique",
+        add_error,
+    )
+    _add_listing_duplicate_errors(
+        [r for r in records if effective_tracking_mode(r["tracking_mode"]) == LISTING_ONLY],
         add_error,
     )
 
@@ -290,7 +383,7 @@ def validate_target_master(
                     "column_name": "",
                     "raw_value": "",
                     "error_code": "NO_DATA_ROWS",
-                    "error_message": "TARGET_MASTER has headers but no configuration rows.",
+                    "error_message": "TARGET_MASTER has headers but no data rows.",
                 }
             ],
             columns=TARGET_ERROR_COLUMNS,
@@ -402,6 +495,96 @@ def _add_duplicate_errors(
             add_error(row_number, column_label, "", code, f"{message}; also on row(s) {others}.")
 
 
+def check_tracking_mode(
+    row_number: int,
+    record: dict[str, object],
+    add_error,
+    *,
+    configuration_allows_listing: bool,
+) -> None:
+    """Mode-specific requirements and contradictions for one TARGET_MASTER or review record.
+
+    CONFIGURATION: a placeholder such as "Generic" is never a model. In TARGET_MASTER the listing
+    identity columns must be blank, because source listings link through SOURCE_MODEL_MAP;
+    review candidates (``configuration_allows_listing=True``) may keep them as trace evidence.
+    LISTING_ONLY: listing identity, reason, and evidence are required, and model fields must stay
+    blank. A blank model alone never makes a record LISTING_ONLY. Unknown modes are reported by
+    the cell check and skipped here.
+    """
+    mode = effective_tracking_mode(record.get("tracking_mode"))
+
+    def value(name: str) -> str:
+        return str(record.get(name, ""))
+
+    if mode == CONFIGURATION:
+        model = value("model")
+        if model.strip() and is_placeholder_model(model):
+            add_error(
+                row_number,
+                "model",
+                model,
+                "PLACEHOLDER_MODEL",
+                "model is a placeholder, not a verified product model; research it or classify "
+                "the product as LISTING_ONLY with evidence.",
+            )
+        if not configuration_allows_listing:
+            for name in LISTING_IDENTITY_COLUMNS:
+                if value(name).strip():
+                    add_error(
+                        row_number,
+                        name,
+                        value(name),
+                        "CONTRADICTORY_TRACKING_MODE",
+                        f"{name} must be blank for CONFIGURATION targets; link source listings "
+                        "in SOURCE_MODEL_MAP.",
+                    )
+    elif mode == LISTING_ONLY:
+        for name in (*LISTING_IDENTITY_COLUMNS, *LISTING_CLASSIFICATION_COLUMNS):
+            if not value(name).strip():
+                add_error(
+                    row_number, name, "", "MISSING_VALUE", f"{name} is required for LISTING_ONLY."
+                )
+        for name in LISTING_ONLY_BLANK_COLUMNS:
+            if value(name).strip():
+                add_error(
+                    row_number,
+                    name,
+                    value(name),
+                    "CONTRADICTORY_TRACKING_MODE",
+                    f"{name} must be blank for LISTING_ONLY; a verified model means CONFIGURATION.",
+                )
+
+
+def _add_listing_duplicate_errors(records: list[dict[str, object]], add_error) -> None:
+    """Flag LISTING_ONLY rows sharing a source_model_id, exactly as text.
+
+    Rows with the same shop_id, item_id, and source_model_id are DUPLICATE_LISTING; the same
+    source_model_id with a different shop or item is CONFLICTING_LISTING_IDENTITY. No row is
+    chosen over another.
+    """
+    groups: dict[str, list[dict[str, object]]] = {}
+    for record in records:
+        source_id = str(record["source_model_id"])
+        if source_id.strip():
+            groups.setdefault(source_id, []).append(record)
+    for group in groups.values():
+        if len(group) < 2:
+            continue
+        identities = {tuple(str(r[name]) for name in LISTING_IDENTITY_COLUMNS) for r in group}
+        code = "DUPLICATE_LISTING" if len(identities) == 1 else "CONFLICTING_LISTING_IDENTITY"
+        numbers = [int(r["source_row_number"]) for r in group]  # type: ignore[arg-type]
+        for number in numbers:
+            others = ";".join(str(other) for other in numbers if other != number)
+            add_error(
+                number,
+                "listing_identity",
+                "",
+                code,
+                f"LISTING_ONLY source_model_id is used by more than one target; also on row(s) "
+                f"{others}.",
+            )
+
+
 def _identity_key(column: str, value: str) -> object:
     """Core fields use the matcher's comparison key, so ``14`` and ``14.0`` collide here too."""
     if column in CORE_MATCH_COLUMNS:
@@ -416,3 +599,16 @@ def read_target_master_csv(path: str | Path) -> list[list[str]]:
     """Read a local CSV as exact strings (no type inference); a UTF-8 BOM is tolerated."""
     with Path(path).open(newline="", encoding="utf-8-sig") as handle:
         return [list(row) for row in csv.reader(handle)]
+
+
+def read_table_snapshot_csv(path: str | Path) -> list[list[str]]:
+    """Read a Phase 5 table snapshot: a sheet export or a ``*_validated.csv`` copy.
+
+    Validated copies written by ``check_target_tables.py``/``check_target_master.py`` start with
+    a ``source_row_number`` column, which is dropped so the table validators see the template
+    headers. The remaining cells are kept as exact strings and are validated again by the caller.
+    """
+    values = read_target_master_csv(path)
+    if values and values[0] and values[0][0].strip() == "source_row_number":
+        return [row[1:] for row in values]
+    return values
