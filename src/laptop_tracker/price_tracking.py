@@ -112,7 +112,7 @@ COMPARISON_COLUMNS: tuple[str, ...] = (
     "Shopee_GMV_Period",
     "Shopee_Sales_Run_ID",
     "Currency",
-    *PRICE_COLUMNS,
+    *(column for code, _ in RETAILERS for column in (f"{code}_Price", f"{code}_Offer_URL")),
     *PRICE_STATUS_COLUMNS,
     "Comparable_Retailer_Count",
     "Lowest_Price",
@@ -690,6 +690,8 @@ class Selection:
     not_comparable_reasons: str
     review_required: int
     stale: ObservationView | None
+    # Latest exact offer in this week, retained for rechecking even with no comparable price.
+    observed: ObservationView | None = None
 
 
 def select_week(
@@ -756,6 +758,7 @@ def select_week(
                 ),
                 review_required=review[key],
                 stale=None if comparable else earlier.get(key),
+                observed=_latest(offers) if offers else None,
             )
     return selections
 
@@ -945,6 +948,8 @@ def _comparison_row(
         selection = selections[(item.target_id, code)]
         chosen = selection.chosen
         row[f"{code}_Price"] = chosen.stored.price_text if chosen else ""
+        linked_offer = chosen or selection.observed
+        row[f"{code}_Offer_URL"] = linked_offer.stored.offer_url if linked_offer else ""
         row[f"{code}_Price_Status"] = selection.status
         if chosen:
             prices[code] = chosen.stored.price
