@@ -57,4 +57,12 @@ Dates are recorded as **Date not recorded** when the repository or project conte
   - **Expected target.** A hint only. Outcomes are labelled `AS_EXPECTED`, `DIFFERENT_TARGET`, or `NOT_EXACT`, and the last two go to review.
   - **Exit codes.** `0` success or preview, `2` partial success, `1` failure. A run with no valid observation stores nothing.
   - **Run directories.** A new directory per run that is never reused. Collected observations go to `data/history/price_history.sqlite3` unless `--store` is given.
+- Pilot Sheets publication, 2026-10-12. The owner authorized a manual publisher and the first publication of the seven-configuration pilot to four dedicated tabs. Implementation defaults (not owner decisions):
+  - **Destination.** An exact four-tab allowlist; existing tabs with foreign content are refused.
+  - **Content.** Full content replacement per publication. Run-log rows are keyed by a publication ID derived from input fingerprints, so a repeat updates its row and attempt count.
+  - **Cell encoding.** Literal string values, PHP currency numbers, and cell links on full URL text (no formulas).
+  - **Links.** Comparison links come only from the selected offer or the current-week exact offer. History and review show non-exact pages as unlinked text.
+  - **Status.** `SUCCESS` only after a full readback.
+  - **Backups.** Local backups of existing publisher tabs replace the legacy whole-spreadsheet copy, because the Sheets-only service account cannot copy files.
+  - **Timeouts.** HTTP (15 s connect, 90 s read/send) per request.
 - New decisions should be added to this log with their actual decision date. Do not infer dates from file timestamps or this documentation date.

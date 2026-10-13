@@ -209,6 +209,21 @@ Factory product page was checked live on 2026-10-12. The broader multi-retailer,
 and scheduled automation are separate work. See
 [docs/SETUP_AND_OPERATIONS.md](docs/SETUP_AND_OPERATIONS.md#manual-online-collection-and-matching).
 
+```bash
+python publish_prices.py --preview --report-dir <reviewed report folder> --pilot-scope <scope.csv>
+python publish_prices.py --write-sheets --report-dir <reviewed report folder> --pilot-scope <scope.csv>
+```
+
+`publish_prices.py` publishes **reviewed** pilot reports to four dedicated tabs of the configured
+spreadsheet: `PILOT_PRICE_COMPARISON` (prices with clickable retailer links), `PILOT_PRICE_HISTORY`,
+`PILOT_PRICE_REVIEW`, and `PILOT_PRICE_RUN_LOG`. It validates every input before any Sheets
+access. Preview is read-only. A write backs up existing pilot tabs locally, replaces their content
+(so repeats never duplicate rows), and reports `SUCCESS` only after a full cell readback. It never
+collects, rematches, or touches the history store, `raw`, the catalog, or other tabs. The first
+seven-configuration pilot cycle was published on 2026-10-12. See
+[docs/SETUP_AND_OPERATIONS.md](docs/SETUP_AND_OPERATIONS.md#publishing-pilot-results-to-google-sheets-phase-10-manual)
+and [docs/PHASE_10_PILOT.md](docs/PHASE_10_PILOT.md).
+
 `audit_verified_top_100.py` independently checks a run: unique targets, ACTIVE `CONFIGURATION`
 status, complete identities, valid contributors, totals, deterministic order, and the catalog
 version used. See [docs/TARGET_MASTER_SCHEMA.md](docs/TARGET_MASTER_SCHEMA.md#top-100-verified-configurations-2026-10-12).
@@ -256,13 +271,14 @@ The latest live dry run took 57.49 seconds and did not write to any Google Sheet
 - [Sheet migration for tracking modes](docs/SHEET_MIGRATION_TRACKING_MODES.md)
 - [Sheet migration for model/CPU conventions](docs/SHEET_MIGRATION_MODEL_CPU_CONVENTIONS.md)
 - [Price tracking output schema](docs/PRICE_TRACKING_OUTPUT_SCHEMA.md)
+- [Phase 10 pilot runbook](docs/PHASE_10_PILOT.md)
 
 ## Local verification
 
 ```bash
 python -m pytest -q
 python -m ruff check .
-python -m compileall src run_phase1.py smoke_test.py check_target_master.py check_target_tables.py seed_match_review.py match_offers.py audit_top_100_coverage.py propose_catalog_conventions.py build_verified_top_100.py audit_verified_top_100.py track_prices.py collect_and_match.py
+python -m compileall src run_phase1.py smoke_test.py check_target_master.py check_target_tables.py seed_match_review.py match_offers.py audit_top_100_coverage.py propose_catalog_conventions.py build_verified_top_100.py audit_verified_top_100.py track_prices.py collect_and_match.py publish_prices.py
 python smoke_test.py
 python run_phase1.py --dry-run
 ```

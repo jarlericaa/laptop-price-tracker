@@ -65,6 +65,7 @@ SKIP_FRESHNESS_CHECK=false
 - **`raw`:** Production source of truth. It must remain read-only for this pipeline.
 - **`TARGET_MASTER`:** Master copy of approved configurations. Its header matches `config/target_master_template.csv`; on 2026-10-12 it held 205 targets (193 `CONFIGURATION`, 12 `LISTING_ONLY`).
 - **`SOURCE_MODEL_MAP` and `MATCH_REVIEW`:** Supporting Phase 5 tabs, with 360 mappings and 5,154 review rows on 2026-10-12. Their headers match the `config/` templates (`MATCH_REVIEW` may use any column order). `check_target_tables.py --from-sheets` reads these tabs but never creates or changes them.
+- **`PILOT_PRICE_COMPARISON`, `PILOT_PRICE_HISTORY`, `PILOT_PRICE_REVIEW`, `PILOT_PRICE_RUN_LOG`:** Phase 10 pilot outputs, created and written only by `publish_prices.py --write-sheets` (first published 2026-10-12). See [Publishing pilot results](#publishing-pilot-results-to-google-sheets-phase-10-manual).
 - **`P1_TOP_100_CONFIGURATIONS`:** The published **Top 100 verified configurations** working list (owner publication, 2026-10-12; header in row 10, data in A11:U110). No repository command writes this tab.
 - **`P1_*` outputs:** The user reported that all nine approved output tabs were created header-only and verified in the real spreadsheet on 2026-09-29. A separate synthetic writer test completed, and a user-provided read-only report confirmed all nine test tabs and headers, one synthetic laptop in the target outputs, the charger in excluded listings, and a run-log `top_100_count` of 1. The report did not list or inspect `raw`.
 - **Eligibility and duplicate decisions:** Current run inputs are local CSV files under `config/`. The remote `P1_ELIGIBILITY_DECISIONS` tab is preserved/merged by the optional writer but is not loaded into current-run classification.
@@ -145,9 +146,13 @@ The command:
 - The console shows counts only. Reports and the store contain business data and stay Git-ignored.
 - Rerunning is safe. To start a history from scratch, move the store file aside; never edit it, because the tables are append-only by design.
 
-Policies, identities, and file columns are in [PRICE_TRACKING_OUTPUT_SCHEMA.md](PRICE_TRACKING_OUTPUT_SCHEMA.md#phase-9-implementation-2026-10-12). A supervised collector can call `persist_scrape_results()` from `laptop_tracker.observation_store` to store `scrape()` results directly; no such collector or schedule exists yet.
+Policies, identities, and file columns are in [PRICE_TRACKING_OUTPUT_SCHEMA.md](PRICE_TRACKING_OUTPUT_SCHEMA.md#phase-9-implementation-2026-10-12). A supervised collector can call `persist_scrape_results()` from `laptop_tracker.observation_store` to store `scrape()` results directly; the manual `collect_and_match.py` collector is implemented; no schedule exists.
 
 ## Manual online collection and matching
+
+Phase 10 started on 2026-10-12 with seven verified configurations at Laptop Factory. The first
+cycle yielded seven expected exact matches, three comparable prices and four stock exclusions.
+See [PHASE_10_PILOT.md](PHASE_10_PILOT.md) for scope, artifacts, subsequent cycles and acceptance gates.
 
 This is a manual, supervised path for a short list of known product pages. It is not the
 multi-retailer, multi-week pilot and has no schedule.
@@ -210,6 +215,71 @@ DataBlitz, PC Express, and Octagon pages have no model label, so their observati
 used a separate store (`data/history/smoke/`) and run directory
 (`data/output/collection_runs/smoke_lf_2026-10-12/`). Results are in
 [PROGRESS_LOG.md](PROGRESS_LOG.md).
+
+## Publishing pilot results to Google Sheets (Phase 10, manual)
+
+`publish_prices.py` publishes **reviewed, saved** `track_prices.py` reports for the authorized pilot
+configurations. It is separate from the legacy `run_phase1.py --write-sheets` writer and runs only
+when an operator starts it.
+
+```bash
+python publish_prices.py --preview \
+  --report-dir data/output/phase10_2026-10-12/cycle_01/with_retailer_links \
+  --pilot-scope data/collection/phase10_2026-10-12/pilot_scope.csv
+python publish_prices.py --write-sheets \
+  --report-dir data/output/phase10_2026-10-12/cycle_01/with_retailer_links \
+  --pilot-scope data/collection/phase10_2026-10-12/pilot_scope.csv
+```
+
+- **Inputs.** The report folder must hold `weekly_price_comparison.csv` (with the
+  `<code>_Offer_URL` columns), `weekly_price_selections.csv`, `price_history.csv`,
+  `price_review_queue.csv`, and `price_tracking_run_summary.json`. Collection evidence defaults to
+  `<report-dir>/../collection` (`--collection-dir`). The verified selected list is the input file
+  whose SHA-256 the summary recorded (`--selected-list` overrides it).
+- **Validation before any Sheets access.** The checks are:
+  - unique, well-formed scope IDs that are in the reviewed selected list, with rank and five-field
+    identity agreeing between the scope, the report, and the list;
+  - one week and cutoff across the reports;
+  - every comparison price is the in-week, exact, PHP offer recorded in the selections file, and
+    its link is that offer;
+  - a blank price has no invented link: only a current-week exact offer may supply a fallback
+    link (for example, out of stock);
+  - the lowest price and retailers agree with the retailer prices;
+  - history stays within the cutoff, and collected observations are present in the history.
+
+  Any issue stops the run and lists every problem.
+- **Destination.** Exactly four tabs in the configured spreadsheet: `PILOT_PRICE_COMPARISON`,
+  `PILOT_PRICE_HISTORY`, `PILOT_PRICE_REVIEW`, `PILOT_PRICE_RUN_LOG`. Names are matched exactly.
+  Every write request is checked against those tabs' sheet IDs and allowed operations. An existing
+  destination tab whose header was not written by this publisher is refused. `raw`, the catalog
+  tabs, `P1_TOP_100_CONFIGURATIONS`, and the `P1_*` outputs are never read or written.
+- **Preview** uses the read-only scope. It prints the reporting week, cutoff, Shopee sales-period
+  label, scope and outcome counts, and each destination tab's current state and planned rows. It
+  makes no Sheet mutation.
+- **Write** uses the write scope:
+  1. Saves a local JSON backup of every existing, non-empty publisher tab.
+  2. Creates missing publisher tabs.
+  3. Writes an `IN_PROGRESS` run-log row, then replaces each data tab's values, number formats,
+     links, and bold. Other destination formatting is kept. It adds a frozen header row and a
+     filter.
+  4. Reads every cell back and compares values, links, and PHP formats, and checks that no stray
+     cells remain.
+  5. Updates the run-log row to `SUCCESS`, `READBACK_FAILED`, or `PARTIAL_FAILURE`.
+
+  Only `SUCCESS` exits with `0`. Text is sent as literal strings, never formulas. Prices are
+  numbers formatted as PHP. Links are cell links on the full URL text, so variant parameters stay
+  intact.
+- **Repeats** replace the four tabs' content and update the same run-log row (keyed by a
+  publication ID derived from the input fingerprints; its attempt count increases), so history is
+  never duplicated. The observation store is not opened.
+- **Recovery.** A failure part-way records which tabs were written, in the run log and in
+  `data/output/sheet_publications/<UTC time>_write/publication_report.json`. Fix the cause and
+  rerun the same command; it replaces all four tabs. Each request has an HTTP timeout, so a
+  stalled network call fails rather than hangs.
+- **Backups.** The legacy writer's rule is a separate copy of the whole spreadsheet. The service
+  account has only the Sheets scope, and copying a spreadsheet needs Drive access. The publisher
+  therefore backs up its own existing tabs locally before replacing them. Make a whole-spreadsheet
+  copy manually before a publication if the owner wants one.
 
 ## Offline scraping framework and adapter tests (overall Phases 6-7)
 
@@ -288,6 +358,8 @@ This reads the same raw source, completes local processing first, then requests 
 | `track_prices.py` reports observations that "contradict stored records" | The file repeats an observation identity (same offer and retrieval time) with different content. Nothing from the file was stored. Investigate the source of the file; never edit the store to force it in. |
 | `collect_and_match.py` stops "before any retailer request" | The catalog, selected list, ledger, or manifest failed validation. The message lists rows, fields, and codes; fix the manifest or rerun the catalog checks. Nothing was sent or stored. |
 | `collect_and_match.py` exits with 2 or 1 | Partial success or failure. Read `request_failures.csv`; retry only the failed rows in a new manifest and run. |
+| `publish_prices.py` stops "before any Sheets access" | A report, the scope, or the selected list is inconsistent. Fix or regenerate the reviewed reports; never edit published values by hand to make them pass. |
+| `publish_prices.py` reports `PARTIAL_FAILURE` or `READBACK_FAILED` | Read `publication_report.json` (tabs written, readback issues, error). Rerun the same `--write-sheets` command after fixing the cause; it replaces all four pilot tabs. |
 | Pipeline appears slow | Unit aggregation performance does not represent total runtime. Time each processing stage on a safe local-only run before changing the implementation. |
 | Write-enabled run does not create outputs | Check for a pipeline safety failure first; unresolved conflicts stop before Sheets writes. Confirm service-account Editor access only for the intended test spreadsheet. |
 

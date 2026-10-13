@@ -76,6 +76,39 @@ This is an **offline** implementation. It reads saved observations, the validate
 | `PCC` | PC Central | `pcc` |
 | `OCT` | Octagon | `oct` |
 
+### Retailer links for rechecking
+
+Each weekly comparison price is followed by its retailer product link (`DBZ_Offer_URL`,
+`LF_Offer_URL`, `PCX_Offer_URL`, `PCC_Offer_URL`, `OCT_Offer_URL`). If a price is selected,
+its link points to the exact offer that supplied that price. If no price is comparable but
+an exact matched offer was observed in that report week, the link points to the latest such
+offer, including out-of-stock offers; the price remains blank with its existing status.
+No link is assigned from an uncertain candidate or carried forward from an older week.
+Full URLs, including selected retailer variant parameters, are preserved. Historical/review
+files retain their original `offer_url` columns. The CSV stores literal URLs for Sheets import;
+no formula is needed to recheck the product page.
+
+### Pilot Sheets tabs (`publish_prices.py`, Phase 10, manual)
+
+Published from reviewed reports for the authorized pilot scope only. Every publication replaces
+the tabs' content. Text is literal (never a formula), IDs are text, prices are numbers formatted
+as PHP, and links are cell links on the full URL.
+
+| Tab | One row per | Columns |
+|---|---|---|
+| `PILOT_PRICE_COMPARISON` | Pilot configuration (verified-list order) | Rank, target ID, brand, series, model, screen (in), CPU family, RAM (GB), storage (GB). For each retailer (DataBlitz, Laptop Factory, PC Express, PC Central, Octagon): price (PHP), product link, status. Then the lowest comparable price, lowest-price retailer(s), comparable retailers, reporting week, week status, and report cutoff (Asia/Singapore). |
+| `PILOT_PRICE_HISTORY` | Observation of a pilot target, or a non-exact observation naming a pilot candidate | Week, retrieval time (Asia/Singapore and UTC), rank, target ID (exact matches only), candidate target(s) (non-exact only), model, retailer, product link (exact only), observed page (non-exact, unlinked), observed and regular price, price type, availability, bundle flag, match status and reasons, outcome, comparison status and reasons, change against the previous comparable observation, latest-for-offer flag, observation ID. |
+| `PILOT_PRICE_REVIEW` | Pilot review item | Category (`Matching problem` or `Matched, excluded from comparison`), review reason, details, week, retrieval time, rank and target ID (exact only) or candidates, retailer, product link or unconfirmed page, observed price, availability, match and comparison statuses and reasons, observation ID. |
+| `PILOT_PRICE_RUN_LOG` | Publication (keyed by publication ID; a repeat updates its row and attempt count) | Status, first and last publication time, reporting week and status, report cutoff, collection start and finish, scope and outcome counts, Shopee sales-period label and run ID, tabs written, readback result, notes, report folder, selected-list, catalog, matching-context, input, and published-content fingerprints, publisher version. |
+
+Comparison status text:
+- `Comparable price` (`SELECTED`)
+- `Matched, not comparable: <reasons>` (`NO_COMPARABLE_OFFER`, for example out of stock)
+- `Needs match review (no price)` (`REVIEW_REQUIRED_ONLY`)
+- `Not observed this week` (`NO_OBSERVATION_IN_WEEK`)
+
+Price cells without a comparable price have no value at all.
+
 ### Observation store (`data/history/price_history.sqlite3`, Git-ignored)
 
 - **Identity.** `observation_id` = SHA-256 of `retailer_id`, `offer_url`, `offer_index`, and `retrieved_at` (UTC, microseconds). `offer_key` = SHA-256 of the first three. Importing the same record again is a duplicate and is counted, not stored. A later retrieval is a new observation even when nothing else changed. The same identity with different content (price, availability, bundle flag, page hash, and so on) is a **conflict**: the whole batch is refused and nothing from it is written.
@@ -88,7 +121,7 @@ This is an **offline** implementation. It reads saved observations, the validate
 
 | File | Rows | Contents |
 |---|---|---|
-| `weekly_price_comparison.csv` | One per selected configuration, including those with no price | Week fields, `rank`, `target_id`, the requested product fields, Shopee source summary, `Currency`, `DBZ_Price`, `LF_Price`, `PCX_Price`, `PCC_Price`, `OCT_Price`, a `<code>_Price_Status` per retailer, `Comparable_Retailer_Count`, `Lowest_Price`, `Lowest_Price_Retailers`, matching context, and selected-list SHA-256. |
+| `weekly_price_comparison.csv` | One per selected configuration, including those with no price | Week fields, `rank`, `target_id`, the requested product fields, Shopee source summary, `Currency`, `DBZ_Price`, `LF_Price`, `PCX_Price`, `PCC_Price`, `OCT_Price`, each followed by its `<code>_Offer_URL`, a `<code>_Price_Status` per retailer, `Comparable_Retailer_Count`, `Lowest_Price`, `Lowest_Price_Retailers`, matching context, and selected-list SHA-256. |
 | `weekly_price_selections.csv` | One per selected configuration and retailer | The chosen observation's price, price type, regular/sale price, offer URL and index, retailer product ID/SKU, retrieval time (UTC and Asia/Singapore), observation ID, offer key, selection reason, comparable/tied/observed offer counts, not-comparable reason counts, review-required count, stale reference, adapter version, and page SHA-256. |
 | `weekly_price_series.csv` | One per selected configuration, retailer, and week in the history range | Weekly price status and price, representative offer, previous week's status and price, change, change status, and `representative_offer_changed`. |
 | `price_history.csv` | One per stored observation in the history window | Offer identity, retrieval time, report week, prices, availability, bundle flag, match status and reasons, selected-list membership, comparability status and reasons, `latest_for_offer_in_week`, previous comparable observation and price change, adapter version, page SHA-256, import batch, matching context, catalog SHA-256, and rule version. |
