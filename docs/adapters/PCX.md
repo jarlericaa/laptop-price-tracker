@@ -1,6 +1,6 @@
 # PC Express (PCX) Adapter
 
-**Status:** Adapter implemented and tested offline on 2026-10-01 (`adapter_version = "pcx-1"`). **Live use is enabled** (`live_use_approved = True`) by the explicit project-owner PCX decision in [DECISIONS.md](../DECISIONS.md). PC Express's published terms restrict automated collection without express written consent; the external-policy finding remains **RESTRICTED**, and no written consent is recorded. A user-reported live check returned one in-stock Acer Aspire Lite offer; its offer URL appeared as a Markdown link in the reported output. A controlled live check on 2026-10-01 of the reviewed HP 14 laptop page printed `repr(offer.offer_url)` as the bare `'https://pcx.com.ph/products/…'` string (a `str`, equal to the requested and final URLs). See [PROGRESS_LOG.md](../PROGRESS_LOG.md#phase-7-live-follow-up-checks-2026-10-01). Adapter maintainer: Jarelle Ricaforte.
+**Status:** Adapter implemented and tested offline on 2026-10-01 (now `adapter_version = "pcx-2"` since 2026-10-13; scoped evidence below). **Live use is enabled** (`live_use_approved = True`) by the explicit project-owner PCX decision in [DECISIONS.md](../DECISIONS.md). PC Express's published terms restrict automated collection without express written consent; the external-policy finding remains **RESTRICTED**, and no written consent is recorded. A user-reported live check returned one in-stock Acer Aspire Lite offer; its offer URL appeared as a Markdown link in the reported output. A controlled live check on 2026-10-01 of the reviewed HP 14 laptop page printed `repr(offer.offer_url)` as the bare `'https://pcx.com.ph/products/…'` string (a `str`, equal to the requested and final URLs). See [PROGRESS_LOG.md](../PROGRESS_LOG.md#phase-7-live-follow-up-checks-2026-10-01). Adapter maintainer: Jarelle Ricaforte.
 
 | Item | Value |
 |---|---|
@@ -92,6 +92,23 @@ Otherwise the result is `UNKNOWN` with `signals conflict` in the evidence. That 
 
 **Not inferred.** CPU, RAM, refresh rate, and other specifications are kept only as the page's raw text. A missing row stays missing. No `target_id` is assigned.
 
+## Scoped evidence (`pcx-2`, 2026-10-13)
+
+Prices, availability, URLs, `retailer_sku`, `manufacturer_part_number` (still blank when `mpn`
+repeats the SKU), and raw specification rows are unchanged from `pcx-1`. `pcx-2` records
+`IDENTIFIER` scoped evidence so a reviewer can tell the identifier roles apart:
+
+- per JSON-LD Product block: `sku`, `mpn`, `productID`, `gtin`, `gtin13` (a blank value is
+  recorded as `(blank)`), and each Offer's `sku` / `mpn`;
+- the visible SKU, the form's `product-id`, and the form's variant `id`.
+
+These are retailer SKUs, barcodes, and product/variant IDs. The extractor reports
+`MPN_REPEATS_RETAILER_SKU` when an `mpn` equals a SKU (reviewed 2026-10-13: one block repeats
+`LT-ASUS-000261`, another leaves `mpn` blank). A manufacturer-looking code in the title (for
+example `90NB1672-M00DD0`) is not read by the adapter or extractor; offline discovery lists it only
+as an unverified search token. The four extracted core fields (screen, CPU `Core 5` — never
+`Core i5` — RAM, storage) are unchanged, and `model` stays missing.
+
 ## Versioning and maintenance
 
 - Bump `adapter_version` (`pcx-1` → `pcx-2` and so on) whenever parsing rules or assumptions change. Every observation records the version in `source.adapter_version`.
@@ -109,4 +126,4 @@ Otherwise the result is `UNKNOWN` with `signals conflict` in the evidence. That 
 - Categories include PC Express merchandising collections ("Active", "Fees products", "Website Sale", "New Products"); they are raw retailer data.
 - Bundle detection is keyword based. It can over-flag, for example the reviewed monitor's title ("Portable USB Monitor") is flagged for `MONITOR`. It can also under-flag freebies named with other words.
 - Robots.txt and Shopify's platform comments point agents to UCP/MCP catalog endpoints; no adapter for those exists, and using them would need its own review.
-- Collection, search, and collection-scoped product pages are not parsed, and no crawling or discovery exists.
+- The adapter parses product pages only. Search is handled separately by `discover_products.py` (bounded, manual runs; see [SETUP_AND_OPERATIONS.md](../SETUP_AND_OPERATIONS.md#automatic-product-discovery-phase-10-manual-runs)); collection and category pages are not crawled.

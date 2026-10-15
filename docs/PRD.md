@@ -178,3 +178,11 @@ The planned downstream product and comparison fields are recorded in [PRICE_TRAC
 - The optional remote eligibility-decision tab is not read into the same run's classification.
 - No scheduled retailer collection, supervised collector, Playwright dependency, GitHub Actions workflow, or production output-tab setup exists in the repository. The exact matcher and the Phase 9 observation store, comparisons, and history run only offline on saved CSV snapshots.
 - Future work should work the review-priority queue, persist supervised retailer observations, add price-history outputs, run controlled pilot tests, and then plan scheduled operations.
+
+### Displayed-price comparison clarification (2026-10-13)
+
+The owner approves OUT_OF_STOCK displayed prices in exact configuration comparisons. Stock
+status stays visible so price comparison and current availability remain separate information.
+All five-field matching, currency, price-type and missing-price conditions still apply.
+Owner update (2026-10-15): confirmed bundle prices participate with a visible bundle-offer note,
+including both lowest observed and lowest in-stock; unchecked bundle status stays excluded.

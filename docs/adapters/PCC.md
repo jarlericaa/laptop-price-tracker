@@ -1,6 +1,6 @@
 # PC Central (PCC) Adapter
 
-**Status:** Adapter implemented and tested offline on 2026-10-01 (`adapter_version = "pcc-1"`). **Live use is enabled** (`live_use_approved = True`) under the project-wide owner decision in [DECISIONS.md](../DECISIONS.md). PC Central's published pages neither grant nor prohibit automated collection, so the external-policy finding is **UNKNOWN**. No retailer permission is recorded. A bare-URL live check fetched the page and failed safely with `AMBIGUOUS_VARIANT`; a selected-variant check returned one in-stock ASUS VivoBook offer at PHP 36,999.00. See [PROGRESS_LOG.md](../PROGRESS_LOG.md#pcc-live-smoke-checks-2026-10-01). Adapter maintainer: Jarelle Ricaforte.
+**Status:** Adapter implemented and tested offline on 2026-10-01 (now `adapter_version = "pcc-4"` since 2026-10-15; scoped evidence and span layout below). **Live use is enabled** (`live_use_approved = True`) under the project-wide owner decision in [DECISIONS.md](../DECISIONS.md). PC Central's published pages neither grant nor prohibit automated collection, so the external-policy finding is **UNKNOWN**. No retailer permission is recorded. A bare-URL live check fetched the page and failed safely with `AMBIGUOUS_VARIANT`; a selected-variant check returned one in-stock ASUS VivoBook offer at PHP 36,999.00. See [PROGRESS_LOG.md](../PROGRESS_LOG.md#pcc-live-smoke-checks-2026-10-01). Adapter maintainer: Jarelle Ricaforte.
 
 | Item | Value |
 |---|---|
@@ -130,6 +130,50 @@ Otherwise the result is `UNKNOWN` with `signals conflict` in the evidence. That 
 
 **Not inferred.** CPU, RAM, refresh rate, and other specifications are kept only as the page's raw text. The page title can disagree with the selected variant. For example, a title says "8GB" while the selected variant is "16GB (2x8) DDR4 RAM"; both are kept as shown. A missing row stays missing. Description text keeps the retailer's characters, including `?` where the reviewed page has lost `™`. No `target_id` is assigned.
 
+## Scoped evidence and selected-variant binding (`pcc-2`, 2026-10-13)
+
+Prices, availability (hidden "Variant sold out or unavailable" labels and hidden badges are still
+ignored; a compare-at price below the price is still `REGULAR`, not `SALE`), URLs, raw
+specification rows, and the raw shared description are unchanged from `pcc-1`. `pcc-2` adds:
+
+- **`SELECTED_VARIANT`.** On a multi-variant page the adapter records `binding status:
+  CONFIRMED`, the `variant id`, and one row per option (`RAM: 16GB (2x8) DDR4 RAM`,
+  `SSD: 512GB SDD`) only when the requested variant is the form's variant and every checked
+  option control and any selected `<option>` agree with that variant's own option values
+  (`options`, or `option1`…`option3`) in the variant data. Otherwise it records one
+  `binding status: NOT_CONFIRMED: <reason>` row (no checked control, an option checked twice,
+  checked values that differ from the variant data, a selected `<option>` naming another
+  variant, or variant data without option values) and no option values.
+- **`ENUMERATED_VARIANT`.** Each other variant, by its title, with the URL the page's own JSON-LD
+  Offer gives it. A variant without such a URL is not listed; no URL or variant ID is built.
+- **`IDENTIFIER`.** JSON-LD and form identifiers, labeled by source.
+
+`pcc-3` additionally emits `VARIANT_DEFINITIONS` with all option names, variant IDs/titles
+and option values, the selected ID and a main-product picker/variant-select locator. This
+requires a complete picker JSON array and agreement with the full variant-select and any
+JSON-LD Offer ID sets; an analytics fallback is insufficient.
+
+The extractor uses selected-variant RAM/storage under a confirmed binding. Shared labeled CPU
+family and screen may be inherited only when the complete matrix varies RAM/storage alone
+and no CPU/display evidence conflicts (owner approval 2026-10-13). `SHARED_PRODUCT` provenance
+is retained. Shared memory facts (`8GB`, maximum `64GB`, slots) remain supporting; selected
+16GB and shared 8GB remain explicitly different. Since 2026-10-15 a full model code in the
+shared description, or one corroborated title code, may also be used under the same complete
+matrix ([MATCHING.md](../MATCHING.md#balanced-matching-policy-2026-10-15)). Paragraph headings (`CPU`, `Display`, `Memory`, `Storage`, and listed section
+headings) are grouped semantically; see [MATCHING.md](../MATCHING.md#retailer-extraction-srclaptop_trackerextractionpy).
+
+## Span label/value layout (`pcc-4`, 2026-10-15)
+
+The saved 2026-10-15 Nitro page writes each specification as
+`<p><span>Model </span><span>Acer Nitro V 15 ANV15-42-R2UH</span></p>`. `pcc-3` joined the two
+spans into one label with no value. `pcc-4` marks the first span boundary inside a description
+paragraph and splits there only when the first span is a short label (1–4 words, no colon, no
+digits other than a trailing footnote) and the rest is not empty and does not start with a colon.
+Otherwise the marker is removed and the text is byte-for-byte as before (`<span>16GB</span><span>
+DDR4</span>` stays `16GB DDR4`; `<span>Label</span>: value` keeps the colon split). That page's
+title and `Model` row say `ANV15-42-R2UH` while its URL path says `anv15-42-r2auh`, so it stays in
+review (`MODEL_URL_CONFLICT`).
+
 ## Versioning and maintenance
 
 - Bump `adapter_version` (`pcc-1` → `pcc-2` and so on) whenever parsing rules or assumptions change. Every observation records the version in `source.adapter_version`.
@@ -149,4 +193,4 @@ Otherwise the result is `UNKNOWN` with `signals conflict` in the evidence. That 
 - Categories come only from the Shopify product type in `var meta`; collection memberships are not on the page.
 - Bundle detection is keyword based and can over-flag or under-flag.
 - robots.txt and Shopify's platform comments point agents to UCP/MCP catalog endpoints. No adapter for those exists, and using them would need its own review.
-- Collection, search, and collection-scoped product pages are not parsed, and no crawling or discovery exists.
+- The adapter parses product pages only. Search is handled separately by `discover_products.py` (bounded, manual runs; see [SETUP_AND_OPERATIONS.md](../SETUP_AND_OPERATIONS.md#automatic-product-discovery-phase-10-manual-runs)); collection and category pages are not crawled.

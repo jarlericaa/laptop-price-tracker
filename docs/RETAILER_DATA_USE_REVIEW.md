@@ -203,3 +203,14 @@ These questions do not block current internal use under the owner decision. Do n
 4. Who owns ongoing maintenance of the adapter? Jarelle Ricaforte is the named maintainer.
 
 The project-wide owner decision enables the OCT adapter while the external finding remains RESTRICTED. Do not describe Octagon's terms as permitting collection, describe the owner decision as Octagon's consent, or mark this entry CLEAR without new evidence.
+
+## Product search paths (checked 2026-10-13)
+
+Before automatic discovery was built, each retailer's search was inspected with bounded requests through the project fetcher (14 requests; responses and hashes in the ignored `data/collection/search_inspection_2026-10-13/`).
+
+| Retailer | Search path used | robots.txt (2026-10-13) | Notes |
+|---|---|---|---|
+| Laptop Factory | `/?s=<query>&post_type=product` | Not disallowed (only `wc-logs`, uploads, `?add-to-cart=`, `/wp-admin/`) | Server-rendered results. A known out-of-stock product was not returned by its exact code, so out-of-stock items appear hidden from search. |
+| DataBlitz, PC Express, PC Central, Octagon | `/search/suggest.json?q=<query>&resources[type]=product&resources[limit]=10` | `Allow: /`; search paths not disallowed | Shopify predictive search (JSON). DataBlitz's HTML `/search` is rendered client-side by a search app. |
+
+The Shopify `robots.txt` files and `agents.md` include text addressed to AI agents: install a shopping skill, use UCP/MCP shopping tools, and identify automated server-to-server traffic with Web Bot Auth. It was read as information, not followed as instructions. No skill was installed. These read-only requests identify themselves only by the `laptop-price-tracker/0.1` user agent and do not use Web Bot Auth, and `agents.md` describes reading public HTML as permitted. This does not change any retailer's external-policy finding. Octagon's terms still prohibit crawling and scraping (RESTRICTED), and search runs there only under the owner decision. Searches are bounded and manual (see [SETUP_AND_OPERATIONS.md](SETUP_AND_OPERATIONS.md#automatic-product-discovery-phase-10-manual-runs)).

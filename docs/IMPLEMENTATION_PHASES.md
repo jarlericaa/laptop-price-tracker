@@ -18,7 +18,7 @@ The Python implementation and CLI are named “Phase 1” (`run_phase1.py` and `
 | 7. Implement retailer adapters | COMPLETE | LF, DBZ, PCX, PCC, and OCT adapters meet the Phase 6 contract, have offline tests and documentation, and have live-check evidence recorded. Jarelle Ricaforte is the named maintainer for all five. Unobserved page states remain documented limitations; retailer-policy findings remain separate from the project-owner live-use decision. |
 | 8. Normalize and perform exact matching | COMPLETE (offline) | Per-retailer extraction, the five-field `ExactMatcher`, and `match_offers.py` match saved observation CSVs against a validated `TARGET_MASTER` snapshot and write results, a review queue, and field evidence. Verified on synthetic fixtures (763 tests, Ruff) and on the nine saved Laptop Factory observations from 2026-10-08: the replay against the current 205-target catalog gives 9 `EXACT` (2026-10-12). The CPU identity is matched at family level (owner policy 2026-10-12). See [MATCHING.md](MATCHING.md) for limitations. |
 | 9. Generate comparisons and price history | COMPLETE (offline) | 2026-10-12: `track_prices.py` with an append-only SQLite observation store, matching contexts, weekly Asia/Singapore comparisons over the published working list, retailer selections, weekly series, per-observation history, review queue, and source ledger. Verified on synthetic tests and two demonstration runs over the nine saved 2026-10-08 observations (historical week 2026-10-05; no duplicated history). Live collection and pilot acceptance are Phase 10. |
-| 10. Test and run a controlled pilot | IN_PROGRESS | First supervised live cycle completed 2026-10-12 on seven selected configurations at Laptop Factory: seven EXACT expected matches, three comparable prices, four out of stock. The reviewed cycle was published manually with `publish_prices.py` to four dedicated `PILOT_PRICE_*` tabs (readback passed). Captured-page reconciliation and duplicate-import replay passed. Additional retailer coverage, subsequent weekly cycles and owner acceptance remain. See [PHASE_10_PILOT.md](PHASE_10_PILOT.md). |
+| 10. Test and run a controlled pilot | IN_PROGRESS | Expanded 2026-10-13 to twelve offers across all five retailers for the same seven selected configurations: seven LF EXACT, five matching review items, three comparable prices. Published and separately verified: 7 comparison / 26 history / 13 review / 2 log rows. Retailer extraction gaps, the next weekly cycle and owner acceptance remain. See [PHASE_10_PILOT.md](PHASE_10_PILOT.md). |
 | 11. Add GitHub Actions automation | NOT_STARTED | No workflow exists; this follows a passing controlled pilot. |
 | 12. Production operation and maintenance | NOT_STARTED | Operational automation and ownership are future work. |
 
@@ -204,7 +204,7 @@ The Python implementation and CLI are named “Phase 1” (`run_phase1.py` and `
 - **Current status:** `COMPLETE (offline)` on 2026-10-12. This is an offline implementation; live-pilot acceptance and automation remain Phases 10–11.
   - **Done:** Policy, store, and outputs are in [PRICE_TRACKING_OUTPUT_SCHEMA.md](PRICE_TRACKING_OUTPUT_SCHEMA.md#phase-9-implementation-2026-10-12) and the command in [SETUP_AND_OPERATIONS.md](SETUP_AND_OPERATIONS.md#offline-price-comparisons-and-history-overall-phase-9).
     - `observation_store.py`: an append-only local SQLite store (`data/history/`, Git-ignored). Observation identity is retailer + offer URL + offer index + UTC retrieval time. Batches are validated and written in one transaction; duplicates are counted, and contradictions refuse the batch. Matching contexts record the catalog SHA-256 and the matching-rule version and fingerprint, and results under earlier contexts are kept. `persist_scrape_results()` accepts production `scrape()` results.
-    - `price_tracking.py` and `track_prices.py`: PHP only, with exact decimal text. Weeks run Monday to Monday in Asia/Singapore with an explicit `--as-of` cut-off. A price is comparable only for an `EXACT`, selected, `IN_STOCK`, non-bundle offer in PHP with a known price type. Each offer is represented by its latest observation in the week, and the lowest price is selected with deterministic ties. Stale prices are never carried forward, and missing prices are blank with a reason. The outputs are one comparison row per selected configuration (with `DBZ_Price`, `LF_Price`, `PCX_Price`, `PCC_Price`, `OCT_Price`), selections with URL, time, and reason, a weekly series, per-observation history with comparable-only price changes, a review queue, a configuration-to-source ledger, and a summary.
+    - `price_tracking.py` and `track_prices.py`: PHP only, with exact decimal text. Weeks run Monday to Monday in Asia/Singapore with an explicit `--as-of` cut-off. A price is comparable only for an `EXACT`, selected, `IN_STOCK` or `OUT_OF_STOCK` offer in PHP with a known price type and checked bundle status. Since the owner's 2026-10-15 update, confirmed bundles participate with a visible note at their displayed package price. Each offer is represented by its latest observation in the week, and the lowest price is selected with deterministic ties. Stale prices are never carried forward, and missing prices are blank with a reason. The outputs are one comparison row per selected configuration (with `DBZ_Price`, `LF_Price`, `PCX_Price`, `PCC_Price`, `OCT_Price`), selections with URL, time, and reason, a weekly series, per-observation history with comparable-only price changes, a review queue, a configuration-to-source ledger, and a summary.
     - 58 new synthetic tests (1,145 in total); Ruff and `compileall` passed.
     - Demonstration on the nine saved 2026-10-08 observations, week 2026-10-05 (`CLOSED_HISTORICAL`), run twice: 9 observations stored once (second run 0 new, identical CSVs); 9 `EXACT`; 7 selected targets observed; 3 comparable LF prices; 4 out of stock; 2 `EXACT` offers for catalog targets outside the selected list.
   - **Not done:** live supervised collection, prices from retailers other than LF, review of the starting rules after real use, and any Sheets output.
@@ -239,3 +239,21 @@ The Python implementation and CLI are named “Phase 1” (`run_phase1.py` and `
 - **Validation:** Regular run reviews, recovery drills, and output-quality audits.
 - **Definition of done:** An owner can operate, diagnose, and recover the pipeline using current documentation.
 - **Current status:** `NOT_STARTED`.
+
+### Phase 10 extraction policy follow-up (2026-10-13)
+
+Owner-approved prose screen sizes and conditional shared CPU/screen inheritance are implemented
+with source locators and complete variant-matrix evidence. OPI, untrusted model identifiers
+and unitless Octagon storage remain unresolved. Saved HTML replay improves from 7/5 to
+8 EXACT / 4 REVIEW_REQUIRED, but the additional exact offer is a bundle and does not establish
+a second comparable retailer. Original CSV remains 7/5. No live collection or publication;
+Phase 10 remains IN_PROGRESS. See [DECISIONS.md](DECISIONS.md#extraction-evidence-approvals-2026-10-13).
+
+### Phase 10 fresh policy pilot (2026-10-13)
+
+A fresh collection of the same seven verified configurations across twelve reviewed pages
+succeeded at all five retailers. Ten offers match their expected targets; ASUS/PCX and MSI/PCC
+remain under review. Owner listing-specific OPI/capacity decisions are retained with provenance.
+During the run the owner approved comparing valid displayed OUT_OF_STOCK prices. The report
+was regenerated from the fresh evidence, retaining stock labels. This is another supervised
+run in the same October 12 reporting week, not a second weekly window. Phase 10 stays IN_PROGRESS.

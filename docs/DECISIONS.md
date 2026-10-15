@@ -27,6 +27,49 @@ Dates are recorded as **Date not recorded** when the repository or project conte
 | Retailer comparisons require exact configuration matching. | Date not recorded | Similar product names can hide differences in CPU, memory, storage, or other specifications. | Future matcher must reject partial or ambiguous matches instead of treating them as exact. | ACTIVE; implemented offline in Phase 8 (2026-10-06) with the five-field `ExactMatcher`. |
 | Playwright, retailer scraping, and GitHub Actions belong to later phases. | Date not recorded | Complete and validate raw-data ranking and configuration identity before automation. | No scraper or scheduled workflow is part of the current implementation. | PLANNED; no such components exist in the repository. |
 
+## Extraction evidence approvals (2026-10-13)
+
+Owner instruction: implement the supplied five-rule decision table.
+
+1. Accept an explicit product screen diagonal from its own description or JSON-LD description
+   when it clearly describes the product and is consistent with specifications. Keep source
+   text and locator. Bare `14.0` cannot provide units.
+2. Keep `A14-11M-X3BP OPI` and Nitro OPI unresolved. A manufacturer URL slug is a research
+   lead; do not strip suffixes or create aliases without trusted explanatory documentation.
+3. Allow shared labeled CPU family/screen only with confirmed selected variant binding and
+   complete definitions varying RAM/storage alone, with no conflicting CPU/display evidence.
+   Retain `SHARED_PRODUCT` provenance; use selected 16/512 for saved PCC MSI and retain shared 8.
+4. Retain trusted model restrictions. Titles, URLs and repeated product names are discovery
+   evidence. `LT-ASUS-000261` is a retailer SKU; `90NB1672-M00DD0` needs manufacturer
+   corroboration. Labeled `NX.JP3SP.001` is part-number evidence, not an alias or OPI explanation.
+5. Octagon storage remains unknown: bare 512 lacks a capacity unit and 16 Gb/s is throughput.
+
+Implemented in the extractor and scoped adapter evidence. Offline HTML replay is 8 EXACT /
+4 REVIEW_REQUIRED; original records remain 7/5. Bundle and price eligibility rules are unchanged.
+
+## Listing-scoped owner equivalence and capacity approvals (2026-10-13)
+
+These explicit chat decisions supersede the unresolved-equivalence/unit treatment above only
+for the named retailer listings and variants. Manufacturer meaning and verification remain
+separate from owner approval.
+
+- DataBlitz Aspire variant 62589224354163: the owner approves `A14-11M-X3BP OPI` as equivalent
+  to `A14-11M-X3BP`. Required page part-number evidence is `NX.JP3SP.001`; independently
+  extracted guards are Snapdragon X, 14 inches and 16GB RAM.
+- Octagon Nitro variant 49704880308480: the owner explicitly approves OPI equivalence and
+  this listing's model binding to `ANV15-42-R2UH`, followed by approving GB for its bare 512
+  drive amount. Independently extracted guards are Ryzen 5, 15.6 inches and 16GB RAM.
+  7640HS versus 6600H remains an underlying processor discrepancy; the CPU-family policy
+  still uses Ryzen 5. The page does not explicitly state the missing capacity unit.
+
+`config/retailer_evidence_approvals.csv` records exact retailer/variant URLs, original values,
+approved values, guard fields, owner attribution, date and scope. The extractor records
+`OWNER_APPROVED` provenance and retains original source evidence; resulting exact matches keep
+owner-approval and underlying discrepancy reason codes. Other listings and variants receive no
+inference. Explicit conflicting model/storage values and ambiguous quantities are not overridden.
+No target IDs are assigned by an approval; all five core fields still go through the matcher.
+The approval file and implementation are included in matching-rule fingerprints.
+
 ## Decision review notes
 
 - Remote rows in `P1_ELIGIBILITY_DECISIONS` are preserved and merged when the explicit writer runs, but current-run classification loads the local decisions CSV before that step. Use the local file for decisions that must affect a run; review this boundary before treating the sheet tab as the source of current-run overrides.
@@ -66,3 +109,76 @@ Dates are recorded as **Date not recorded** when the repository or project conte
   - **Backups.** Local backups of existing publisher tabs replace the legacy whole-spreadsheet copy, because the Sheets-only service account cannot copy files.
   - **Timeouts.** HTTP (15 s connect, 90 s read/send) per request.
 - New decisions should be added to this log with their actual decision date. Do not infer dates from file timestamps or this documentation date.
+
+## Out-of-stock comparison policy (2026-10-13)
+
+During the fresh pilot, the owner explicitly requested that products with no stock remain
+comparable. Valid displayed prices from exactly matched IN_STOCK and OUT_OF_STOCK offers now
+participate in retailer and lowest-price comparisons. Preserve actual availability and show
+OUT OF STOCK beside any selected sold-out price. No stock-based preference is introduced;
+the existing lowest-price selection applies. This supersedes only the OUT_OF_STOCK exclusion
+in the Phase 9 starting rules. PREORDER/UNKNOWN, bundles, invalid/missing prices and unresolved
+configuration matches remain excluded. Original observations and old report artifacts are kept.
+
+## Balanced matching policy (2026-10-15)
+
+Source: the owner's policy review and implementation instructions supplied on 2026-10-15
+("Laptop matching policy review", prepared 15 October 2026). Rules version
+`five-field-exact/balanced-evidence/2026-10-15`; adapters `oct-3` and `pcc-4`; publisher
+`pilot-sheets-2`. Details are in [MATCHING.md](MATCHING.md#balanced-matching-policy-2026-10-15).
+
+Owner decisions:
+
+- **Five fields stay required.** No similarity score, four-of-five matching, fuzzy model
+  correction, or copying values from the target, search query, or sibling pages.
+- **Title model corroboration.** One complete model code in the product's own title may supply
+  `model` when the other four fields are independently supported outside the title, no page,
+  URL, or identifier states a conflicting model, and the selected scope is clear. A title and
+  its JSON-LD name are one assertion. Recorded as `TITLE_MODEL_CORROBORATED`.
+- **Duplicates and arithmetic.** Equivalent repeated facts are one fact. Explicit installed RAM
+  components and installed drives are summed, keeping their breakdown and media; maximums,
+  slots, speeds, alternatives, optional and external parts never supply capacity. 1 TB = 1000 GB.
+- **CPU and screen.** An isolated `i5` in a labeled CPU field is `Core i5`; Core i5, Core 5, and
+  Core Ultra 5 stay different. Explicit units (including a glued `in`, or a unit in the label)
+  supply inches; a bare `Size: 14.0` does not.
+- **Variants.** Confirmed selected capacity overrides shared defaults with a warning. A full model
+  code in a shared description is inherited only under the complete RAM/storage-only matrix
+  already required for shared CPU and screen.
+- **Secondary severity.** Verified brand, display, GPU/VRAM, memory-type, storage-media,
+  model-code, and part-number conflicts block. Color, OS edition, and processor-number differences
+  within the accepted family are warnings. Missing values never conflict.
+- **Prices.** Out-of-stock prices stay comparable (2026-10-13 decision). The inclusive minimum is
+  labeled "lowest observed"; a separate "lowest in-stock" minimum uses the same comparable set.
+- **Approvals unchanged.** The three listing-scoped approvals keep their exact URL and guard
+  scope; no general OPI alias or unitless-capacity rule.
+
+Implementation defaults (not owner decisions; open to change):
+
+- ASUS part numbers (`90N?????-M?????`) are the only documented part-number shape excluded from
+  title model codes. Other regional or package numbers are not assumed equal or different.
+- A product URL path naming the same code stem with a different final segment (`anv15-42-r2auh`
+  for `ANV15-42-R2UH`) blocks the title route and shared-model inheritance; for a trusted labeled
+  model it is a warning only (owner precedent: an incorrect retailer slug is not the displayed
+  code).
+- A page model row with only a less specific designation (`Thin 15 B13UC`, `FA506NCQ`) does not
+  conflict with a full title code whose segment it equals; a different designation (`FA506NC`)
+  does.
+- Bundle detection is unchanged. Free accessories (backpack, printer, monitor) still exclude the
+  price; included Office/software and warranties were never bundle triggers.
+
+## Bundle prices included with a note (owner approval, 2026-10-15)
+
+The owner requested that bundle offers remain comparable, with a note identifying the bundle.
+This supersedes the earlier bundle-price exclusion, including the balanced policy default above.
+An otherwise eligible exact configuration with `bundle_flag = TRUE` now participates at its
+displayed package price in retailer selections, lowest observed, lowest in-stock, history and
+price-change calculations. `BUNDLE_OFFER` is a nonblocking price note, not a matching warning or
+price-exclusion reason. The program does not estimate or deduct the value of included items.
+
+Keep bundle detection, original flags and evidence. Comparison CSV warnings and selection
+`price_notes` identify bundles; the Sheet's retailer status and winning-minimum retailer labels
+show "bundle offer". Unknown bundle status remains excluded. Five-field identity, scope,
+currency, stock, known price type and valid-price requirements continue to apply. Existing saved
+reports retain their historical policy; regenerating them records comparison policy
+`displayed-price/stock-and-bundles/2026-10-15`. No retailer recollection is required to apply this
+change to stored observations.

@@ -1,5 +1,7 @@
 # laptop-price-tracker
 
+**Start here:** [Weekly workflow, dataflow and commands](docs/WEEKLY_WORKFLOW.md) explains the Sheet tabs, CSVs, weekly refresh, automatic search and publishing step by step.
+
 This project processes Shopee Electronics data from Google Sheets and produces a ranked list
 of laptop models for future retailer price tracking. The current Python pipeline reads the
 `raw` worksheet, validates and classifies data, detects M-1 and MTD, and generates local ranking
@@ -13,8 +15,10 @@ PC Central's bare-URL check failed safely; a selected-variant live check returne
 offer. A user-reported OCT live check returned one in-stock HP 15-FC0413AU offer at PHP 37,999.
 Exact configuration matching (overall Phase 8) and weekly price comparisons with price history
 (overall Phase 9) run offline over saved observations. `collect_and_match.py` adds manual
-online collection of explicitly listed product pages into the same store and matcher. The
-multi-retailer controlled pilot and GitHub Actions automation are not implemented.
+online collection of explicitly listed product pages into the same store and matcher. Automatic
+product discovery and the supervised multi-retailer pilot are implemented;
+Phase 10 remains in progress. Price reports can be published to dedicated tracker tabs.
+GitHub Actions scheduling is not implemented.
 
 The latest read-only live dry run completed in 57.49 seconds and generated 100 targets. The
 21 historical conflicting keys had fingerprint-matched `EXCLUDE_KEY` decisions; their source
@@ -23,8 +27,8 @@ Top 100 and eligibility CSV reports on 2026-09-29. The user reports that the nin
 production tabs were created with headers only and verified on 2026-09-29. A synthetic-data
 writer test completed on a dedicated test spreadsheet; a read-only report confirmed the nine
 tabs and headers, expected synthetic rows, and a run-log count of 1. The full
-`run_phase1.py --write-sheets` command has not been run, and no production sheet write has
-occurred.
+`run_phase1.py --write-sheets` command has not been run on the production P1 outputs. The
+separate pilot price publisher has written and verified the dedicated production pilot tabs.
 
 Phase 5 is COMPLETE (2026-10-12). The `TARGET_MASTER` identity is the five-field core key approved
 on 2026-10-05 (`model`, `screen_size_in`, `cpu_series` at CPU-family level, `ram_capacity_gb`,
@@ -224,6 +228,15 @@ seven-configuration pilot cycle was published on 2026-10-12. See
 [docs/SETUP_AND_OPERATIONS.md](docs/SETUP_AND_OPERATIONS.md#publishing-pilot-results-to-google-sheets-phase-10-manual)
 and [docs/PHASE_10_PILOT.md](docs/PHASE_10_PILOT.md).
 
+`discover_products.py` searches the five retailers for verified configurations within explicit request limits (`--preview` sends nothing), ranks the results with reasons, lists variants only from each page's own structured data, writes a `collect_and_match.py` manifest, and with `--collect` collects and matches those pages. Ranking never assigns a target. See [docs/SETUP_AND_OPERATIONS.md](docs/SETUP_AND_OPERATIONS.md#automatic-product-discovery-phase-10-manual-runs).
+
+`replay_extraction.py` replays a saved collection offline through the current extractor (from the
+observation CSV) and the current adapters (from saved HTML), and writes a before/after comparison;
+re-parsed records are never imported. `discover_candidates.py` ranks saved observations as
+research candidates for reference configurations and plans search queries, without making
+requests or changing matching. See
+[docs/SETUP_AND_OPERATIONS.md](docs/SETUP_AND_OPERATIONS.md#offline-extraction-replay-and-candidate-discovery-phase-10).
+
 `audit_verified_top_100.py` independently checks a run: unique targets, ACTIVE `CONFIGURATION`
 status, complete identities, valid contributors, totals, deterministic order, and the catalog
 version used. See [docs/TARGET_MASTER_SCHEMA.md](docs/TARGET_MASTER_SCHEMA.md#top-100-verified-configurations-2026-10-12).
@@ -278,7 +291,7 @@ The latest live dry run took 57.49 seconds and did not write to any Google Sheet
 ```bash
 python -m pytest -q
 python -m ruff check .
-python -m compileall src run_phase1.py smoke_test.py check_target_master.py check_target_tables.py seed_match_review.py match_offers.py audit_top_100_coverage.py propose_catalog_conventions.py build_verified_top_100.py audit_verified_top_100.py track_prices.py collect_and_match.py publish_prices.py
+python -m compileall src run_phase1.py smoke_test.py check_target_master.py check_target_tables.py seed_match_review.py match_offers.py audit_top_100_coverage.py propose_catalog_conventions.py build_verified_top_100.py audit_verified_top_100.py track_prices.py collect_and_match.py publish_prices.py replay_extraction.py discover_candidates.py discover_products.py
 python smoke_test.py
 python run_phase1.py --dry-run
 ```
@@ -286,3 +299,11 @@ python run_phase1.py --dry-run
 The final two commands need the live configuration above. Writing Sheets is never part of the
 verification sequence; run `python run_phase1.py --write-sheets` only after reviewing the local
 outputs.
+
+### Current price comparison policy (2026-10-15)
+
+Valid displayed prices are compared for exact configurations whether IN_STOCK or OUT_OF_STOCK.
+Selected sold-out prices are labeled OUT OF STOCK; availability remains in history. Confirmed
+bundles participate at their displayed price with a visible bundle-offer note. Unknown bundle
+status, preorder/unknown availability, missing prices and unresolved matches remain excluded. This
+owner-approved update is documented in `docs/PRICE_TRACKING_OUTPUT_SCHEMA.md`.

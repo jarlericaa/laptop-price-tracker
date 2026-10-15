@@ -1,6 +1,6 @@
 # Octagon (OCT) Adapter
 
-**Status:** Adapter implemented and tested offline on 2026-10-01 (`adapter_version = "oct-1"`). **Live use is enabled** (`live_use_approved = True`) under the project-wide owner decision in [DECISIONS.md](../DECISIONS.md). Octagon's published terms of service prohibit using the site or its content to "spider, crawl, or scrape", so the external-policy finding is **RESTRICTED**. No Octagon written permission is recorded, and the owner decision is not Octagon's consent. A user-reported live smoke check returned one in-stock HP 15-FC0413AU offer at PHP 37,999. The observation was printed only; no data was persisted. Adapter maintainer: Jarelle Ricaforte.
+**Status:** Adapter implemented and tested offline on 2026-10-01 (now `adapter_version = "oct-3"` since 2026-10-15; scoped evidence and label/value gaps below). **Live use is enabled** (`live_use_approved = True`) under the project-wide owner decision in [DECISIONS.md](../DECISIONS.md). Octagon's published terms of service prohibit using the site or its content to "spider, crawl, or scrape", so the external-policy finding is **RESTRICTED**. No Octagon written permission is recorded, and the owner decision is not Octagon's consent. A user-reported live smoke check returned one in-stock HP 15-FC0413AU offer at PHP 37,999. The observation was printed only; no data was persisted. Adapter maintainer: Jarelle Ricaforte.
 
 | Item | Value |
 |---|---|
@@ -132,6 +132,35 @@ Otherwise the result is `UNKNOWN` with `signals conflict` in the evidence. That 
 
 **Not inferred.** CPU, RAM, refresh rate, and other specifications are kept only as the page's raw text. A missing row stays missing. Description text keeps the retailer's characters, including `✅` markers and spaces before colons (`Chipset    : …` becomes the label `Chipset`). No `target_id` is assigned.
 
+## Scoped evidence (`oct-2`, 2026-10-13)
+
+Prices, availability, URLs, and raw specification rows are unchanged from `oct-1`. `oct-2` adds
+`IDENTIFIER` scoped evidence: JSON-LD Product `sku`, `mpn`, `gtin12`, `gtin13`, `productID`, each
+Offer's `sku` / `gtin12` / `gtin13` / `mpn`, and JSON-LD `Product.brand` labeled as the store name
+(reviewed pages put the store there, so it is not used as the laptop brand).
+
+The extractor reads the Tech Specification paragraphs as heading/value groups with footnoted
+headings (`CPU and chipset1 …`, `Memory1, 2, 3`, `Display4`, `Storage1, 5`). On the reviewed
+2026-10-13 Nitro page this gives screen `15.6` (with `16:9` preserved in the evidence), CPU
+`Ryzen 5`, and installed RAM `16` (`1x 16GB`; maximum `32GB` and `4800 MT/s` kept separately).
+Storage `1x 512 PCIe Gen4, 16 Gb/s` has no capacity unit, so it stays `UNPARSEABLE`
+(`STORAGE_CAPACITY_UNIT_MISSING`), and `16 Gb/s` is a transfer rate. The specification says
+`6600H` while the title says `7640HS` (`CPU_NUMBER_TITLE_DIFFERS`, supporting only).
+
+## Label/value gaps (`oct-3`, 2026-10-15)
+
+The saved 2026-10-15 ASUS TUF page writes its specification lines as a label, a run of no-break
+spaces, and the value (`Model \xa0 \xa0FA506NCQ`, `Memory \xa0 \xa08GB DDR5-4800 SO-DIMM, Max
+Capacity:64GB`). `oct-2` collapsed the gap, so the line became one label with no value and every
+field was missing. `oct-3` splits a description line at a whitespace run of three or more
+characters containing a no-break space, when it comes before any colon and the label is 1–5 words
+with no digits other than a trailing footnote. Other lines are unchanged. Re-parsing the saved
+2026-10-13 Nitro page with `oct-3` also separates three footnoted headings (`Operating system1`,
+`CPU and chipset1`, `Graphics1`) from their values; its extracted fields and match are unchanged.
+The 2026-10-15 TUF observation was recorded under `oct-2` and is not re-imported; only new
+collections use `oct-3`. Since 2026-10-15 the extractor also maps Octagon `Model` (code rule),
+`CPU`, and `RAM` rows.
+
 ## Versioning and maintenance
 
 - Bump `adapter_version` (`oct-1` → `oct-2` and so on) whenever parsing rules or assumptions change. Every observation records the version in `source.adapter_version`.
@@ -158,4 +187,4 @@ Otherwise the result is `UNKNOWN` with `signals conflict` in the evidence. That 
 - Categories come only from the Shopify product type in `var meta`; collection memberships are not on the page.
 - Bundle detection is keyword based and can over-flag or under-flag.
 - robots.txt and Shopify's platform comments point agents to UCP/MCP catalog endpoints. No adapter for those exists. Using them would need its own review and would still be subject to Octagon's terms.
-- Collection, search, and collection-scoped product pages are not parsed, and no crawling or discovery exists.
+- The adapter parses product pages only. Search is handled separately by `discover_products.py` (bounded, manual runs; see [SETUP_AND_OPERATIONS.md](../SETUP_AND_OPERATIONS.md#automatic-product-discovery-phase-10-manual-runs)); collection and category pages are not crawled.

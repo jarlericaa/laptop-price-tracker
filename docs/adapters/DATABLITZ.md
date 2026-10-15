@@ -1,6 +1,6 @@
 # DataBlitz (DBZ) Adapter
 
-**Status:** Adapter implemented and tested offline on 2026-10-01 (`adapter_version = "dbz-1"`). A user-reported live spot check on 2026-10-01 returned one MSI Crosshair A16 HX offer at PHP 162,995.00 with `IN_STOCK`. Live use is enabled under the project-owner policy in [DECISIONS.md](../DECISIONS.md). The retailer's published permission remains unverified (external-policy finding UNKNOWN; project status OWNER_APPROVED). Adapter maintainer: Jarelle Ricaforte.
+**Status:** Adapter implemented and tested offline on 2026-10-01; `adapter_version = "dbz-3"` since 2026-10-13 (scoped evidence, below). A user-reported live spot check on 2026-10-01 returned one MSI Crosshair A16 HX offer at PHP 162,995.00 with `IN_STOCK`. Live use is enabled under the project-owner policy in [DECISIONS.md](../DECISIONS.md). The retailer's published permission remains unverified (external-policy finding UNKNOWN; project status OWNER_APPROVED). Adapter maintainer: Jarelle Ricaforte.
 
 | Item | Value |
 |---|---|
@@ -72,6 +72,30 @@ Otherwise, or when the main form has several different buttons, the result is `U
 
 **Not inferred.** CPU, RAM, refresh rate, and other specifications are kept only as the page's raw text. A missing row stays missing. GTIN appears in JSON-LD but has no `OfferDetails` field; it is captured only where the retailer uses it as `sku`. No `target_id` is assigned.
 
+## Scoped evidence (`dbz-2`, 2026-10-13)
+
+Prices, availability, bundle flags, URLs, and raw specification rows are unchanged from `dbz-1`
+(the saved 2026-10-13 pages re-parse to the same values). `dbz-2` adds
+`OfferDetails.scoped_evidence`. `dbz-3` adds visible paragraph locators; the owner-approved
+2026-10-13 screen rule may use explicit product diagonals from this scope:
+
+- `PRODUCT_DESCRIPTION`: description paragraphs outside the specification table (bare
+  `Heading:` paragraphs are skipped) and the lead of JSON-LD `Product.description` before a blank
+  line or `Specifications:`. A screen size stated only here (a 14-inch claim beside a unit-less
+  `Size: 14.0` row) can supply inches if it clearly describes the product and agrees with
+  specifications. A bare number cannot supply units. Conflicts require review. The source
+  label records `product description > p[index] (outside tables)` or `JSON-LD Product.description`.
+- `IDENTIFIER`: JSON-LD `sku`, `gtin`, `gtin13`, `mpn`, `productID`, the visible SKU, and the
+  form's `product-id`, each labeled with where it was found. None is promoted to a verified
+  manufacturer part number. A `Part Number` table row is reported by the extractor as a
+  `part_number_candidate` whose manufacturer role is unverified.
+
+The extractor now reads the `Model` row (exactly one model code, or `UNRESOLVED` with the full
+wording), and `Size` / `Display Panel/ Resolution` rows as display rows. Reviewed 2026-10-13: the
+Aspire page's table says `Steel Gray` while its title says `Steam Blue` (`COLOR_TITLE_DIFFERS`),
+and its `Model` row is `A14-11M-X3BP OPI`, which the owner explicitly keeps unresolved pending trusted documentation explaining
+`OPI`. No model suffix is stripped or aliased. CineCrystal wording is not read as OLED or IPS.
+
 ## Versioning and maintenance
 
 - Bump `adapter_version` (`dbz-1` → `dbz-2` and so on) whenever parsing rules or assumptions change. Every observation records the version in `source.adapter_version`.
@@ -88,4 +112,4 @@ Otherwise, or when the main form has several different buttons, the result is `U
 - Without Product JSON-LD, availability is `UNKNOWN` unless the button says `Sold out` or `Pre-order`.
 - Bundle detection is keyword based and can over-flag, for example a title that mentions a monitor size, or under-flag freebies named with other words.
 - Brand comes from JSON-LD or the vendor link; MPN is blank on the reviewed pages. Phase 8 must use the raw title, specs, and categories as evidence without treating them as verified identity.
-- Collection, search, and collection-scoped product pages are not parsed, and no crawling or discovery exists.
+- The adapter parses product pages only. Search is handled separately by `discover_products.py` (bounded, manual runs; see [SETUP_AND_OPERATIONS.md](../SETUP_AND_OPERATIONS.md#automatic-product-discovery-phase-10-manual-runs)); collection and category pages are not crawled.

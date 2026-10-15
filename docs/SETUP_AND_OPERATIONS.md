@@ -1,5 +1,7 @@
 # Setup and Operations
 
+For a plain-language weekly checklist and copyable commands, start with [Weekly workflow and dataflow](WEEKLY_WORKFLOW.md). This page provides detailed setup and command contracts.
+
 ## Prerequisites
 
 - WSL with a supported Linux distribution, such as the project's existing Ubuntu environment.
@@ -281,6 +283,146 @@ python publish_prices.py --write-sheets \
   therefore backs up its own existing tabs locally before replacing them. Make a whole-spreadsheet
   copy manually before a publication if the owner wants one.
 
+## Automatic product discovery (Phase 10, manual runs)
+
+`discover_products.py` searches the five retailers for verified configurations, ranks the
+results, inspects the best candidates' own structured data, writes a manifest that
+`collect_and_match.py` accepts, and (with `--collect`) collects and matches those pages through
+the existing collector. Nothing is scheduled; every run is started by a person.
+
+```bash
+# 1. Preview: validates the catalog, working list, scope, and approvals file; writes the query
+#    plan and request limits; sends no request.
+python discover_products.py --preview --scope-file <pilot_scope.csv> \
+  --target-master <inputs>/target_master_validated.csv \
+  --selected-list <inputs>/top_100_verified_configurations.csv \
+  --contributions <inputs>/verified_configuration_contributions.csv \
+  --output-dir data/output/<run>/discovery_preview
+
+# 2. Live search, ranking, and inspection only (writes manifest.csv for review).
+python discover_products.py --live --targets TGT-000059 <same inputs> \
+  --max-total-requests 20 --max-search-requests 10 --max-product-fetches 8 \
+  --baseline-manifest <earlier manifest.csv> --output-dir data/output/<run>/discovery_one
+
+# 3. Search, collect, extract, match, and report in one run.
+python discover_products.py --live --scope-file <pilot_scope.csv> <same inputs> \
+  --max-total-requests 95 --max-search-requests 60 --max-product-fetches 30 \
+  --max-search-pages 2 --max-candidates-per-target-retailer 2 --collect \
+  --store data/history/price_history.sqlite3 --output-dir data/output/<run>/discovery_all
+```
+
+**Searches.** Per target and retailer, in order:
+1. The full model code from `TARGET_MASTER`.
+2. The verified `manufacturer_part_number`, when the catalog has one.
+3. Brand + series, only when the earlier queries found no result showing the model code.
+
+Retailer SKUs and unverified identifiers are never search terms. The mechanisms were
+inspected live before implementation (evidence: ignored `data/collection/search_inspection_2026-10-13/`):
+
+| Retailer | Mechanism | Limits |
+|---|---|---|
+| Laptop Factory | WooCommerce `/?s=<q>&post_type=product`, server-rendered cards | 12 per page; `--max-search-pages` pages; out-of-stock products appeared absent from search |
+| DataBlitz, PC Express, PC Central, Octagon | Shopify predictive search `/search/suggest.json` (JSON) | At most 10 results; no pagination; no variant list (DataBlitz's HTML search page is client-rendered and unusable) |
+
+**Outcomes** are kept apart:
+- `RESULTS` and `NO_RESULTS`: a readable answer.
+- `SEARCH_ERROR`: the request failed.
+- `UNSUPPORTED_LAYOUT`: a response that could not be read.
+- `NOT_SENT_*`: a limit, the total budget, or a retailer stopped after two consecutive errors.
+
+A failure is never reported as "not found", and one failing retailer does not stop the others.
+
+**Ranking** (`candidates.csv`) explains every result. Categories:
+- `CODE_MATCH`.
+- `CODE_MATCH_WITH_UNEXPLAINED_SUFFIX`: for example `OPI`, kept as written.
+- `VERIFIED_PART_NUMBER_MATCH`.
+- `CODE_SPELLING_VARIANT`: spacing or punctuation differs.
+- `CODE_IN_URL_ONLY`.
+- `FAMILY_ONLY`.
+- `DIFFERENT_MODEL_CODE`.
+- `UNRELATED`.
+
+Title RAM, storage, screen, and CPU clues, plus bundle wording, only order candidates; they never
+fill a field. Only the code, part-number, and URL categories can be collected, up to
+`--max-candidates-per-target-retailer` per target and retailer.
+
+**Variants.** For Shopify candidates, the product page is fetched once and its own JSON-LD offers
+list the variants; no variant URL or ID is built.
+- A variant is collected only when its option title states the target RAM and storage, and only
+  at PC Central and Octagon, whose adapters can bind a `?variant=` page.
+- Two drives such as `512GB + 512GB SSD` are not 512GB.
+- Other variants are kept in `variants.csv` as alternatives or review items. The default,
+  cheapest, or first variant is never chosen.
+
+**Collection** runs `collect_and_match.py --live` on the validated manifest:
+- It shares the run's request budget.
+- It waits one per-retailer interval first.
+- It backs up the store with SQLite's backup API (`store_backup_before_collection.sqlite3`).
+- Expected target IDs are hints that the collector checks; the five-field matcher decides.
+- Listing-specific owner approvals apply only to their exact recorded offer URL. The summary lists
+  collected offers that hit one.
+
+**Outputs:**
+- `search_plan.csv`, `search_requests.csv` (URLs, times, hashes, outcomes), `search_results.csv`.
+- `candidates.csv`, `product_inspections.csv`, `variants.csv`, `manifest.csv`.
+- `coverage_vs_baseline.csv` (with `--baseline-manifest`).
+- `evidence/<sha256>.html|json`, `collection/` (the collector's reports).
+- `discovery_summary.json`: limits, outcomes, and retailer evidence, manufacturer evidence, and
+  owner decisions kept separately.
+
+**Limitations:**
+- These requests identify themselves only by the `laptop-price-tracker/0.1` user agent. The
+  Shopify stores' `agents.md` asks automated server-to-server traffic to use Web Bot Auth, which
+  this project does not implement; reading public pages is described there as allowed.
+- No authentication, CAPTCHA, or access control is bypassed; an HTTP 403 is a `SEARCH_ERROR`.
+
+## Offline extraction replay and candidate discovery (Phase 10)
+
+Both commands are offline: they make no requests, run no searches, never write Google Sheets,
+never write the observation store, and never change matching, mappings, or the catalog. Each
+writes into a new `--output-dir` that must not exist yet (keep it under the ignored `data/`), and
+prints counts only. Example commands with real paths are in
+[PHASE_10_PILOT.md](PHASE_10_PILOT.md#extraction-replay-and-candidate-discovery-2026-10-13).
+
+**`replay_extraction.py`** replays a saved collection through the current code.
+
+- Path 1 (always): the original observation CSV is matched again with the current extractor
+  (`observation_replay/`).
+- Path 2 (`--html-dir`): each saved body `<content_sha256>.html` is checked against its hash and
+  re-parsed with the current adapter, reusing the original retrieval time and attempt count
+  (`html_replay/`). Missing or altered bodies are listed in `reparse_failures.csv`, never guessed.
+  `reparse_differences.csv` lists the record columns that changed. The re-parsed records are
+  written to `reparsed_observations_NOT_FOR_IMPORT.csv`: they keep the original observation
+  identity, so importing them would put changed content under an old identity. Do not import them.
+- `--conflict-check-store` opens the named store read-only, copies it with SQLite's backup API,
+  tries the import on the copy, and deletes the copy; the outcome is in `replay_summary.json`.
+- `before_after_comparison.csv` puts the saved results (`--before-results`) beside both paths:
+  status, target, reasons, primary core statuses, supporting fields, and the weekly price rule.
+  `--cases` names review cases by content hash.
+
+**`discover_candidates.py`** ranks saved observations as research candidates for reference
+configurations (`--references`, the verified Top 100 layout; filter with `--targets` or
+`--scope-file`) and plans search queries per retailer host.
+
+- `discovery_candidates.csv`: one row per reference and linked candidate, with URL, variant ID,
+  `COLLECTED` or `DISCOVERED_NOT_FETCHED` (a variant the page listed with its own JSON-LD URL but
+  nobody fetched), title, the matched code and where it was seen (`LABELED_MODEL`,
+  `LABELED_MODEL_WITH_UNEXPLAINED_SUFFIX`, `TITLE_ONLY`, `PAGE_TEXT_ONLY`, `URL_ONLY`), any
+  retained suffix, identifiers with their source, per-field `AGREE` / `DIFFER` / `UNKNOWN`, and a
+  next verification step.
+- Categories are review priorities, not assignments: `STRONG_CANDIDATE` (labeled model code, no
+  trusted field differs), `NEEDS_VERIFICATION` (code only in a title, URL, or page text, or with an
+  unexplained suffix), `POSSIBLE_CANDIDATE` (brand and family in the title, no code),
+  `DIFFERENT_CONFIGURATION` (same code, a trusted field differs: keep as a separate variant).
+  Agreement uses only `EXTRACTED` values; supporting evidence is shown but never counts.
+- `discovery_queries.csv`: per reference and retailer, in order: `A_COMPLETE_MODEL_CODE`;
+  `B_FORMATTING_VARIATION` (spellings seen on saved pages, and an observed suffixed designation
+  marked unverified); `C_VERIFIED_MANUFACTURER_PART_NUMBER` (from `TARGET_MASTER`, with
+  `--target-master`); `C_SUPPLEMENTARY_UNVERIFIED` (part-number rows or part-number-length title
+  tokens, marked unverified); `D_BRAND_FAMILY_SPECS`. Retailer SKUs, barcodes, and product or
+  variant IDs are never used as queries. Comparisons ignore case, whitespace, and trademark marks;
+  suffixes are kept.
+
 ## Offline scraping framework and adapter tests (overall Phases 6-7)
 
 ```bash
@@ -386,3 +528,11 @@ There is no scheduled Monday workflow today. When Phase 11 is implemented and ap
 6. Avoid rerunning a write-enabled job until reviewed corrections and destination are confirmed.
 
 This procedure is planned operations guidance, not evidence of existing automation.
+
+### Comparing displayed prices when stock is unavailable (2026-10-13)
+
+The owner-approved rule includes exactly matched OUT_OF_STOCK displayed prices. The stock
+status remains visible beside selected prices in the comparison tab and in history; a sold-out
+price can be the lowest price. Other price eligibility rules continue to apply. Regenerate saved
+reports under the new policy in a new directory, review the selections, then preview/publish.
+The selected observation ID determines the status shown, not the status of another offer.

@@ -71,4 +71,4 @@ Only markup inside the product summary is read. Related products and smart-bundl
 - Only the stock wordings `In stock`, `<n> in stock`, and `Out of stock` are mapped. Other wording is kept as evidence and mapped to `UNKNOWN`.
 - Bundle detection is keyword and markup based and can over-flag, for example a title mentioning a monitor size. That is intentional, since review happens downstream.
 - Brand and MPN are blank on the reviewed pages. Phase 8 must use the raw title, specs, and categories as evidence without treating them as verified identity.
-- Search and category pages are not parsed, and no crawling or discovery exists.
+- The adapter parses product pages only. Search is handled separately by `discover_products.py` (bounded, manual runs; see [SETUP_AND_OPERATIONS.md](../SETUP_AND_OPERATIONS.md#automatic-product-discovery-phase-10-manual-runs)); collection and category pages are not crawled.

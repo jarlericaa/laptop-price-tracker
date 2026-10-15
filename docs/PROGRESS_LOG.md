@@ -31,7 +31,7 @@ Append new dated rows as work is verified. Keep earlier rows as historical evide
 | 7. Retailer adapters | COMPLETE | LF, DBZ, PCX, PCC, and OCT adapters have offline tests, documentation, and live-check evidence. Jarelle Ricaforte is the named maintainer for all five. Known unobserved page states remain documented limitations. |
 | 8. Exact matching | COMPLETE (offline) | Retailer extraction, five-field matcher, and `match_offers.py` review-queue path implemented and tested. The conventions are applied, and the saved nine-offer replay against the current catalog gives 9 `EXACT` (2026-10-12). See [MATCHING.md](MATCHING.md). |
 | 9. Comparisons and price history | COMPLETE (offline) | 2026-10-12: append-only SQLite store, matching contexts, weekly comparison, selections, series, history, review queue, and source ledger. 1,145 tests, Ruff, and `compileall` passed. Two demonstration runs gave no duplicated history. |
-| 10. Controlled pilot | IN_PROGRESS | 2026-10-12 first live cycle: seven selected configurations at LF, seven expected EXACT matches, three comparable prices, four stock exclusions. Captured-page reconciliation and duplicate-import replay passed. The reviewed cycle was published manually to the four `PILOT_PRICE_*` tabs (readback passed). Additional retailer coverage, a second weekly cycle and owner acceptance remain. See [PHASE_10_PILOT.md](PHASE_10_PILOT.md). |
+| 10. Controlled pilot | IN_PROGRESS | Expanded 2026-10-13 to twelve offers across all five retailers for the same seven selected configurations: seven LF EXACT, five matching review items, three comparable prices. Published and separately verified: 7 comparison / 26 history / 13 review / 2 log rows. Retailer extraction gaps, the next weekly cycle and owner acceptance remain. See [PHASE_10_PILOT.md](PHASE_10_PILOT.md). |
 | 11. GitHub Actions | NOT_STARTED | No workflow exists; pilot must pass first. |
 | 12. Production operation | NOT_STARTED | Future work after automation. |
 
@@ -39,6 +39,12 @@ Append new dated rows as work is verified. Keep earlier rows as historical evide
 
 | Date | Phase | Area | Task | Status | Evidence | Files or commands | Notes | Next action |
 |---|---|---|---|---|---|---|---|---|
+| 2026-10-15 | 9 / 10 | Bundle price policy | Include confirmed bundle prices with a visible note under the owner's instruction | IMPLEMENTED locally; not published | Regenerated the latest saved seven-configuration pilot at its unchanged cutoff: comparable retailer prices 13 to 16; fresh-collection coverage 11 PRICE_AVAILABLE of 35 pairs. Built complete local Sheet plans: 7 comparison, 100 history, 16 review rows. Bundle notes are visible in retailer statuses and both minimum labels where applicable. Ruff and whitespace checks passed; tests were not run. | `price_tracking.py`; `track_prices.py`; `sheet_publication.py`; `pilot_coverage.py`; `coverage_report.py`; existing policy-test expectations; ignored `data/output/balanced_policy_pilot_20261015T103143Z/reports_bundles/`, `coverage_bundles/`, `local_publication_plan_bundles/` | Includes bundles at the displayed package price without deducting accessory value. Unknown bundle status remains excluded. Existing reports and raw bundle evidence preserved; no matching-rule/catalog/approval changes, retailer requests, new observations, new match results, Sheets access, commits or pushes. | Preview and publish `reports_bundles` to refresh the four pilot tabs. |
+| 2026-10-15 | 10 | Pilot publication | Allow incidental exact matches outside the pilot scope without blocking scoped publication | FIXED locally; not published | Both saved balanced-policy runs rebuild complete local publication plans. Latest run: 7 comparison rows, 100 history rows, 33 review rows; 1 outside-scope exact match excluded from comparison/history, with its expected-target mismatch retained in review. | `src/laptop_tracker/sheet_publication.py`; `publish_prices.py`; `docs/WEEKLY_WORKFLOW.md`; ignored `data/output/balanced_policy_pilot_20261015T103143Z/local_publication_plan_scope_fix_*/` | PCX MSI 8GB matched TGT-000219 while discovery expected the pilot's TGT-000258 (16GB). Pilot scope, matches, source evidence and store were unchanged. No tests, retailer requests, Sheets access or commits were performed for this fix. | Rerun publication preview on the saved reports, then publish after reviewing it. |
+| 2026-10-13 | 10 | Automatic product discovery | Search the five retailers for verified configurations, rank candidates, and feed reviewed candidates to the collector | COMPLETE (implementation and bounded pilot); Phase 10 remains IN_PROGRESS | Search mechanisms were inspected live first (14 requests): WooCommerce HTML search (LF) and Shopify predictive-search JSON (four stores), both allowed by robots.txt. `discover_products.py` adds `--preview`/`--live`, explicit total/search/page/candidate/product-fetch limits, partial-failure handling, variant inspection from page JSON-LD, manifest validation, store backup, and collection through `collect_and_match.py`. Live: one configuration (12 requests, 2 EXACT), then all seven (84 requests: 14 collected, 7 EXACT, 7 review), then a PC Express run after a fix (18 requests, 4 review). 0 search errors or layout failures; store 40 → 60 observations. 8 of 12 earlier URLs were found by search; four out-of-stock LF pages were not. 10 new URLs were collected; the only new EXACT is an excluded LF bundle, so comparable prices are unchanged (LF 7, DBZ 1, OCT 1). 39 new offline tests; full suite 1377 passed; Ruff, compileall, `git diff --check` passed. | `src/laptop_tracker/retailer_search.py`, `product_discovery.py`; `discover_products.py`; `tests/test_product_discovery.py`; ignored `data/collection/search_inspection_2026-10-13/`, `data/output/phase10_2026-10-13_auto_discovery/` | Two live defects were found and fixed with regression tests: two-drive/mistyped option titles (fail-safe, nothing collected) and PC Express duplicate JSON-LD read as unreadable variants. Shopify `agents.md` asks for Web Bot Auth, which is not implemented; requests identify by user agent only (recorded in the data-use review). No Sheets, catalog, mapping, schedule, or commit. | Review the 11 new review items (DBZ/OCT layouts, PCC Nitro shared description, PCX model evidence); keep known out-of-stock LF URLs as a manual supplement; second weekly cycle from 2026-10-19. |
+| 2026-10-13 | 10 | Manufacturer research archive and owner-policy validation | Archive the supplied manufacturer-identifier research; add regression tests for the approved prose-screen and shared CPU/screen rules and research boundaries; replay offline | COMPLETE (offline); Phase 10 remains IN_PROGRESS | Research archived with a 13-source register (URL/locator, retrieval and document dates, scope, conflicts, verification status). The four cited saved snapshots were verified offline (hash and quoted identifiers). Manufacturer and other-retailer sources were not re-fetched, and the six research HTML/PDF/image copies were not supplied (hashes recorded as supplied only). 45 new tests in `tests/test_owner_policy_rules.py`; one discovery test updated to the approved prose rule. Full suite 1318 passed; Ruff, compileall, `git diff --check` passed. Replay: original CSV 7 `EXACT` / 5 `REVIEW_REQUIRED`; saved HTML 8 / 4; Swift Go `EXACT` TGT-000030 with price excluded (`BUNDLE_OFFER`); PCC MSI four core fields, `MISSING_MODEL`. Throwaway-copy import refused 5 changed records; live store hash unchanged. | `tests/test_owner_policy_rules.py`; `tests/test_discovery.py`; `replay_extraction.py`; ignored `data/output/phase10_2026-10-13_all_retailers/manufacturer_research_2026-10-13/`, `research_validation_replay_2026-10-13/`, `research_validation_discovery_2026-10-13/` | MSI factory 8GB stays separate from the retailer-selected 16GB; OPI unresolved; no alias, suffix stripping, title-to-model rule, manufacturer-spec fallback, hardcoded target, catalog/mapping change, collection, Sheet edit, publication, import, or commit. The approved prose rule needs the display noun right after the size, so some product wording ("14-inch WUXGA display") still goes to review. TGT-000226's catalog `source_url` is the Acer OPI store page (noted, not changed). | Evidence requests in `PHASE_10_PILOT.md` (PCC model binding, Acer OPI definition/crosswalk, Octagon model/storage/CPU, ASUS SKU label); second weekly cycle from 2026-10-19. |
+| 2026-10-13 | 10 | Evidence-based extraction and offline discovery | Fix the five all-retailer review cases from saved evidence; add replay and candidate-discovery commands | COMPLETE (offline); Phase 10 remains IN_PROGRESS | Adapters `dbz-2`, `pcx-2`, `pcc-2`, `oct-2` (prices, stock, URLs, raw rows unchanged on the saved pages; `lf-1` unchanged) add scoped evidence: description prose, identifiers, PCC selected-variant binding, enumerated variants with page-given URLs. Extractor: DBZ `Model`/`Size`/`Display Panel/ Resolution`; `UNRESOLVED` model wording with suffixes; `SUPPORTING` evidence; paragraph heading groups with footnotes; maximum-memory clauses; unit-less drives and transfer rates. Replay of 12 saved offers, both paths: 7 LF `EXACT` unchanged, 5 `REVIEW_REQUIRED` with explained reasons (Aspire model `A14-11M-X3BP OPI` unresolved, screen 14; Swift Go model extracted, unit-less screen; PCX unchanged; PCC RAM 16/storage 512 from the bound variant; OCT screen/CPU/RAM extracted, storage unit missing). Throwaway-copy import refused the 5 changed records; live store hash unchanged. Discovery: 8 strong, 4 needs-verification, 2 different-configuration (PCC 8GB/32GB variants, not fetched), 90 planned queries. 50 new synthetic tests; full suite 1273 passed; Ruff and compileall passed. | `src/laptop_tracker/extraction.py`, `offers.py`, `observation_store.py`, `replay.py`, `discovery.py`, `price_tracking.py`, four adapters; `replay_extraction.py`; `discover_candidates.py`; `tests/test_extraction_layouts.py`, `test_discovery.py`, `test_replay.py`; outputs in ignored `data/output/phase10_2026-10-13_all_retailers/extraction_replay_2026-10-13/` and `candidate_discovery_2026-10-13/` | No retailer request, Sheet edit, catalog change, mapping, promotion, import, or commit. Blank `scoped_evidence` is omitted from the canonical record, so legacy observation identities and hashes are unchanged. One publisher test assertion was updated to the uncommitted publisher wording ("No confirmed matched offer this week"). | Owner decisions listed in `PHASE_10_PILOT.md` (prose screen size, `OPI`, shared-field inheritance, trusted model evidence, storage unit); then the 2026-10-19 cycle. |
+| 2026-10-13 | 10 | All-retailer pilot | Collect twelve offers across five retailers for seven verified configurations | IN_PROGRESS | All twelve requests succeeded; seven LF EXACT, two DBZ plus one PCX/PCC/OCT REVIEW_REQUIRED. Three comparable prices. Sixteen prior observations preserved; store now 28. Publication and separate readback passed: 7 comparison, 26 history, 13 review, 2 log rows. | `data/output/phase10_2026-10-13_all_retailers/PILOT_REPORT.md`; `docs/PHASE_10_PILOT.md` | Unassigned manifest-scoped observations retained with blank target IDs; no matching rule changes or catalog edits. Expansion is within the same reporting week. | Improve narrowly supported retailer extraction from saved evidence, replay and reconcile; repeat in week 2026-10-19 before acceptance. |
 | 2026-10-12 | 10 | Manual Sheets publisher and first pilot publication | Publish the reviewed seven-configuration cycle 01 reports to dedicated tracker tabs with clickable retailer links | COMPLETE (publication); Phase 10 remains IN_PROGRESS | New `sheet_publication.py`, `publish_prices.py`, and 39 offline tests using an in-memory fake of the Sheets API. The tests cover: preview makes no mutation; scope filtering (7 of 10); inconsistent inputs fail before Sheets access; the exact four-tab allowlist and request guard; blank prices stay blank; variant URLs preserved; repeat publication with no duplicate rows and an untouched store; partial failure with retry; readback detecting altered, missing, extra, and unlinked cells. 1,223 tests passed (1,184 + 39); Ruff, `compileall`, and `git diff --check` passed. **Live:** the preview passed (all four tabs new). The first `--write-sheets` attempt stalled on an outgoing request for more than 5 minutes and was stopped. It had created the four tabs, but a read-only check showed them empty, so no data was written. A per-request HTTP timeout and progress output were then added. The retry published **SUCCESS**: `PILOT_PRICE_COMPARISON` 7 rows (3 LF prices, 4 blank out-of-stock prices, 7 LF links), `PILOT_PRICE_HISTORY` 14 rows (14 links), `PILOT_PRICE_REVIEW` 4 rows (all stock exclusions, 0 matching problems), and `PILOT_PRICE_RUN_LOG` 1 row (`SUCCESS`, readback `PASSED`, publication `PUB-79db9c1175d094a0`). An independent read-only readback matched every planned cell, link, and PHP format, with 0 issues. | `src/laptop_tracker/sheet_publication.py`; `publish_prices.py`; `tests/test_sheet_publication.py`; ignored `data/output/sheet_publications/` (preview and write reports, plans) | Only the four `PILOT_PRICE_*` tabs were created or written. `raw`, the catalog tabs, `P1_TOP_100_CONFIGURATIONS`, and the ranking tabs were not read or modified. No collection, matching rerun, observation import, store access, schedule, or commit. The legacy rule of copying the whole spreadsheet needs Drive access that the Sheets-only service account lacks, so existing publisher tabs are backed up locally instead (none existed for this first publication). The cause of the stall was not identified: ICMP path-MTU checks were clean. | Owner review of the four tabs; repeat the publication after the week-2026-10-19 cycle. |
 | 2026-10-12 | 9 / 10 | Retailer recheck links | Add retailer product URLs beside weekly prices | COMPLETE | Added `<retailer>_Offer_URL` columns for all five retailers. Regenerated first-cycle reports at the original cutoff: all seven LF offers have links, including four out of stock; previous price/status fields are unchanged. | `src/laptop_tracker/price_tracking.py`; `data/output/phase10_2026-10-12/cycle_01/with_retailer_links/` | Selected price links use the selected offer; without a comparable price, use the latest current-week exact offer. No guessed or stale links. No retailer requests or Sheet edits. | Include these columns in the direct Sheets publisher. |
 | 2026-10-12 | 10 | First supervised live cycle | Collect and reconcile seven verified Top 100 configurations | IN_PROGRESS | Fresh catalog/list checks passed; seven HTTP 200 first-attempt requests, seven EXACT expected matches, three in-stock comparable prices and four stock exclusions. All seven captured pages reconciled; nine prior records preserved, seven added. Duplicate replay adds zero observations and preserves six report CSVs byte-for-byte. | `data/output/phase10_2026-10-12/cycle_01/PILOT_REPORT.md`; `docs/PHASE_10_PILOT.md` | Owner authorized 5-19 configurations; first scope is seven LF configurations. No Sheet edits, raw reads, catalog changes or schedule. | Establish a second retailer, repeat in week 2026-10-19, reconcile changes and seek owner acceptance before automation. |
@@ -148,5 +154,98 @@ No further page-state checks were run. A sold-out, pre-order, multi-variant, or 
 
 *Refreshed 2026-10-12. Items 1–3 of the earlier list (tracking-mode migration, conventions, and a saved-observation matching run) are done.*
 
-1. Continue the Phase 10 pilot: owner review of the published `PILOT_PRICE_*` tabs; establish a second retailer; repeat the seven-configuration collection in the week starting 2026-10-19, then review and publish it with `publish_prices.py` (preview first) before owner acceptance and automation.
+1. Continue the Phase 10 pilot: owner review of the published `PILOT_PRICE_*` tabs; obtain owner decisions on the remaining extraction gaps from the all-five-retailer expansion (offline fixes and replay done 2026-10-13; see `PHASE_10_PILOT.md`); repeat the seven-configuration collection in the week starting 2026-10-19, then review and publish it with `publish_prices.py` (preview first) before owner acceptance and automation.
 2. Keep credentials, user business data, history databases, and generated local reports out of Git.
+
+## Owner extraction policy implementation (2026-10-13)
+
+Implemented explicit product-description screen diagonals and conditional shared CPU/display
+using complete bound RAM/storage variant matrices. DataBlitz dbz-3 preserves paragraph
+locators; PCC pcc-3 captures the complete picker matrix. OPI remains unresolved, model
+identifiers stay restricted and Octagon storage stays unknown without capacity units.
+Offline saved-HTML replay: 12 offers, 8 EXACT / 4 REVIEW_REQUIRED, no reparse failures.
+Original CSV: 7 EXACT / 5 REVIEW_REQUIRED (new scoped evidence absent). Swift Go matches but
+is a bundle; PCC MSI has four core fields, shared provenance and the 8/16GB discrepancy,
+with model evidence still missing. Outputs are in the owner_policy_replay_2026-10-13 folder
+under the October 13 all-retailer output. No network, Sheets updates, store imports or commits;
+no unit tests added or run. Phase 10 remains IN_PROGRESS.
+
+*Follow-up (2026-10-13):* focused regression tests for these rules were added and the full suite
+was run (1318 passed); the replay was repeated with the same result. See the dated table row
+"Manufacturer research archive and owner-policy validation".
+
+## Listing-scoped owner approvals (2026-10-13)
+
+Owner approved DataBlitz Aspire OPI equivalence, Octagon Nitro OPI/model binding, and GB for
+Octagon's bare 512 drive amount. Added scoped evidence-approval policy and provenance,
+independent core guards, and policy-byte matching fingerprints. No generic suffix removal,
+title-model extraction or capacity guessing. Saved HTML replay: 10 EXACT / 2 REVIEW_REQUIRED;
+original CSV: 9 / 3. Saved comparable prices span LF, DBZ and OCT (five offers total).
+ASUS/MSI model bindings remain in review. Manufacturer verification remains distinct from owner
+approval; CPU/color discrepancies stay recorded. No retailer requests, store imports, Sheet
+writes or commits. No unit tests added or run for the new approvals; earlier 1,318-pass result
+predates this change. Phase 10 remains IN_PROGRESS.
+
+## Fresh all-retailer pilot and stock policy update (2026-10-13)
+
+Fresh catalog checks and verified-list audit passed. Twelve fresh HTTP 200 observations across
+five retailers for the same seven configurations give ten EXACT expected matches and two
+REVIEW_REQUIRED (PCX ASUS/PCC MSI model binding). Original saved records remain unchanged;
+store observations increased from 28 to 40 and prior contexts/results were preserved.
+
+The owner requested OUT_OF_STOCK displayed prices remain comparable during this run. Current
+reports select nine prices (LF 7, DBZ 1, OCT 1), covering all seven configurations, with four
+LF prices clearly labeled OUT OF STOCK. Swift Go's bundle remains excluded. History/review keep
+availability and owner-approval/CPU/color evidence. Report cutoff is 2026-10-13T08:03:19.735677Z,
+within the October 12 reporting week; Shopee's historical August/September labels are unchanged.
+
+Tests: 1,338 passed, including 19 new scoped-owner-approval checks and the stock-policy coverage.
+Ruff, compileall and whitespace checks pass. Fresh saved HTML reproduces all twelve records
+identically and the 10/2 matches. A throwaway duplicate import adds zero, without changing the
+main store. Preview then publication PUB-1ccbd431abba8a07 succeeded with zero readback issues:
+7 comparison rows, 38 history rows, 6 review rows and 4 historical run-log entries. An earlier
+publication from this collection used the previous stock rule and is preserved in the log;
+the latest publication supersedes it. Local backups of the four pilot tabs were saved.
+
+Artifacts: `data/output/phase10_2026-10-13_policy_pilot_20261013T075714Z/PILOT_REPORT.md` and `reports_out_of_stock/`;
+inputs/captures: `data/collection/phase10_2026-10-13_policy_pilot_20261013T075714Z/`. No catalog/mapping changes, commits or scheduling.
+Phase 10 stays IN_PROGRESS; a second weekly window begins 2026-10-19 and owner acceptance
+remains open. The two unresolved model bindings do not prevent further supervised collection.
+
+Separate live readback for the latest stock-policy publication: zero issues; all four OUT OF STOCK
+labels, prices, links and PHP formats verified. Live rows are 7 / 38 / 6 / 4.
+
+## Plain-language weekly workflow guide (2026-10-15)
+
+Added `WEEKLY_WORKFLOW.md` with a dataflow diagram, Sheet-tab map, file dictionary, date/freshness
+explanations and numbered weekly commands. The recipe refreshes raw-derived sales and catalog
+snapshots, rebuilds/audits the verified list, creates a reviewed seven-configuration scope, runs
+bounded automatic discovery/collection, builds price reports and previews/publishes pilot tabs.
+It distinguishes source-level versus verified Top 100, local refresh versus Sheet publication,
+fixed historical pilot copies, the persistent history store and remaining manual review/search
+limits. README and operations link to the guide; stale README publication/discovery statements
+were corrected. Command flags were checked against source; shell/Python examples received
+syntax-only checks. Documentation changes only: no live requests, data refresh, tests or commits.
+
+## Balanced matching policy and price/coverage outputs (2026-10-15)
+
+Implemented the owner's 15 October policy review (rules
+`five-field-exact/balanced-evidence/2026-10-15`; see DECISIONS.md and MATCHING.md): corroborated
+title model codes with conflict checks (page model rows, URL path, `mpn`, unexplained suffixes,
+title-vs-spec, scope), ASUS part-number recognition, duplicate-fact deduplication, installed RAM
+and drive sums with preserved components/media, labeled bare `i5`, glued `in` and label-unit
+screens, comma maximum clauses, shared-model inheritance under the complete matrix, explicit
+secondary severity with duplicate-target narrowing, match basis/warnings on results, lowest
+observed vs lowest in-stock prices with per-cell stock/time/basis/reason, a configuration ×
+retailer coverage report (`coverage_report.py`), and adapter layout fixes `oct-3`/`pcc-4`.
+Publisher `pilot-sheets-2` reads earlier reports and recognizes the earlier tab header.
+
+Offline replay with identical inputs against the pre-change tree: 13 Oct saved HTML 10/2 → 12
+EXACT; 15 Oct original records 7 EXACT/9 REVIEW → 12 EXACT/3 REVIEW/1 UNMATCHED; no earlier EXACT
+changed. Pilot price cells 9 → 12 (PCX ×2, PCC ×1); five of seven configurations have an in-stock
+minimum. Remaining review: PCX TUF `Model: FA506NC`, PCC Nitro `r2auh` URL, Octagon TUF original
+record (fixed for new collections by `oct-3`); Octagon SF14-51-553D shows 14.5in against the
+catalog's 14. Outputs: `data/output/policy_review_2026-10-15/` (with `preview.html`). Tests: see
+the delivery notes. No retailer requests, Sheets writes, store imports, catalog/approval edits or
+commits; price reports ran on throwaway store copies and the production store hash is unchanged.
+Phase 10 remains IN_PROGRESS.
