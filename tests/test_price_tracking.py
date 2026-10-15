@@ -217,7 +217,9 @@ def test_exact_unmatched_and_review_required_offers(tmp_path: Path) -> None:
         )
         for label, value in MODELS["EB14-0001"]
     )
-    unmatched = offer(slug="eb99-9999", specs=renamed, price="500.00")
+    # The title names the same code as the Model Name row; a title naming another code would be
+    # a genuine model conflict (review), not an unmatched offer.
+    unmatched = offer("EB99-9999", slug="eb99-9999", specs=renamed, price="500.00")
     no_ram = tuple(pair for pair in MODELS["EB14-0001"] if pair[0] != "RAM")
     missing_core = offer(slug="eb14-no-ram", specs=no_ram, price="400.00")
     conflict_specs = tuple(
@@ -317,19 +319,30 @@ def test_missing_prices_are_blank_with_a_reason_and_never_zero(tmp_path: Path) -
     ("changes", "reason"),
     [
         ({"currency": "USD"}, "CURRENCY_NOT_PHP"),
-        ({"availability": Availability.OUT_OF_STOCK}, "AVAILABILITY_OUT_OF_STOCK"),
         ({"availability": Availability.PREORDER}, "AVAILABILITY_PREORDER"),
         ({"availability": Availability.UNKNOWN}, "AVAILABILITY_UNKNOWN"),
-        ({"bundle": True}, "BUNDLE_OFFER"),
+        ({"bundle": True}, ""),
         ({"bundle": None}, "BUNDLE_STATUS_UNKNOWN"),
         ({"price_type": None}, "PRICE_TYPE_UNKNOWN"),
     ],
 )
-def test_non_comparable_offers_stay_in_history_with_their_status(tmp_path, changes, reason) -> None:
+def test_price_rules_keep_offers_in_history_with_their_status(tmp_path, changes, reason) -> None:
     excluded = offer(price="10.00", **changes)
 
     result = run(tmp_path, [excluded])
 
+    if not reason:
+        comparison = row(result, "TGT-000001")
+        assert comparison["LF_Price"] == "10.00"
+        assert comparison["LF_Warnings"] == "BUNDLE_OFFER"
+        assert comparison["Lowest_Price_Notes"] == "LF:BUNDLE_OFFER"
+        assert comparison["Lowest_In_Stock_Notes"] == "LF:BUNDLE_OFFER"
+        assert selection(result, "TGT-000001")["price_notes"] == "BUNDLE_OFFER"
+        kept = history(result, excluded)
+        assert (kept["comparability_status"], kept["comparability_reasons"]) == ("COMPARABLE", "")
+        assert kept["bundle_flag"] == "TRUE"
+        assert result.review == []
+        return
     assert row(result, "TGT-000001")["LF_Price"] == ""
     assert row(result, "TGT-000001")["LF_Price_Status"] == "NO_COMPARABLE_OFFER"
     assert selection(result, "TGT-000001")["not_comparable_reasons"] == f"{reason}:1"
@@ -425,10 +438,10 @@ def test_each_offer_is_represented_by_its_latest_observation_in_the_week(tmp_pat
 
     result = run(tmp_path, [monday, friday])
 
-    assert row(result, "TGT-000001")["LF_Price_Status"] == "NO_COMPARABLE_OFFER"
-    assert selection(result, "TGT-000001")["not_comparable_reasons"] == (
-        "AVAILABILITY_OUT_OF_STOCK:1"
-    )
+    assert row(result, "TGT-000001")["LF_Price_Status"] == "SELECTED"
+    assert row(result, "TGT-000001")["LF_Price"] == "1000.00"
+    assert selection(result, "TGT-000001")["not_comparable_reasons"] == ""
+    assert history(result, friday)["availability"] == "OUT_OF_STOCK"
     assert selection(result, "TGT-000001")["observations_in_week"] == "2"
     assert history(result, monday)["latest_for_offer_in_week"] == "False"
     assert history(result, friday)["latest_for_offer_in_week"] == "True"
@@ -444,12 +457,12 @@ def test_price_changes_are_calculated_only_between_comparable_observations(tmp_p
     result = run(tmp_path, [first, sold_out, higher, same])
 
     assert history(result, first)["price_change_status"] == "FIRST_COMPARABLE"
-    assert history(result, sold_out)["price_change_status"] == "NOT_CALCULATED"
-    assert history(result, sold_out)["price_change"] == ""
+    assert history(result, sold_out)["price_change_status"] == "DECREASED"
+    assert history(result, sold_out)["price_change"] == "-50.10"
     rise = history(result, higher)
-    assert (rise["price_change"], rise["price_change_status"]) == ("100.00", "INCREASED")
-    assert rise["previous_comparable_price"] == "1000.10"
-    assert rise["observations_since_previous_comparable"] == "1"
+    assert (rise["price_change"], rise["price_change_status"]) == ("150.10", "INCREASED")
+    assert rise["previous_comparable_price"] == "950.00"
+    assert rise["observations_since_previous_comparable"] == "0"
     unchanged = history(result, same)
     assert (unchanged["price_change"], unchanged["price_change_status"]) == ("0.00", "UNCHANGED")
     assert row(result, "TGT-000001")["LF_Price"] == "1100.10"
@@ -461,7 +474,7 @@ def test_weekly_series_separates_missing_weeks_and_representative_offer_changes(
 
     observations = [
         offer(slug="a", price="1000.00", at=at(23, 9)),
-        offer(slug="a", price="1000.00", at=at(30, 9), availability=Availability.OUT_OF_STOCK),
+        offer(slug="a", price="1000.00", at=at(30, 9), availability=Availability.PREORDER),
         offer(slug="b", price="900.00", at=at(7)),
         offer(slug="a", price="950.00", at=at(7)),
         offer(slug="a", price="880.00", at=at(14)),
@@ -784,3 +797,60 @@ def test_cli_refuses_a_contradicting_observation_file(tmp_path: Path, capsys) ->
         [stored] = store.observations()
     assert stored.price_text == "1000.00"
     assert not (tmp_path / "out" / "weekly_price_comparison.csv").exists()
+
+
+def test_out_of_stock_displayed_price_is_comparable_and_can_be_lowest(tmp_path) -> None:
+    sold_out = offer(slug="sold-out", price="10.00", availability=Availability.OUT_OF_STOCK)
+    available = offer(slug="available", price="20.00")
+    result = run(tmp_path, [sold_out, available])
+    assert row(result, "TGT-000001")["LF_Price"] == "10.00"
+    assert row(result, "TGT-000001")["Lowest_Price"] == "10.00"
+    assert selection(result, "TGT-000001")["comparable_offers"] == "2"
+    kept = history(result, sold_out)
+    assert kept["availability"] == "OUT_OF_STOCK"
+    assert kept["comparability_status"] == "COMPARABLE"
+    assert result.review == []
+
+
+def test_lowest_observed_and_lowest_in_stock_prices_are_separate(tmp_path) -> None:
+    sold_out = offer(slug="sold-out", price="10.00", availability=Availability.OUT_OF_STOCK)
+    available = offer(slug="available", price="20.00")
+    result = run(tmp_path, [sold_out, available])
+    first = row(result, "TGT-000001")
+    # The inclusive (observed) minimum keeps the out-of-stock price, labeled as such.
+    assert (first["Lowest_Price"], first["Lowest_Price_Stock"]) == ("10.00", "OUT_OF_STOCK")
+    assert first["Lowest_Price_Offer_URL"].endswith("/sold-out/")
+    assert first["LF_Reason"] == "PRICE_SHOWN_WHILE_OUT_OF_STOCK"
+    # The in-stock minimum uses the same comparable set, filtered to IN_STOCK.
+    assert (first["Lowest_In_Stock_Price"], first["Lowest_In_Stock_Price_Retailers"]) == (
+        "20.00", "LF"
+    )
+    assert first["Lowest_In_Stock_Offer_URL"].endswith("/available/")
+    assert first["Lowest_In_Stock_Observed_At"] == first["Lowest_Price_Observed_At"]
+    chosen = selection(result, "TGT-000001")
+    assert (chosen["availability"], chosen["in_stock_price"]) == ("OUT_OF_STOCK", "20.00")
+    assert chosen["match_basis"] == "LABELED_SPECIFICATION"
+
+
+def test_no_in_stock_offer_leaves_the_in_stock_minimum_blank(tmp_path) -> None:
+    sold_out = offer(price="10.00", availability=Availability.OUT_OF_STOCK)
+    result = run(tmp_path, [sold_out])
+    first = row(result, "TGT-000001")
+    assert first["Lowest_Price"] == "10.00"
+    assert first["Lowest_In_Stock_Price"] == first["Lowest_In_Stock_Offer_URL"] == ""
+    # A configuration without any offer explains its blank cells and never shows zero.
+    second = row(result, "TGT-000002")
+    assert (second["LF_Price"], second["LF_Reason"]) == ("", "NO_EXACT_OFFER_THIS_WEEK")
+    assert second["Lowest_Price"] == second["Lowest_In_Stock_Price"] == ""
+
+
+def test_out_of_stock_bundle_is_comparable_with_a_note(tmp_path) -> None:
+    bundled = offer(price="10.00", availability=Availability.OUT_OF_STOCK, bundle=True)
+    result = run(tmp_path, [bundled])
+    assert history(result, bundled)["comparability_reasons"] == ""
+    assert history(result, bundled)["comparability_status"] == "COMPARABLE"
+    comparison = row(result, "TGT-000001")
+    assert comparison["LF_Price"] == "10.00"
+    assert comparison["LF_Warnings"] == "BUNDLE_OFFER"
+    assert comparison["Lowest_Price_Notes"] == "LF:BUNDLE_OFFER"
+    assert comparison["Lowest_In_Stock_Price"] == ""

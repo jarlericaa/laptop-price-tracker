@@ -302,8 +302,12 @@ def main(argv: list[str] | None = None) -> int:
             "currency": REPORTING_CURRENCY,
             "price_basis": "Trusted displayed price (REGULAR or SALE price type); vouchers and "
             "shipping are not observed and stay unknown.",
-            "comparable": "EXACT match to a selected target, IN_STOCK, bundle_flag FALSE, PHP, "
-            "known price type.",
+            "comparable": "EXACT match to a selected target, IN_STOCK or OUT_OF_STOCK, "
+            "checked bundle status (TRUE or FALSE), PHP, known price type. Stock status remains "
+            "visible; confirmed bundles participate with a BUNDLE_OFFER note.",
+            "bundles": "Included at the displayed package price; no accessory value is "
+            "estimated or deducted. Unknown bundle status remains excluded.",
+            "comparison_policy_version": "displayed-price/stock-and-bundles/2026-10-15",
             "representative_observation": "Latest observation of each offer within the week.",
             "selection": "Lowest comparable price per target and retailer; no averaging.",
             "tie_break": TIE_BREAK,

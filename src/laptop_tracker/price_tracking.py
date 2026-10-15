@@ -10,12 +10,18 @@ Policy (starting rules, 2026-10-12):
   carried forward; they are shown separately as stale references.
 - The price basis is the trusted displayed price (``REGULAR`` or ``SALE`` price type).
   Vouchers and shipping are not part of it; they are not observed and stay unknown.
-- A price is comparable only for an ``EXACT`` match to a selected target that is ``IN_STOCK``,
-  not a bundle (``bundle_flag`` FALSE), in PHP, with a known price type. Everything else is
-  kept in history with its status and reasons.
+- A price is comparable only for an ``EXACT`` match to a selected target that is ``IN_STOCK``
+  or ``OUT_OF_STOCK``, with its actual availability retained,
+  in PHP, with a known price type and checked bundle status. Confirmed bundles participate
+  at their displayed package price and carry a BUNDLE_OFFER note (owner policy, 2026-10-15).
+  Everything else is kept in history with its status and reasons.
 - Each offer is represented in a week by its latest observation in that week. For one target and
   retailer, the lowest comparable price is selected; ties go to the latest retrieval, then the
   offer URL, offer index, and observation ID. All underlying observations stay in history.
+- Two minimums are reported from the same comparable set (2026-10-15): ``Lowest_Price`` is the
+  lowest *observed* comparable price, out-of-stock included (current owner policy), and
+  ``Lowest_In_Stock_Price`` uses only comparable offers recorded ``IN_STOCK``; it is blank when
+  there is none. Each names its retailer(s), link, observation time, and stock state.
 - A missing price is blank with a reason code, never zero.
 
 The working scope is the selected target list. The full catalog is still used for matching, so
@@ -34,8 +40,8 @@ from pathlib import Path
 from types import ModuleType
 from zoneinfo import ZoneInfo
 
-from . import conventions, extraction, matching, normalization
-from .matching import ExactMatcher, MatchStatus
+from . import conventions, evidence_approvals, extraction, matching, normalization
+from .matching import ExactMatcher, MatchStatus, is_warning_code, match_basis_from_codes
 from .normalization import CORE_MATCH_COLUMNS, core_key
 from .observation_store import (
     MatchingContext,
@@ -55,9 +61,11 @@ from .verified_top import CONTRIBUTING, money
 
 REPORTING_TIMEZONE = "Asia/Singapore"
 REPORTING_CURRENCY = "PHP"
-MATCHING_RULES_VERSION = "five-field-exact/cpu-family/2026-10-12"
+MATCHING_RULES_VERSION = "five-field-exact/balanced-evidence/2026-10-15"
 # Modules whose code defines matching outcomes; their bytes fingerprint the rule version.
-RULE_MODULES: tuple[ModuleType, ...] = (normalization, conventions, extraction, matching)
+RULE_MODULES: tuple[ModuleType, ...] = (
+    normalization, conventions, evidence_approvals, extraction, matching
+)
 
 # Retailer price columns in the requested order: code, adapter retailer_id.
 RETAILERS: tuple[tuple[str, str], ...] = (
@@ -97,7 +105,9 @@ PRODUCT_FIELDS: tuple[tuple[str, str], ...] = (
     ("Build_Material", "build_material"),
 )
 
-COMPARISON_COLUMNS: tuple[str, ...] = (
+# The comparison layout before 2026-10-15. Readers of saved reports require only these columns,
+# so earlier report folders still load; the added columns below are optional for them.
+LEGACY_COMPARISON_COLUMNS: tuple[str, ...] = (
     "report_week_start",
     "report_week_end",
     "reporting_timezone",
@@ -120,8 +130,33 @@ COMPARISON_COLUMNS: tuple[str, ...] = (
     "matching_context_id",
     "selected_list_sha256",
 )
+# Per retailer: stock state and observation time of the offer behind the cell, how its identity
+# was supported, nonblocking warnings, and why a price is blank (2026-10-15).
+RETAILER_DETAIL_SUFFIXES: tuple[str, ...] = (
+    "Stock", "Observed_At", "Match_Basis", "Warnings", "Reason",
+)
+COMPARISON_COLUMNS: tuple[str, ...] = (
+    *LEGACY_COMPARISON_COLUMNS[: LEGACY_COMPARISON_COLUMNS.index("Comparable_Retailer_Count")],
+    *(f"{code}_{suffix}" for code, _ in RETAILERS for suffix in RETAILER_DETAIL_SUFFIXES),
+    "Comparable_Retailer_Count",
+    # Lowest_Price is the lowest *observed* comparable price (out-of-stock included).
+    "Lowest_Price",
+    "Lowest_Price_Retailers",
+    "Lowest_Price_Offer_URL",
+    "Lowest_Price_Observed_At",
+    "Lowest_Price_Stock",
+    "Lowest_Price_Notes",
+    "Lowest_In_Stock_Price",
+    "Lowest_In_Stock_Price_Retailers",
+    "Lowest_In_Stock_Offer_URL",
+    "Lowest_In_Stock_Observed_At",
+    "Lowest_In_Stock_Notes",
+    "Shopee_Sales_Extract_Date",
+    "matching_context_id",
+    "selected_list_sha256",
+)
 
-SELECTION_COLUMNS: tuple[str, ...] = (
+LEGACY_SELECTION_COLUMNS: tuple[str, ...] = (
     "report_week_start",
     "report_week_end",
     "week_status",
@@ -156,6 +191,21 @@ SELECTION_COLUMNS: tuple[str, ...] = (
     "adapter_version",
     "content_sha256",
     "matching_context_id",
+)
+SELECTION_COLUMNS: tuple[str, ...] = (
+    *LEGACY_SELECTION_COLUMNS,
+    "availability",
+    "match_basis",
+    "match_warnings",
+    "price_notes",
+    "in_stock_price",
+    "in_stock_offer_url",
+    "in_stock_retrieved_at_utc",
+    "in_stock_observation_id",
+    "in_stock_price_notes",
+    "latest_exact_offer_url",
+    "latest_exact_availability",
+    "latest_exact_retrieved_at_utc",
 )
 
 HISTORY_COLUMNS: tuple[str, ...] = (
@@ -576,6 +626,11 @@ def matching_rules_sha256(modules: Sequence[ModuleType] = RULE_MODULES) -> str:
     for module in modules:
         path = Path(str(module.__file__))
         digest.update(module.__name__.encode() + b"\0" + path.read_bytes() + b"\0")
+        if module is evidence_approvals:
+            digest.update(
+                b"retailer_evidence_approvals.csv\0"
+                + evidence_approvals.APPROVALS_PATH.read_bytes() + b"\0"
+            )
     return digest.hexdigest()
 
 
@@ -644,22 +699,46 @@ def comparability(stored: StoredObservation, match: StoredMatch) -> tuple[str, t
         return REVIEW_REQUIRED, ("MATCH_REVIEW_REQUIRED",)
     if match.match_status != MatchStatus.EXACT.value or not match.target_id:
         return NOT_MATCHED, (f"MATCH_{match.match_status}",)
+    reasons = price_rule_reasons(
+        retailer_id=stored.retailer_id,
+        currency=stored.currency,
+        availability=stored.availability,
+        bundle_flag=stored.bundle_flag,
+        price_type=stored.price_type,
+        price=stored.price,
+    )
+    return (COMPARABLE, ()) if not reasons else (NOT_COMPARABLE, reasons)
+
+
+def price_rule_reasons(
+    *,
+    retailer_id: str,
+    currency: str,
+    availability: str,
+    bundle_flag: str,
+    price_type: str,
+    price: Decimal,
+) -> tuple[str, ...]:
+    """Why an exactly matched offer's price is not comparable; empty when it is."""
     reasons = []
-    if stored.retailer_id not in RETAILER_CODE_BY_ID:
+    if retailer_id not in RETAILER_CODE_BY_ID:
         reasons.append("RETAILER_NOT_IN_COMPARISON")
-    if stored.currency != REPORTING_CURRENCY:
+    if currency != REPORTING_CURRENCY:
         reasons.append("CURRENCY_NOT_PHP")
-    if stored.availability != Availability.IN_STOCK.value:
-        reasons.append(f"AVAILABILITY_{stored.availability}")
-    if stored.bundle_flag == "TRUE":
-        reasons.append("BUNDLE_OFFER")
-    elif stored.bundle_flag != "FALSE":
+    if availability not in {Availability.IN_STOCK.value, Availability.OUT_OF_STOCK.value}:
+        reasons.append(f"AVAILABILITY_{availability}")
+    if bundle_flag not in {"TRUE", "FALSE"}:
         reasons.append("BUNDLE_STATUS_UNKNOWN")
-    if stored.price_type not in {PriceType.REGULAR.value, PriceType.SALE.value}:
+    if price_type not in {PriceType.REGULAR.value, PriceType.SALE.value}:
         reasons.append("PRICE_TYPE_UNKNOWN")
-    if not stored.price.is_finite() or stored.price <= 0:
+    if not price.is_finite() or price <= 0:
         reasons.append("PRICE_INVALID")
-    return (COMPARABLE, ()) if not reasons else (NOT_COMPARABLE, tuple(reasons))
+    return tuple(reasons)
+
+
+def price_note_codes(bundle_flag: str) -> tuple[str, ...]:
+    """Nonblocking price notes, kept separate from identity and exclusion reasons."""
+    return ("BUNDLE_OFFER",) if bundle_flag == "TRUE" else ()
 
 
 def _selection_key(view: ObservationView) -> tuple[object, ...]:
@@ -692,6 +771,8 @@ class Selection:
     stale: ObservationView | None
     # Latest exact offer in this week, retained for rechecking even with no comparable price.
     observed: ObservationView | None = None
+    # Lowest comparable offer recorded IN_STOCK (same set and tie-break as ``chosen``).
+    chosen_in_stock: ObservationView | None = None
 
 
 def select_week(
@@ -759,6 +840,10 @@ def select_week(
                 review_required=review[key],
                 stale=None if comparable else earlier.get(key),
                 observed=_latest(offers) if offers else None,
+                chosen_in_stock=next(
+                    (v for v in comparable if v.stored.availability == Availability.IN_STOCK.value),
+                    None,
+                ),
             )
     return selections
 
@@ -943,7 +1028,8 @@ def _comparison_row(
         "Shopee_Sales_Run_ID": selected.sales_run_id,
         "Currency": REPORTING_CURRENCY,
     }
-    prices: dict[str, Decimal] = {}
+    observed: dict[str, ObservationView] = {}
+    in_stock: dict[str, ObservationView] = {}
     for code, _ in RETAILERS:
         selection = selections[(item.target_id, code)]
         chosen = selection.chosen
@@ -951,19 +1037,84 @@ def _comparison_row(
         linked_offer = chosen or selection.observed
         row[f"{code}_Offer_URL"] = linked_offer.stored.offer_url if linked_offer else ""
         row[f"{code}_Price_Status"] = selection.status
+        row |= {
+            f"{code}_Stock": linked_offer.stored.availability if linked_offer else "",
+            f"{code}_Observed_At": local_text(linked_offer.stored.retrieved_at)
+            if linked_offer else "",
+            f"{code}_Match_Basis": match_basis_from_codes(linked_offer.match.reason_codes)
+            if linked_offer else "",
+            f"{code}_Warnings": ";".join(filter(None, (
+                _warnings(linked_offer),
+                ";".join(price_note_codes(linked_offer.stored.bundle_flag))
+                if linked_offer else "",
+            ))),
+            f"{code}_Reason": cell_reason(selection),
+        }
         if chosen:
-            prices[code] = chosen.stored.price
-    lowest = min(prices.values()) if prices else None
+            observed[code] = chosen
+        if selection.chosen_in_stock:
+            in_stock[code] = selection.chosen_in_stock
     row |= {
-        "Comparable_Retailer_Count": str(len(prices)),
-        "Lowest_Price": money(lowest) if lowest is not None else "",
-        "Lowest_Price_Retailers": ";".join(
-            code for code, price in prices.items() if price == lowest
-        ),
+        "Comparable_Retailer_Count": str(len(observed)),
+        **_minimum("Lowest_Price", "Lowest_Price", observed, stock=True),
+        **_minimum("Lowest_In_Stock_Price", "Lowest_In_Stock", in_stock, stock=False),
+        "Shopee_Sales_Extract_Date": selected.sales_extract_date,
         "matching_context_id": context.context_id,
         "selected_list_sha256": selected.sha256,
     }
     return {column: row[column] for column in COMPARISON_COLUMNS}
+
+
+def _minimum(
+    price_column: str, prefix: str, views: Mapping[str, ObservationView], *, stock: bool
+) -> dict[str, str]:
+    """The lowest price among per-retailer choices, its retailer(s), link(s), time(s) and stock.
+
+    Ties keep every tied retailer, in retailer column order. Blank when there is no price.
+    """
+    lowest = min((view.stored.price for view in views.values()), default=None)
+    tied = [(code, view) for code, view in views.items() if view.stored.price == lowest]
+    values = {
+        price_column: money(lowest) if lowest is not None else "",
+        f"{price_column}_Retailers": ";".join(code for code, _ in tied),
+        f"{prefix}_Offer_URL": ";".join(view.stored.offer_url for _, view in tied),
+        f"{prefix}_Observed_At": ";".join(
+            local_text(view.stored.retrieved_at) for _, view in tied
+        ),
+        f"{prefix}_Notes": ";".join(
+            f"{code}:{note}" for code, view in tied
+            for note in price_note_codes(view.stored.bundle_flag)
+        ),
+    }
+    if stock:
+        values[f"{prefix}_Stock"] = ";".join(view.stored.availability for _, view in tied)
+    return values
+
+
+def _warnings(view: ObservationView | None) -> str:
+    return ";".join(code for code in view.match.reason_codes if is_warning_code(code)) if (
+        view
+    ) else ""
+
+
+def cell_reason(selection: Selection) -> str:
+    """Why a retailer cell has this price, or why it is blank. Never implies a fresh fetch."""
+    if selection.status == SELECTED:
+        assert selection.chosen is not None
+        if selection.chosen.stored.availability == Availability.OUT_OF_STOCK.value:
+            return "PRICE_SHOWN_WHILE_OUT_OF_STOCK"
+        return ""
+    if selection.status == NO_COMPARABLE_OFFER:
+        return "EXACT_PRICE_EXCLUDED: " + selection.not_comparable_reasons
+    if selection.status == REVIEW_REQUIRED_ONLY:
+        return f"MATCH_REVIEW_REQUIRED: {selection.review_required} observation(s)"
+    if selection.stale is not None:
+        stale = selection.stale.stored
+        return (
+            "NO_EXACT_OFFER_THIS_WEEK; last comparable "
+            f"{stale.price_text} on {local_text(stale.retrieved_at)} (not carried forward)"
+        )
+    return "NO_EXACT_OFFER_THIS_WEEK"
 
 
 def _selection_row(
@@ -1007,6 +1158,24 @@ def _selection_row(
         "adapter_version": chosen.adapter_version if chosen else "",
         "content_sha256": chosen.content_sha256 if chosen else "",
         "matching_context_id": context.context_id,
+    }
+    in_stock = selection.chosen_in_stock.stored if selection.chosen_in_stock else None
+    latest = selection.observed.stored if selection.observed else None
+    row |= {
+        "availability": chosen.availability if chosen else "",
+        "match_basis": match_basis_from_codes(selection.chosen.match.reason_codes)
+        if selection.chosen else "",
+        "match_warnings": _warnings(selection.chosen),
+        "price_notes": ";".join(price_note_codes(chosen.bundle_flag)) if chosen else "",
+        "in_stock_price": in_stock.price_text if in_stock else "",
+        "in_stock_offer_url": in_stock.offer_url if in_stock else "",
+        "in_stock_retrieved_at_utc": utc_text(in_stock.retrieved_at) if in_stock else "",
+        "in_stock_observation_id": in_stock.observation_id if in_stock else "",
+        "in_stock_price_notes": ";".join(price_note_codes(in_stock.bundle_flag))
+        if in_stock else "",
+        "latest_exact_offer_url": latest.offer_url if latest else "",
+        "latest_exact_availability": latest.availability if latest else "",
+        "latest_exact_retrieved_at_utc": utc_text(latest.retrieved_at) if latest else "",
     }
     return {column: row[column] for column in SELECTION_COLUMNS}
 
