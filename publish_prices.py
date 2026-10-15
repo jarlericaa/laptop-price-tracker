@@ -176,10 +176,20 @@ def main(
     )
     print(
         f"Outcomes: comparable prices {counts['comparable_prices']}; matched but excluded "
-        f"{counts['matched_excluded_cells']}; needs match review "
-        f"{counts['review_required_cells']}; retailer cells not observed "
+        f"{counts['matched_excluded_cells']}; retailer cells needing match review "
+        f"{counts['review_required_cells']}; cells with no confirmed matched offer "
         f"{counts['not_observed_cells']}."
     )
+    print(
+        f"History observations requiring match review in this week: "
+        f"{counts['week_matching_problems']}."
+    )
+    outside_scope = counts.get("collection_exact_outside_scope", 0)
+    if outside_scope:
+        print(
+            f"Collection exact matches outside pilot scope: {outside_scope}; excluded from "
+            "pilot comparison and history. Related search mismatches remain in review."
+        )
 
     # 2. Open the configured spreadsheet: read-only scope for preview, write scope to publish.
     factory = spreadsheet_factory or open_configured_spreadsheet

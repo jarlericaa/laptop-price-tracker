@@ -34,6 +34,7 @@ from laptop_tracker.price_tracking import (
 from laptop_tracker.sheet_publication import (
     COMPARISON_TAB,
     HISTORY_TAB,
+    PILOT_SHEETS_1_COMPARISON_HEADER,
     PUBLISHER_TABS,
     REVIEW_TAB,
     RUN_LOG_TAB,
@@ -523,19 +524,24 @@ def test_blank_prices_stay_blank_with_clear_statuses(world) -> None:
     code, fake, _ = run(world)
     assert code == 0
     out_of_stock = row_for(fake, COMPARISON_TAB, "TGT-000002")
-    assert out_of_stock["Laptop Factory price (PHP)"] == ""
-    assert out_of_stock["Laptop Factory status"] == "Matched, not comparable: out of stock"
-    assert out_of_stock["Lowest comparable price (PHP)"] == ""
+    assert out_of_stock["Laptop Factory price (PHP)"] == "1500.0"
+    assert out_of_stock["Laptop Factory status"] == "Comparable price (OUT OF STOCK)"
+    # The inclusive minimum is labeled "observed"; with no in-stock offer the in-stock minimum
+    # is blank, never the out-of-stock price.
+    assert out_of_stock["Lowest observed price (PHP)"] == "1500.0"
+    assert out_of_stock["Lowest in-stock price (PHP)"] == ""
+    assert out_of_stock["Lowest in-stock retailer(s)"] == ""
+    assert out_of_stock["Laptop Factory observed (Asia/Singapore)"].startswith("20")
     unobserved = row_for(fake, COMPARISON_TAB, "TGT-000005")
-    assert unobserved["Laptop Factory status"] == "Not observed this week"
+    assert unobserved["Laptop Factory status"] == "No confirmed matched offer this week"
     assert unobserved["Laptop Factory product link"] == ""
     review_only = row_for(fake, COMPARISON_TAB, "TGT-000004")
     assert review_only["Laptop Factory status"] == "Needs match review (no price)"
     # A blank price cell has no value at all, so it can never read as zero.
     values = fake.values(COMPARISON_TAB)
     price_col = values[0].index("Laptop Factory price (PHP)")
-    assert fake.cell(COMPARISON_TAB, 2, price_col) == {} or not fake.cell(
-        COMPARISON_TAB, 2, price_col
+    assert fake.cell(COMPARISON_TAB, 5, price_col) == {} or not fake.cell(
+        COMPARISON_TAB, 5, price_col
     ).get("userEnteredValue")
     # The earlier week's TGT-000003 price is history only, never this week's comparison.
     assert row_for(fake, COMPARISON_TAB, "TGT-000003")["Laptop Factory price (PHP)"] == "2000.0"
@@ -550,9 +556,17 @@ def test_prices_are_php_numbers_and_ids_are_text(world) -> None:
     assert cell["userEnteredFormat"]["numberFormat"]["type"] == "CURRENCY"
     target_cell = fake.cell(COMPARISON_TAB, 1, values[0].index("Target ID"))
     assert target_cell["userEnteredValue"] == {"stringValue": "TGT-000001"}
-    assert row_for(fake, COMPARISON_TAB, "TGT-000001")["Lowest-price retailer(s)"] == (
+    assert row_for(fake, COMPARISON_TAB, "TGT-000001")["Lowest observed price retailer(s)"] == (
         "PC Central"
     )
+
+
+def test_a_tab_with_the_previous_publisher_header_is_still_owned(world) -> None:
+    previous = [list(PILOT_SHEETS_1_COMPARISON_HEADER), ["1", "TGT-000001"]]
+    code, fake, _ = run(world, fake=FakeSpreadsheet({COMPARISON_TAB: previous}))
+
+    assert code == 0
+    assert fake.values(COMPARISON_TAB)[0][-9] == "Lowest observed price (PHP)"
 
 
 def test_text_is_never_sent_as_a_formula() -> None:
@@ -586,12 +600,12 @@ def test_links_are_exact_offers_and_candidates_are_never_confirmed_links(world) 
         assert "hyperlink" not in fake.cell(title, r, unconfirmed)
 
 
-def test_review_separates_matching_problems_from_stock_exclusions(world) -> None:
+def test_review_retains_matching_problems_and_stock_is_comparable(world) -> None:
     _, fake, _ = run(world)
     categories = sorted(column(fake, REVIEW_TAB, "Category"))
-    assert categories == ["Matched, excluded from comparison", "Matching problem"]
+    assert categories == ["Matching problem"]
     outcomes = column(fake, HISTORY_TAB, "Outcome")
-    assert "Matched, excluded from comparison: out of stock" in outcomes
+    assert "Matched, comparable (OUT OF STOCK)" in outcomes
     assert "Matching problem: REVIEW_REQUIRED" in outcomes
 
 
@@ -603,8 +617,8 @@ def test_run_log_records_times_counts_labels_and_status(world) -> None:
     assert record["Collection started (UTC)"] == "2026-10-07T03:59:00.000000Z"
     assert record["Report cutoff (UTC)"] == "2026-10-12T01:00:00.000000Z"
     assert record["Last published (UTC)"] == "2026-10-12T02:00:00+00:00"
-    assert record["Comparable prices"] == "3.0"  # TGT-000001 LF and PCC, TGT-000003 LF
-    assert record["Matched but excluded (stock or price rules)"] == "1.0"
+    assert record["Comparable prices"] == "4.0"  # Includes TGT-000002 out-of-stock price.
+    assert record["Matched but excluded (stock or price rules)"] == "0.0"
     assert "historical Shopee snapshot" in record["Shopee sales snapshot"]
 
 

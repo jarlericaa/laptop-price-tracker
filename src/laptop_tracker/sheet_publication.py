@@ -28,6 +28,8 @@ from zoneinfo import ZoneInfo
 from .price_tracking import (
     COMPARISON_COLUMNS,
     HISTORY_COLUMNS,
+    LEGACY_COMPARISON_COLUMNS,
+    LEGACY_SELECTION_COLUMNS,
     NO_COMPARABLE_OFFER,
     NO_OBSERVATION_IN_WEEK,
     REPORTING_CURRENCY,
@@ -41,7 +43,7 @@ from .price_tracking import (
 from .target_master import TARGET_ID_PATTERN
 from .verified_top import CONFIGURATION_COLUMNS, VerifiedRankingInputError, read_csv_rows
 
-PUBLISHER_VERSION = "pilot-sheets-1"
+PUBLISHER_VERSION = "pilot-sheets-2"
 COMPARISON_TAB = "PILOT_PRICE_COMPARISON"
 HISTORY_TAB = "PILOT_PRICE_HISTORY"
 REVIEW_TAB = "PILOT_PRICE_REVIEW"
@@ -249,8 +251,16 @@ def load_pilot_report(
         raise PublicationInputError(issues)
 
     try:
-        comparison = read_csv_rows(paths["comparison"], COMPARISON_COLUMNS, "Comparison report")
-        selections = read_csv_rows(paths["selections"], SELECTION_COLUMNS, "Selections report")
+        # Reports saved before 2026-10-15 lack the added columns; they stay readable and the
+        # added cells are blank (never invented).
+        comparison = [
+            dict.fromkeys(COMPARISON_COLUMNS, "") | row for row in read_csv_rows(
+                paths["comparison"], LEGACY_COMPARISON_COLUMNS, "Comparison report")
+        ]
+        selections = [
+            dict.fromkeys(SELECTION_COLUMNS, "") | row for row in read_csv_rows(
+                paths["selections"], LEGACY_SELECTION_COLUMNS, "Selections report")
+        ]
         history = read_csv_rows(paths["history"], HISTORY_COLUMNS, "History report")
         review = read_csv_rows(paths["review"], REVIEW_COLUMNS, "Review report")
         scope = read_csv_rows(pilot_scope, CONFIGURATION_COLUMNS, "Pilot scope")
@@ -413,13 +423,55 @@ def load_pilot_report(
             issues.append(f"{target_id} lowest-price retailers are wrong")
         if row["Comparable_Retailer_Count"] != str(len(prices)):
             issues.append(f"{target_id} comparable retailer count is wrong")
+        # The in-stock minimum must come from the same selections, filtered to IN_STOCK offers.
+        in_stock: dict[str, Decimal] = {}
+        for code, _ in RETAILERS:
+            selection = selection_index.get((target_id, code))
+            if selection and selection["in_stock_price"]:
+                try:
+                    in_stock[code] = Decimal(selection["in_stock_price"])
+                except InvalidOperation:
+                    issues.append(f"{target_id} {code} in-stock price is not a decimal")
+        lowest_in_stock = min(in_stock.values()) if in_stock else None
+        stated = row["Lowest_In_Stock_Price"]
+        if (Decimal(stated) if stated else None) != lowest_in_stock:
+            issues.append(f"{target_id} lowest in-stock price disagrees with its selections")
 
-    # History and review: pilot targets, plus non-exact observations naming a pilot candidate.
+    # Manifest expectations scope the pilot without assigning an uncertain offer to a target.
+    pilot_observation_ids: set[str] = set()
+    pilot_offers: set[tuple[str, str, str]] = set()
+    if collection_dir is not None:
+        results_path = collection_dir / COLLECTION_FILES["results"]
+        if results_path.is_file():
+            collection_results = read_csv_rows(
+                results_path,
+                ("observation_id", "match_status", "target_id", "expected_target_id"),
+                "Collection results",
+            )
+            pilot_observation_ids = {
+                row["observation_id"]
+                for row in collection_results
+                if row["expected_target_id"] in scope_set or row["target_id"] in scope_set
+            }
+            pilot_offers = {
+                (row.get("retailer_id", ""), row["offer_url"], row.get("offer_index", "0"))
+                for row in collection_results
+                if row.get("offer_url")
+                and (row["expected_target_id"] in scope_set or row["target_id"] in scope_set)
+            }
+
+    # History and review include unassigned observations collected for this pilot scope.
     def in_scope(row: Mapping[str, str]) -> bool:
         if row["match_status"] == "EXACT":
             return row["target_id"] in scope_set
         candidates = set(filter(None, row["candidate_target_ids"].split(";")))
-        return bool(candidates & scope_set)
+        offer = (row.get("retailer_id", ""), row.get("offer_url", ""),
+                 row.get("offer_index", "0"))
+        return (
+            bool(candidates & scope_set)
+            or row["observation_id"] in pilot_observation_ids
+            or offer in pilot_offers
+        )
 
     pilot_history = [row for row in history if in_scope(row)]
     for row in pilot_history:
@@ -434,6 +486,7 @@ def load_pilot_report(
 
     collection_summary = None
     collection_review: list[dict[str, str]] = []
+    collection_exact_outside_scope = 0
     if collection_dir is not None:
         files = {key: collection_dir / name for key, name in COLLECTION_FILES.items()}
         missing = [p.name for p in files.values() if not p.is_file()]
@@ -450,8 +503,15 @@ def load_pilot_report(
             for result in results:
                 if result["observation_id"] not in history_ids:
                     issues.append("a collected observation is missing from the history report")
-                if result["match_status"] == "EXACT" and result["target_id"] not in scope_set:
-                    issues.append("a collected exact match is outside the pilot scope")
+                if result["match_status"] == "EXACT":
+                    if not result["target_id"]:
+                        issues.append("a collected exact match has no target_id")
+                    elif result["target_id"] not in scope_set:
+                        # Discovery can find a different configuration while searching for a
+                        # scoped target. Keep its evidence in the full history; in_scope()
+                        # already excludes it from pilot comparison/history. A scoped search
+                        # mismatch remains in collection_review below.
+                        collection_exact_outside_scope += 1
             collection_review = [
                 row for row in read_csv_rows(
                     files["review"], ("review_reasons", "observation_id", "target_id",
@@ -470,6 +530,7 @@ def load_pilot_report(
     cells = [(row, code) for row in pilot_comparison for code, _ in RETAILERS]
     counts = {
         "pilot_configurations": len(scope),
+        "collection_exact_outside_scope": collection_exact_outside_scope,
         "comparison_rows": len(pilot_comparison),
         "history_rows": len(pilot_history),
         "review_rows": len(pilot_review) + sum(
@@ -515,23 +576,82 @@ def load_pilot_report(
 # Building the tab plans
 
 
-def _status_text(status: str, reasons: str) -> str:
+BASIS_TEXT = {
+    "TITLE_MODEL_CORROBORATED": "model from title, other specs from the page",
+    "OWNER_APPROVED_INTERPRETATION": "owner-approved listing interpretation",
+    "SELECTED_VARIANT": "selected variant",
+    "SHARED_PRODUCT": "shared product specs",
+}
+
+
+def _status_text(
+    status: str, reasons: str, availability: str = "", basis: str = "", warnings: str = ""
+) -> str:
+    """Short status for one retailer cell. "Matched configuration" means the five-field policy
+    matched; it does not claim an identical factory SKU or processor number."""
     if status == SELECTED:
-        return "Comparable price"
-    if status == NO_COMPARABLE_OFFER:
-        return "Matched, not comparable: " + (_reason_text(_codes(reasons)) or "excluded")
-    if status == REVIEW_REQUIRED_ONLY:
-        return "Needs match review (no price)"
-    return "Not observed this week"
+        text_value = (
+            "Comparable price (OUT OF STOCK)"
+            if availability == "OUT_OF_STOCK" else "Comparable price"
+        )
+        detail = ", ".join(BASIS_TEXT[tag] for tag in basis.split("+") if tag in BASIS_TEXT)
+        if detail:
+            text_value += f"; matched configuration ({detail})"
+    elif status == NO_COMPARABLE_OFFER:
+        text_value = "Matched, not comparable: " + (_reason_text(_codes(reasons)) or "excluded")
+    elif status == REVIEW_REQUIRED_ONLY:
+        text_value = "Needs match review (no price)"
+    else:
+        text_value = "No confirmed matched offer this week"
+    if warnings:
+        text_value += "; notes: " + _reason_text(_codes(warnings))
+    return text_value
+
+
+# The comparison header written by publisher pilot-sheets-1 (before 2026-10-15). A live tab that
+# still carries it is this publisher's own content and may be replaced by the current layout.
+PILOT_SHEETS_1_COMPARISON_HEADER: tuple[str, ...] = (
+    "Rank", "Target ID", "Brand", "Series", "Model", "Screen (in)", "CPU family", "RAM (GB)",
+    "Storage (GB)",
+    *(
+        column
+        for code, _ in RETAILERS
+        for column in (
+            f"{RETAILER_NAMES[code]} price (PHP)",
+            f"{RETAILER_NAMES[code]} product link",
+            f"{RETAILER_NAMES[code]} status",
+        )
+    ),
+    "Lowest comparable price (PHP)", "Lowest-price retailer(s)", "Comparable retailers",
+    "Reporting week (Asia/Singapore)", "Week status", "Report cutoff (Asia/Singapore)",
+)
+EARLIER_HEADERS: dict[str, tuple[tuple[str, ...], ...]] = {
+    COMPARISON_TAB: (PILOT_SHEETS_1_COMPARISON_HEADER,),
+}
 
 
 def _outcome(row: Mapping[str, str]) -> str:
     if row["match_status"] != "EXACT":
         return f"Matching problem: {row['match_status']}"
     if row["comparability_status"] == "COMPARABLE":
-        return "Matched, comparable"
+        outcome = (
+            "Matched, comparable (OUT OF STOCK)"
+            if row["availability"] == "OUT_OF_STOCK" else "Matched, comparable"
+        )
+        return outcome + ("; bundle offer" if row["bundle_flag"] == "TRUE" else "")
     return "Matched, excluded from comparison: " + _reason_text(
         _codes(row["comparability_reasons"])
+    )
+
+
+def _minimum_retailers(retailers: str, notes: str) -> str:
+    """Label the actual minimum's package, including ties and in-stock alternatives."""
+    bundled = {
+        note.split(":", 1)[0] for note in notes.split(";") if note.endswith(":BUNDLE_OFFER")
+    }
+    return ", ".join(
+        RETAILER_NAMES[code] + (" (bundle offer)" if code in bundled else "")
+        for code in retailers.split(";") if code
     )
 
 
@@ -547,13 +667,22 @@ def comparison_plan(report: PilotReport) -> TabPlan:
         "RAM (GB)",
         "Storage (GB)",
     ]
+    stock_by_observation = {row["observation_id"]: row["availability"] for row in report.history}
     for code, _ in RETAILERS:
         name = RETAILER_NAMES[code]
-        header += [f"{name} price (PHP)", f"{name} product link", f"{name} status"]
+        header += [
+            f"{name} price (PHP)", f"{name} product link", f"{name} status",
+            f"{name} observed (Asia/Singapore)",
+        ]
     header += [
-        "Lowest comparable price (PHP)",
-        "Lowest-price retailer(s)",
+        # Out-of-stock prices are comparable under the current owner policy, so this is the
+        # lowest *observed* price; the in-stock minimum is calculated separately.
+        "Lowest observed price (PHP)",
+        "Lowest observed price retailer(s)",
+        "Lowest in-stock price (PHP)",
+        "Lowest in-stock retailer(s)",
         "Comparable retailers",
+        "Shopee sales snapshot (extract date)",
         "Reporting week (Asia/Singapore)",
         "Week status",
         "Report cutoff (Asia/Singapore)",
@@ -582,13 +711,20 @@ def comparison_plan(report: PilotReport) -> TabPlan:
                 number(row[f"{code}_Price"], "php"),
                 text(url, link=url),
                 text(_status_text(row[f"{code}_Price_Status"],
-                                  selection["not_comparable_reasons"])),
+                                  selection["not_comparable_reasons"],
+                                  stock_by_observation.get(selection["observation_id"], ""),
+                                  row[f"{code}_Match_Basis"], row[f"{code}_Warnings"])),
+                text(row[f"{code}_Observed_At"]),
             ]
         lowest = row["Lowest_Price_Retailers"]
+        in_stock = row["Lowest_In_Stock_Price_Retailers"]
         cells += [
             number(row["Lowest_Price"], "php"),
-            text(", ".join(RETAILER_NAMES[c] for c in lowest.split(";") if c)),
+            text(_minimum_retailers(lowest, row.get("Lowest_Price_Notes", ""))),
+            number(row["Lowest_In_Stock_Price"], "php"),
+            text(_minimum_retailers(in_stock, row.get("Lowest_In_Stock_Notes", ""))),
             number(row["Comparable_Retailer_Count"], "integer"),
+            text(row["Shopee_Sales_Extract_Date"]),
             text(week),
             text(report.summary["report_week"]["status"]),
             text(_local(report.as_of)),
@@ -980,11 +1116,10 @@ def check_ownership(state: TabState, expected_header: Sequence[str]) -> str:
     if not state.exists or state.used_rows == 0:
         return ""
     header = state.header()
-    if header[: len(expected_header)] != list(expected_header) or any(
-        header[len(expected_header):]
-    ):
-        return f"{state.title} has content that this publisher did not write"
-    return ""
+    for known in (tuple(expected_header), *EARLIER_HEADERS.get(state.title, ())):
+        if header[: len(known)] == list(known) and not any(header[len(known):]):
+            return ""
+    return f"{state.title} has content that this publisher did not write"
 
 
 def tab_requests(state: TabState, plan_grid: Sequence[Sequence[Cell]], width: int) -> list[dict]:
