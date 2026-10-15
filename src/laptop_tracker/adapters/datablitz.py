@@ -21,6 +21,8 @@ from html.parser import HTMLParser
 from urllib.parse import urlsplit
 
 from ..offers import (
+    IDENTIFIER,
+    PRODUCT_DESCRIPTION,
     Availability,
     ObservationValidationError,
     OfferDetails,
@@ -87,7 +89,9 @@ class DataBlitzAdapter:
     retailer_id = RETAILER_ID
     retailer_code = RETAILER_CODE
     # Bump when parsing rules change; recorded in every observation's source metadata.
-    adapter_version = "dbz-1"
+    # dbz-2 (2026-10-13): adds description prose and identifier provenance as scoped evidence.
+    # dbz-3: preserve visible paragraph locators for approved explicit screen-size prose.
+    adapter_version = "dbz-3"
     allowed_hosts = frozenset({HOST})
     # Project-owner policy; retailer permission is not independently verified.
     live_use_approved = True
@@ -114,6 +118,9 @@ class DataBlitzAdapter:
         ) or (_text(product.get("description")) if product else "")
         bundle_evidence = _bundle_evidence(title)
         category = _text(product.get("category")) if product else ""
+        scoped = _description_evidence(parsed.description_paragraphs, product) + (
+            _identifier_evidence(product, parsed)
+        )
         details = OfferDetails(
             retailer_product_id=_digits(parsed.product_ids),
             retailer_sku=(_text(product.get("sku")) if product else "") or _first(parsed.skus),
@@ -128,6 +135,7 @@ class DataBlitzAdapter:
             raw_categories=(category,) if category else (),
             bundle_flag=bool(bundle_evidence),
             bundle_evidence=bundle_evidence,
+            scoped_evidence=scoped,
         )
         url = ""
         for candidate in (offer.get("url") if offer else None, product and product.get("url")):
@@ -388,6 +396,53 @@ def _label_lines(text: str) -> list[tuple[str, str]]:
     return rows
 
 
+def _description_evidence(
+    paragraphs: list[str], product: dict | None
+) -> tuple[tuple[str, str, str], ...]:
+    """Description prose kept as PRODUCT_DESCRIPTION evidence, never as specification rows.
+
+    The visible paragraphs outside the specification table and the JSON-LD
+    ``Product.description`` lead paragraph (before its copied specification table) are
+    retained word for word so a reviewer can see, for example, a stated screen size whose
+    specification row has no unit. An explicit product screen diagonal may supply inches
+    under the owner-approved prose rule; other prose remains supporting evidence.
+    """
+    items = [
+        (PRODUCT_DESCRIPTION, f"product description > p[{index}] (outside tables)", text)
+        for index, paragraph in enumerate(paragraphs, 1)
+        for text in [clean_text(paragraph)]
+        # A bare heading such as "Specifications:" introduces the table; it is not prose.
+        if text and not re.fullmatch(r"[A-Za-z ]{1,40}:", text)
+    ]
+    description = _text(product.get("description")) if product else ""
+    if product and isinstance(product.get("description"), str):
+        lead = re.split(r"\n\s*\n|\bSpecifications\s*:", product["description"])[0]
+        if clean_text(lead):
+            items.append((PRODUCT_DESCRIPTION, "JSON-LD Product.description", clean_text(lead)))
+    elif description:
+        items.append((PRODUCT_DESCRIPTION, "JSON-LD Product.description", description))
+    return tuple(items)
+
+
+def _identifier_evidence(
+    product: dict | None, parsed: _ProductPageParser
+) -> tuple[tuple[str, str, str], ...]:
+    """Identifiers with the place each was read from; their role is not verified here."""
+    items = []
+    if product:
+        for key in ("sku", "gtin", "gtin13", "mpn", "productID"):
+            value = _text(product.get(key))
+            if value:
+                items.append((IDENTIFIER, f"JSON-LD Product.{key}", value))
+    for sku in dict.fromkeys(parsed.skus):
+        if sku:
+            items.append((IDENTIFIER, "visible SKU", sku))
+    for product_id in dict.fromkeys(parsed.product_ids):
+        if product_id:
+            items.append((IDENTIFIER, "product form product-id", product_id))
+    return tuple(items)
+
+
 def _bundle_evidence(title: str) -> tuple[str, ...]:
     evidence = [
         f"title term {term}: {clean_text(match.group(0))}"
@@ -449,6 +504,8 @@ class _ProductPageParser(HTMLParser):
         self.buttons: list[_Button] = []
         self.short_description = ""
         self.description_rows: list[tuple[str, str]] = []
+        # Visible description paragraphs outside any table (prose, not specification rows).
+        self.description_paragraphs: list[str] = []
         self.canonical = ""
         self._block: _PriceBlock | None = None
         self._row: list[str] | None = None
@@ -517,7 +574,9 @@ class _ProductPageParser(HTMLParser):
             self._capture(element, self._set_short_description)
 
     def _description_tag(self, element: _Element) -> None:
-        if element.tag == "tr":
+        if element.tag == "p" and not any(e.tag in {"table", "p"} for e in self.stack[:-1]):
+            self._capture(element, self.description_paragraphs.append)
+        elif element.tag == "tr":
             self._row = []
             element.on_close = self._finish_row
         elif element.tag in {"td", "th"} and self._row is not None:

@@ -302,10 +302,11 @@ def test_live_run_routes_adapters_stores_and_matches(tmp_path: Path, capsys) -> 
     assert (pcc["match_status"], pcc["target_id"]) == ("REVIEW_REQUIRED", "")
     assert "SECONDARY_CONFLICT" in pcc["reason_codes"]
     assert pcc["expected_target_check"] == "NOT_EXACT"
-    # No model label: kept with its reason, and no model is manufactured from the title.
+    # No model label: the title's one code is corroborated by four labeled rows (balanced
+    # policy, 2026-10-15). No catalog target has it, so the offer is unmatched, never assigned.
     dbz = results["dbz"]
-    assert dbz["match_status"] == "REVIEW_REQUIRED"
-    assert "MISSING_MODEL" in dbz["reason_codes"] and dbz["offer_model"] == ""
+    assert (dbz["match_status"], dbz["target_id"]) == ("UNMATCHED", "")
+    assert dbz["offer_model"] == "EM14-001PH"
     # Shared multi-variant specifications stay untrusted.
     assert "MULTI_VARIANT_SHARED_DESCRIPTION" in results["oct"]["reason_codes"]
 
@@ -314,7 +315,7 @@ def test_live_run_routes_adapters_stores_and_matches(tmp_path: Path, capsys) -> 
     )}
     assert review == {
         "pcc": "MATCH_REVIEW_REQUIRED;EXPECTED_TARGET_NOT_MATCHED",
-        "dbz": "MATCH_REVIEW_REQUIRED",
+        "dbz": "MATCH_UNMATCHED",
         "oct": "MATCH_REVIEW_REQUIRED",
     }
     evidence = read_dicts(run_dir / "match_evidence.csv")

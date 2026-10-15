@@ -2,7 +2,10 @@
 
 ``ExactMatcher.match`` takes structured attributes the caller extracted with source evidence.
 ``ExactMatcher.match_observation`` runs the retailer extractor in ``extraction.py`` first. Neither
-infers specifications from retailer titles or free text, and neither uses fuzzy matching.
+uses fuzzy matching, similarity scores, or four-of-five matching. A title can supply only a
+complete model code, and only under the corroboration rules in ``extraction.py``; every other
+core value comes from non-title evidence. ``EXACT`` means "matches this catalog configuration
+under the five-field policy"; ``match_basis`` and warnings say how and what still differs.
 """
 
 from __future__ import annotations
@@ -20,6 +23,7 @@ from .extraction import (
     ExtractionStatus,
     FieldExtraction,
     extract_offer_attributes,
+    match_basis,
 )
 from .normalization import CORE_MATCH_COLUMNS, core_key, is_blank, positive_integer, text_key
 from .offers import OfferObservation
@@ -49,6 +53,39 @@ SECONDARY_MATCH_COLUMNS: tuple[str, ...] = (
     "color",
     "manufacturer_part_number",
 )
+
+# Secondary severity (balanced policy, 2026-10-15). A verified disagreement in a BLOCKING field
+# withholds the target (REVIEW_REQUIRED); a WARNING field disagreement is reported on the EXACT
+# result. Missing values on either side never create a conflict. The catalog's existing
+# variant splits (os, cpu_model, manufacturer_model_code) stay distinct targets because their
+# five core values or model codes differ; nothing here merges or re-labels targets.
+BLOCKING = "BLOCKING"
+WARNING = "WARNING"
+SECONDARY_SEVERITY: dict[str, str] = {
+    "brand": BLOCKING,
+    "resolution": BLOCKING,
+    "display_type": BLOCKING,
+    "refresh_rate_hz": BLOCKING,
+    "cpu_brand": BLOCKING,
+    "ram_type": BLOCKING,
+    "storage_type": BLOCKING,
+    "storage_layout": BLOCKING,
+    "gpu_type": BLOCKING,
+    "gpu_brand": BLOCKING,
+    "gpu_model": BLOCKING,
+    "vram": BLOCKING,
+    "manufacturer_model_code": BLOCKING,
+    "manufacturer_part_number": BLOCKING,
+    # Same-family processor numbers are visible differences, never identical CPUs.
+    "cpu_model": WARNING,
+    "cpu_generation": WARNING,
+    "cpu_cores": WARNING,
+    "os": WARNING,
+    "battery_capacity": WARNING,
+    "build_material": WARNING,
+    "series": WARNING,
+    "color": WARNING,
+}
 
 _RESOLUTION = re.compile(r"([0-9]+)\s*[x×]\s*([0-9]+)\Z", re.IGNORECASE)
 
@@ -90,6 +127,10 @@ class MatchResult:
     extractor: str = ""
     extraction_evidence: tuple[FieldExtraction, ...] = ()
     offer_attributes: Mapping[str, str] | None = None
+    # How the five fields were supported (e.g. LABELED_SPECIFICATION, TITLE_MODEL_CORROBORATED).
+    match_basis: str = ""
+    # Nonblocking differences on an assigned or reviewed result, e.g. SECONDARY_WARNING_COLOR.
+    warnings: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -191,6 +232,51 @@ class ExactMatcher:
         )
         return _with_extraction(result, extracted)
 
+    def _secondary_comparison(
+        self,
+        target: _PreparedTarget,
+        offer_attributes: Mapping[str, object],
+        ambiguous_secondary: tuple[str, ...],
+    ) -> tuple[list[FieldMatchEvidence], list[str], list[str]]:
+        """``(evidence, blocking conflicts, warnings)`` for one target's secondary fields."""
+        evidence: list[FieldMatchEvidence] = []
+        blocking: list[str] = []
+        warnings: list[str] = []
+        for field in SECONDARY_MATCH_COLUMNS:
+            offer_value = offer_attributes.get(field)
+            target_value = target.row.get(field)
+            severity = SECONDARY_SEVERITY.get(field, BLOCKING)
+            if field in ambiguous_secondary:
+                # Several stated values cannot corroborate one target value.
+                status = EvidenceStatus.CONFLICT
+            else:
+                try:
+                    offer_key = _secondary_key(field, offer_value)
+                    target_key = _secondary_key(field, target_value)
+                except ValueError:
+                    # An unparseable supporting value is a review signal, never a reason to
+                    # guess; for a warning-class field it is reported, not blocking.
+                    status = EvidenceStatus.CONFLICT
+                else:
+                    if offer_key is None or target_key is None:
+                        continue
+                    status = (
+                        EvidenceStatus.MATCH if offer_key == target_key
+                        else EvidenceStatus.CONFLICT
+                    )
+            evidence.append(
+                FieldMatchEvidence(
+                    field,
+                    status,
+                    _display_value(offer_value),
+                    _display_value(target_value),
+                    target.target_id,
+                )
+            )
+            if status is EvidenceStatus.CONFLICT:
+                (blocking if severity == BLOCKING else warnings).append(field)
+        return evidence, blocking, warnings
+
     def match(
         self,
         offer: OfferObservation,
@@ -219,13 +305,26 @@ class ExactMatcher:
         candidates = [target for target in self._targets if target.core_key == key]
         if not candidates:
             return self._unmatched(offer, offer_attributes, key)
+        narrowed_by: list[str] = []
         if len(candidates) > 1:
-            return self._result(
-                offer,
-                MatchStatus.AMBIGUOUS,
-                candidate_ids=tuple(sorted(target.target_id for target in candidates)),
-                reasons=("DUPLICATE_CORE_TARGETS",),
-            )
+            # Several targets share the five core values. Only a verified disagreement in a
+            # blocking secondary field excludes one; a target missing that value is not
+            # excluded. Target order, popularity, and the discovery seed are never used.
+            exclusions = {
+                target.target_id: self._verified_blocking(target, offer_attributes,
+                                                          ambiguous_secondary)
+                for target in candidates
+            }
+            remaining = [target for target in candidates if not exclusions[target.target_id]]
+            if len(remaining) != 1:
+                return self._result(
+                    offer,
+                    MatchStatus.AMBIGUOUS,
+                    candidate_ids=tuple(sorted(target.target_id for target in candidates)),
+                    reasons=("DUPLICATE_CORE_TARGETS",),
+                )
+            narrowed_by = sorted({field for fields in exclusions.values() for field in fields})
+            candidates = remaining
 
         target = candidates[0]
         if target.status != "active":
@@ -236,67 +335,24 @@ class ExactMatcher:
                 reasons=("INACTIVE_TARGET",),
             )
 
-        evidence: list[FieldMatchEvidence] = []
-        conflicts: list[str] = []
-        for field in CORE_MATCH_COLUMNS:
-            evidence.append(
-                FieldMatchEvidence(
-                    field,
-                    EvidenceStatus.MATCH,
-                    _display_value(offer_attributes.get(field)),
-                    _display_value(target.row.get(field)),
-                    target.target_id,
-                )
+        evidence: list[FieldMatchEvidence] = [
+            FieldMatchEvidence(
+                field,
+                EvidenceStatus.MATCH,
+                _display_value(offer_attributes.get(field)),
+                _display_value(target.row.get(field)),
+                target.target_id,
             )
-        for field in SECONDARY_MATCH_COLUMNS:
-            offer_value = offer_attributes.get(field)
-            target_value = target.row.get(field)
-            if field in ambiguous_secondary:
-                # Several stated values cannot corroborate one target value.
-                conflicts.append(field)
-                evidence.append(
-                    FieldMatchEvidence(
-                        field,
-                        EvidenceStatus.CONFLICT,
-                        _display_value(offer_value),
-                        _display_value(target_value),
-                        target.target_id,
-                    )
-                )
-                continue
-            try:
-                offer_key = _secondary_key(field, offer_value)
-                target_key = _secondary_key(field, target_value)
-            except ValueError:
-                # An unparseable supporting value is a review signal, never a reason to guess.
-                conflicts.append(field)
-                evidence.append(
-                    FieldMatchEvidence(
-                        field,
-                        EvidenceStatus.CONFLICT,
-                        _display_value(offer_value),
-                        _display_value(target_value),
-                        target.target_id,
-                    )
-                )
-                continue
-            if offer_key is None or target_key is None:
-                continue
-            field_status = (
-                EvidenceStatus.MATCH if offer_key == target_key else EvidenceStatus.CONFLICT
-            )
-            if field_status is EvidenceStatus.CONFLICT:
-                conflicts.append(field)
-            evidence.append(
-                FieldMatchEvidence(
-                    field,
-                    field_status,
-                    _display_value(offer_value),
-                    _display_value(target_value),
-                    target.target_id,
-                )
-            )
-
+            for field in CORE_MATCH_COLUMNS
+        ]
+        secondary, conflicts, warning_fields = self._secondary_comparison(
+            target, offer_attributes, ambiguous_secondary
+        )
+        evidence += secondary
+        warnings = (
+            *(code for code in extraction_reasons if is_warning_code(code)),
+            *(f"SECONDARY_WARNING_{field.upper()}" for field in warning_fields),
+        )
         if conflicts:
             return self._result(
                 offer,
@@ -305,16 +361,46 @@ class ExactMatcher:
                 reasons=(
                     "SECONDARY_CONFLICT",
                     *(f"SECONDARY_CONFLICT_{field.upper()}" for field in conflicts),
+                    *(f"SECONDARY_WARNING_{field.upper()}" for field in warning_fields),
                 ),
                 evidence=tuple(evidence),
+                warnings=warnings,
             )
         return self._result(
             offer,
             MatchStatus.EXACT,
             target_id=target.target_id,
             candidate_ids=(target.target_id,),
+            # Every extraction note (provenance such as TITLE_MODEL_CORROBORATED or
+            # OWNER_APPROVED_MODEL, and warnings such as CPU_NUMBER_TITLE_DIFFERS) stays visible.
+            reasons=(
+                *extraction_reasons,
+                *(f"DUPLICATE_CORE_NARROWED_BY_{field.upper()}" for field in narrowed_by),
+                *(f"SECONDARY_WARNING_{field.upper()}" for field in warning_fields),
+            ),
             evidence=tuple(evidence),
+            warnings=warnings,
         )
+
+    def _verified_blocking(
+        self,
+        target: _PreparedTarget,
+        offer_attributes: Mapping[str, object],
+        ambiguous_secondary: tuple[str, ...],
+    ) -> list[str]:
+        """Blocking fields where the offer and target both state a parseable, different value."""
+        fields = []
+        for field in SECONDARY_MATCH_COLUMNS:
+            if SECONDARY_SEVERITY.get(field, BLOCKING) != BLOCKING or field in ambiguous_secondary:
+                continue
+            try:
+                offer_key = _secondary_key(field, offer_attributes.get(field))
+                target_key = _secondary_key(field, target.row.get(field))
+            except ValueError:
+                continue
+            if offer_key is not None and target_key is not None and offer_key != target_key:
+                fields.append(field)
+        return fields
 
     def _unmatched(
         self,
@@ -370,6 +456,7 @@ class ExactMatcher:
         candidate_ids: tuple[str, ...] = (),
         reasons: tuple[str, ...] = (),
         evidence: tuple[FieldMatchEvidence, ...] = (),
+        warnings: tuple[str, ...] = (),
     ) -> MatchResult:
         return MatchResult(
             retailer_id=offer.retailer_id,
@@ -378,9 +465,80 @@ class ExactMatcher:
             status=status,
             target_id=target_id,
             candidate_target_ids=candidate_ids,
-            reason_codes=reasons,
+            reason_codes=tuple(dict.fromkeys(reasons)),
             evidence=evidence,
+            warnings=tuple(dict.fromkeys(warnings)),
         )
+
+
+# Extraction notes that report a difference without blocking an otherwise supported match.
+_WARNING_NOTES = frozenset({
+    "CPU_NUMBER_TITLE_DIFFERS",
+    "COLOR_TITLE_DIFFERS",
+    "MPN_REPEATS_RETAILER_SKU",
+    "MODEL_URL_DIFFERS",
+    "STORAGE_MIXED_MEDIA",
+    "SHARED_DESCRIPTION_DIFFERS_RAM_CAPACITY_GB",
+    "SHARED_DESCRIPTION_DIFFERS_STORAGE_CAPACITY_GB",
+    "SHARED_TITLE_DIFFERS_RAM_CAPACITY_GB",
+    "SHARED_TITLE_DIFFERS_STORAGE_CAPACITY_GB",
+})
+
+
+_CORE_FIELD_CODE = re.compile(
+    r"(MISSING|UNPARSEABLE|AMBIGUOUS|NOT_EXTRACTED|UNRESOLVED)_"
+    r"(MODEL|SCREEN_SIZE_IN|CPU_SERIES|RAM_CAPACITY_GB|STORAGE_CAPACITY_GB)"
+)
+_IDENTITY_CONFLICT_CODES = frozenset({
+    "MODEL_CLAIM_CONFLICT", "MODEL_URL_CONFLICT", "MODEL_TITLE_CONFLICT",
+    "MODEL_IDENTIFIER_CONFLICT", "SECONDARY_CONFLICT",
+})
+
+# User-facing offer outcomes, derived only from the stored status and reason codes.
+MATCHED_CONFIGURATION = "MATCHED_CONFIGURATION"
+DIFFERENT_CONFIGURATION = "DIFFERENT_CONFIGURATION"
+MODEL_UNVERIFIED = "MODEL_UNVERIFIED"
+IDENTITY_CONFLICT = "IDENTITY_CONFLICT"
+EXTRACTION_INCOMPLETE = "EXTRACTION_INCOMPLETE"
+AMBIGUOUS_TARGET = "AMBIGUOUS_TARGET"
+INACTIVE_TARGET = "INACTIVE_TARGET"
+
+
+def offer_outcome(status: str, reason_codes: Iterable[str]) -> str:
+    """One outcome per match result. ``DIFFERENT_CONFIGURATION`` needs a complete, verified core
+    that no target has; it never names a target. A missing or unresolved model with the other
+    four fields present is ``MODEL_UNVERIFIED``, not a different configuration."""
+    codes = set(reason_codes)
+    if status == MatchStatus.EXACT:
+        return MATCHED_CONFIGURATION
+    if status == MatchStatus.AMBIGUOUS:
+        return AMBIGUOUS_TARGET
+    if status == MatchStatus.UNMATCHED:
+        return INACTIVE_TARGET if "INACTIVE_TARGET" in codes else DIFFERENT_CONFIGURATION
+    if codes & _IDENTITY_CONFLICT_CODES or any(
+        code.startswith("TITLE_SPEC_CONFLICT_") for code in codes
+    ):
+        return IDENTITY_CONFLICT
+    incomplete = {match[2] for code in codes if (match := _CORE_FIELD_CODE.fullmatch(code))}
+    return MODEL_UNVERIFIED if incomplete == {"MODEL"} else EXTRACTION_INCOMPLETE
+
+
+def match_basis_from_codes(reason_codes: Iterable[str]) -> str:
+    """The match basis of a stored EXACT result, recovered from its reason codes."""
+    codes = set(reason_codes)
+    tags = []
+    if "TITLE_MODEL_CORROBORATED" in codes:
+        tags.append("TITLE_MODEL_CORROBORATED")
+    if any(code.startswith("OWNER_APPROVED_") for code in codes):
+        tags.append("OWNER_APPROVED_INTERPRETATION")
+    if "SHARED_CPU_DISPLAY_RAM_STORAGE_ONLY" in codes:
+        tags += ["SELECTED_VARIANT", "SHARED_PRODUCT"]
+    return "+".join(tags) or "LABELED_SPECIFICATION"
+
+
+def is_warning_code(code: str) -> bool:
+    """True for a nonblocking difference reported on an EXACT (or reviewed) result."""
+    return code in _WARNING_NOTES or code.startswith("SECONDARY_WARNING_")
 
 
 def _with_extraction(result: MatchResult, extracted: ExtractedAttributes) -> MatchResult:
@@ -389,4 +547,6 @@ def _with_extraction(result: MatchResult, extracted: ExtractedAttributes) -> Mat
         extractor=extracted.extractor,
         extraction_evidence=extracted.evidence,
         offer_attributes=dict(extracted.values),
+        match_basis=match_basis(extracted.evidence)
+        if result.status is MatchStatus.EXACT else "",
     )

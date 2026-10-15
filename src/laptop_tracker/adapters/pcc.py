@@ -23,6 +23,10 @@ from html.parser import HTMLParser
 from urllib.parse import parse_qs, urlsplit
 
 from ..offers import (
+    ENUMERATED_VARIANT,
+    IDENTIFIER,
+    SELECTED_VARIANT,
+    VARIANT_DEFINITIONS,
     Availability,
     ObservationValidationError,
     OfferDetails,
@@ -77,6 +81,15 @@ _VOID_TAGS = frozenset(
 )
 _LINE_END_TAGS = frozenset({"p", "div", "li", "tr", "h1", "h2", "h3", "h4", "h5", "h6"})
 _CELL_TAGS = frozenset({"td", "th"})
+# An internal marker (ASCII unit separator) never present in page text.
+_SPAN_BOUNDARY = "\x1f"
+
+
+def _is_short_label(text: str) -> bool:
+    """A specification label: 1-4 words, no colon, no digits except a trailing footnote."""
+    words = text.split()
+    core = re.sub(r"[0-9]+(?:\s*,\s*[0-9]+)*\Z", "", text)
+    return 0 < len(words) <= 4 and ":" not in text and not re.search(r"[0-9]", core)
 _HIDDEN_CLASSES = frozenset({"visually-hidden", "hidden", "badge", "unit-price"})
 _FOREIGN_CURRENCY = re.compile(r"[$€£¥]|\b(?!PHP\b)[A-Z]{3}\b")
 _DEFAULT_VARIANT_TITLE = "Default Title"
@@ -105,7 +118,13 @@ class PCCAdapter:
     retailer_id = RETAILER_ID
     retailer_code = RETAILER_CODE
     # Bump when parsing rules change; recorded in every observation's source metadata.
-    adapter_version = "pcc-1"
+    # pcc-2 (2026-10-13): adds bound selected-variant options, enumerated variants, and
+    # identifiers as scoped evidence. Price, availability, and description parsing unchanged.
+    # pcc-3: complete bound variant-definition matrices for approved shared CPU/screen evidence.
+    # pcc-4 (2026-10-15): a description paragraph laid out as <span>Label </span><span>value
+    # </span> keeps its label/value boundary (reviewed 2026-10-15 Nitro page). Other text is
+    # byte-for-byte as before.
+    adapter_version = "pcc-4"
     allowed_hosts = frozenset({HOST})
     # Project-owner authorization under the project-wide decision; not retailer consent.
     live_use_approved = True
@@ -173,6 +192,7 @@ class PCCAdapter:
             raw_categories=tuple(value for value in (_text(meta.get("type")),) if value),
             bundle_flag=bool(bundle_evidence),
             bundle_evidence=tuple(dict.fromkeys(bundle_evidence)),
+            scoped_evidence=_variant_evidence(selection, parsed, variants, ld_offers),
         )
         return [
             ParsedOffer(
@@ -272,6 +292,8 @@ class _Variant:
     compare_at: Decimal | None
     available: bool | None
     sku: str
+    # The variant's own option values in order ("16GB (2x8) DDR4 RAM", "512GB SDD").
+    options: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -317,6 +339,9 @@ def _meta_variants(meta: dict) -> list[_Variant]:
 
 def _variant(item: dict) -> _Variant:
     available = item.get("available")
+    options = item.get("options")
+    if not (isinstance(options, list) and all(isinstance(o, str) for o in options)):
+        options = [item.get(f"option{n}") for n in (1, 2, 3)]
     return _Variant(
         id=_text(item.get("id")),
         title=_text(item.get("title")),
@@ -324,6 +349,7 @@ def _variant(item: dict) -> _Variant:
         compare_at=_cents(item.get("compare_at_price")),
         available=available if isinstance(available, bool) else None,
         sku=_text(item.get("sku")),
+        options=tuple(clean_text(o) for o in options if isinstance(o, str) and o.strip()),
     )
 
 
@@ -395,6 +421,86 @@ def _select_variant(
         offer=offer,
         variant=variant,
     )
+
+
+def _variant_evidence(
+    selection: _Selection,
+    parsed: _ProductPageParser,
+    variants: list[_Variant],
+    ld_offers: list[dict],
+) -> tuple[tuple[str, str, str], ...]:
+    """Selected-variant option values, other enumerated variants, and identifiers.
+
+    Option values are emitted as SELECTED_VARIANT evidence only when the selection is bound:
+    the requested variant is the form's variant (checked in ``_select_variant``), every
+    checked option control and any selected ``<option>`` agree with that variant's own option
+    values in the product's variant data. Otherwise a ``binding status`` row says why not, and
+    no option value is emitted. Another variant is listed only with the URL the page's own
+    JSON-LD gives it; no URL or variant ID is ever constructed.
+    """
+    items: list[tuple[str, str, str]] = []
+    variant = selection.variant
+    if selection.multi and variant is not None:
+        checked = parsed.checked_options
+        names = [name for name, _ in checked]
+        problem = ""
+        if not variant.options:
+            problem = "the variant data has no option values"
+        elif not checked:
+            problem = "no checked option control was found"
+        elif len(set(names)) != len(names):
+            problem = "an option has more than one checked value"
+        elif [value for _, value in checked] != list(variant.options):
+            problem = "the checked option values differ from the variant data"
+        elif parsed.selected_option_ids and set(parsed.selected_option_ids) != {variant.id}:
+            problem = "the selected <option> names another variant"
+        if problem:
+            items.append((SELECTED_VARIANT, "binding status", f"NOT_CONFIRMED: {problem}"))
+        else:
+            items.append((SELECTED_VARIANT, "binding status", "CONFIRMED"))
+            items.append((SELECTED_VARIANT, "variant id", variant.id))
+            items += [(SELECTED_VARIANT, name, value) for name, value in checked]
+            # A complete picker matrix is needed before CPU/display can be shared. Analytics
+            # fallback or a partial array cannot establish which dimensions vary.
+            raw_arrays = [json.loads(block) for block in parsed.variant_json]
+            ids = {v.id for v in variants}
+            complete = (
+                bool(raw_arrays) and len(ids) == len(variants) and "" not in ids
+                and all(
+                    isinstance(array, list) and len(array) == len(variants)
+                    and all(isinstance(row, dict) for row in array)
+                    and {_text(row.get("id")) for row in array} == ids
+                    for array in raw_arrays
+                )
+                and bool(parsed.option_values) and set(parsed.option_values) == ids
+                and (not ld_offers or {_offer_variant(o) for o in ld_offers} == ids)
+                and all(len(v.options) == len(names) for v in variants)
+            )
+            if complete:
+                matrix = {
+                    "selected_id": variant.id,
+                    "option_names": names,
+                    "variants": [
+                        {"id": v.id, "title": v.title, "options": list(v.options)}
+                        for v in variants
+                    ],
+                }
+                items.append((
+                    VARIANT_DEFINITIONS,
+                    "main product variant picker script[type=application/json]; select[name=id]",
+                    json.dumps(matrix, ensure_ascii=False, sort_keys=True),
+                ))
+    if selection.multi:
+        urls = {_offer_variant(offer): offer.get("url") for offer in ld_offers}
+        for other in variants:
+            url = urls.get(other.id)
+            if other.id != selection.variant_id and isinstance(url, str) and url.strip():
+                items.append((ENUMERATED_VARIANT, other.title or other.id, url.strip()))
+    if variant is not None:
+        items.append((IDENTIFIER, "selected variant sku", variant.sku or "(blank)"))
+    for value in dict.fromkeys(v for v in parsed.product_ids if v):
+        items.append((IDENTIFIER, "product form product-id", value))
+    return tuple(items)
 
 
 def _selected_offer(ld_offers: list[dict], variant_id: str) -> dict | None:
@@ -710,6 +816,8 @@ class _Element:
     variant_picker: bool = False
     buffer: list[str] | None = None
     on_close: Callable[[str], None] | None = None
+    # Child <span> elements closed so far (description paragraphs only).
+    spans_closed: int = 0
 
 
 class _ProductPageParser(HTMLParser):
@@ -731,6 +839,10 @@ class _ProductPageParser(HTMLParser):
         self.product_ids: list[str] = []
         self.form_variant_ids: list[str] = []
         self.option_values: list[str] = []
+        # (option name, value) of every checked radio or selected option-select in the picker.
+        self.checked_options: list[tuple[str, str]] = []
+        # Values of <option selected> in the product form's variant <select name="id">.
+        self.selected_option_ids: list[str] = []
         self.only_default_variant = ""
         self.price_blocks: list[_PriceBlock] = []
         self.buttons: list[_Button] = []
@@ -814,12 +926,33 @@ class _ProductPageParser(HTMLParser):
             e.tag == "select" and e.attrs.get("name") == "id" for e in self.stack
         ):
             self.option_values.append(attributes.get("value", "").strip())
+            if "selected" in attributes:
+                self.selected_option_ids.append(attributes.get("value", "").strip())
+        elif (
+            tag == "input"
+            and element.variant_picker
+            and attributes.get("type") == "radio"
+            and "checked" in attributes
+        ):
+            self.checked_options.append(
+                (clean_text(attributes.get("name", "")), clean_text(attributes.get("value", "")))
+            )
+        elif tag == "option" and element.variant_picker and "selected" in attributes:
+            select = next((e for e in reversed(self.stack) if e.tag == "select"), None)
+            name = select.attrs.get("name", "") if select else ""
+            match = re.fullmatch(r"options\[(.+)\]", name)
+            if match:
+                self.checked_options.append(
+                    (clean_text(match[1]), clean_text(attributes.get("value", "")))
+                )
         elif element.description and tag == "div" and "product__description" in classes:
             self._capture(element, self.description.append)
 
     def handle_endtag(self, tag: str) -> None:
         for index in range(len(self.stack) - 1, -1, -1):
             if self.stack[index].tag == tag:
+                closing = self.stack[index]
+                parent = self.stack[index - 1] if index else None
                 if tag in _LINE_END_TAGS:
                     self.handle_data("\n")
                 elif tag in _CELL_TAGS:
@@ -829,6 +962,14 @@ class _ProductPageParser(HTMLParser):
                     closed = self.stack.pop()
                     if closed.on_close is not None:
                         closed.on_close("".join(closed.buffer or []))
+                if (
+                    tag == "span" and closing.description
+                    and parent is not None and parent.tag == "p"
+                ):
+                    parent.spans_closed += 1
+                    if parent.spans_closed == 1:
+                        # Marks a possible label/value boundary; see description_lines.
+                        self.handle_data(_SPAN_BOUNDARY)
                 return
 
     def handle_data(self, data: str) -> None:
@@ -849,10 +990,21 @@ class _ProductPageParser(HTMLParser):
     def description_lines(self) -> list[tuple[str, str]]:
         """Description lines as shown, split at the first colon into ``(label, value)``.
 
-        A line without a colon is kept with an empty value. Nothing is renamed or inferred.
+        A paragraph written as ``<span>Label </span><span>value</span>`` is split at that span
+        boundary when the first span is a short label (up to four words, no digits other than a
+        trailing footnote, no colon) and the rest is not empty. A line without either is kept
+        with an empty value. Nothing is renamed or inferred.
         """
         rows: list[tuple[str, str]] = []
         for line in "\n".join(self.description[:1]).split("\n"):
+            if _SPAN_BOUNDARY in line:
+                label, _, value = line.partition(_SPAN_BOUNDARY)
+                label, value = clean_text(label), clean_text(value.replace(_SPAN_BOUNDARY, ""))
+                # "<span>Label</span>: value" keeps the earlier colon split below.
+                if value and not value.startswith(":") and _is_short_label(label):
+                    rows.append((label, value))
+                    continue
+                line = line.replace(_SPAN_BOUNDARY, "")
             line = clean_text(line)
             if not line:
                 continue

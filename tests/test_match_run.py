@@ -159,9 +159,12 @@ def test_cli_matches_observations_and_writes_traceable_reports(tmp_path: Path, c
         "EXACT",
         "REVIEW_REQUIRED",
         "REVIEW_REQUIRED",
-        "REVIEW_REQUIRED",
+        # dbz_sale: its one title code is corroborated by four labeled rows (balanced policy,
+        # 2026-10-15); no catalog target has that code, so it is a different configuration.
+        "UNMATCHED",
         "REVIEW_REQUIRED",
     ]
+    assert by_row["5"]["offer_model"] == "EM14-001PH"
     exact = by_row["2"]
     assert exact["target_id"] == "TGT-000001"
     assert exact["retailer_id"] == "laptop_factory"
@@ -177,7 +180,7 @@ def test_cli_matches_observations_and_writes_traceable_reports(tmp_path: Path, c
     # The LF regular fixture's CPU row is not a recognized series, so it never reaches the
     # inactive TGT-000003 or any other target.
     assert by_row["4"]["reason_codes"] == "MISSING_CORE_FIELDS;UNPARSEABLE_CPU_SERIES"
-    assert by_row["5"]["reason_codes"] == "MISSING_CORE_FIELDS;MISSING_MODEL"
+    assert by_row["5"]["reason_codes"] == "NO_CORE_MATCH"
     assert "MULTI_VARIANT_SHARED_DESCRIPTION" in by_row["6"]["reason_codes"]
 
     queue = read_dicts(out / "offer_match_review_queue.csv")
@@ -198,7 +201,8 @@ def test_cli_matches_observations_and_writes_traceable_reports(tmp_path: Path, c
     assert refresh[1]["target_id"] == "TGT-000002"
 
     printed = capsys.readouterr().out
-    assert "EXACT: 1" in printed and "REVIEW_REQUIRED: 4" in printed
+    assert "EXACT: 1" in printed and "REVIEW_REQUIRED: 3" in printed
+    assert "UNMATCHED: 1" in printed
     assert "Acer" not in printed and "Nitro" not in printed
 
 

@@ -25,6 +25,10 @@ from collections.abc import Callable
 
 # Trademark marks are replaced by a space so "Qualcomm®Snapdragon" splits into two words.
 _MARKS = re.compile("[®™℠]")
+# Unicode characters that are the same hyphen as ASCII "-" (hyphen, non-breaking hyphen, figure
+# dash, minus sign, small and full-width hyphen-minus). En and em dashes are different
+# punctuation and are not translated (balanced policy, 2026-10-15).
+_HYPHEN_EQUIVALENTS = str.maketrans(dict.fromkeys("‐‑‒−﹣－", "-"))
 
 # A model-code token: two or more ASCII letter/digit segments joined by ASCII hyphens, with at
 # least one letter, one digit, and MIN_MODEL_CODE_LENGTH letters and digits in total. Examples:
@@ -45,14 +49,21 @@ _UNIT_SEGMENT = re.compile(
 )
 
 
+def normalize_hyphens(text: str) -> str:
+    """NFC text with Unicode hyphen equivalents written as ASCII ``-``."""
+    return unicodedata.normalize("NFC", text).translate(_HYPHEN_EQUIVALENTS)
+
+
 def model_codes(text: str) -> list[str]:
     """Distinct model-code tokens in ``text``, in order and as written (case kept).
 
     Tokens are compared case-insensitively for distinctness. No suffix is stripped: ``-WSM`` or a
-    trailing letter is part of the code. Callers treat more than one code as ambiguous.
+    trailing letter is part of the code. Callers treat more than one code as ambiguous. Unicode
+    hyphen equivalents are read as ``-``; internal hyphens and spaces are never removed.
     """
     found: dict[str, str] = {}
-    for match in _CODE_TOKEN.finditer(_MARKS.sub(" ", unicodedata.normalize("NFC", text))):
+    normalized = unicodedata.normalize("NFC", text).translate(_HYPHEN_EQUIVALENTS)
+    for match in _CODE_TOKEN.finditer(_MARKS.sub(" ", normalized)):
         token = match[0]
         letters_digits = token.replace("-", "")
         if (
@@ -65,6 +76,28 @@ def model_codes(text: str) -> list[str]:
             continue
         found.setdefault(token.casefold(), token)
     return list(found.values())
+
+
+# Manufacturer part-number shapes that look like hyphenated model codes. ASUS part numbers
+# (90NB1672-M00DD0, 90NR0QE7-M001U0) sit beside the model code in retailer titles. They are
+# part numbers, never product model codes; only this documented shape is recognized.
+_PART_NUMBER_SHAPES = (re.compile(r"90N[A-Z][0-9A-Z]{4}-M[0-9A-Z]{5}", re.I),)
+
+
+def is_part_number_shape(token: str) -> bool:
+    """True when ``token`` has a documented manufacturer part-number shape (not a model code)."""
+    return any(shape.fullmatch(token.strip()) for shape in _PART_NUMBER_SHAPES)
+
+
+def title_model_codes(text: str) -> tuple[list[str], list[str]]:
+    """``(model codes, part numbers)`` in a product title, each as written.
+
+    Codes are found by ``model_codes``; a token with a documented part-number shape is reported
+    separately and never treated as a model code.
+    """
+    codes = model_codes(text)
+    parts = [code for code in codes if is_part_number_shape(code)]
+    return [code for code in codes if code not in parts], parts
 
 
 def is_model_code(value: str) -> bool:
@@ -123,6 +156,22 @@ def cpu_series_forms(text: str) -> set[str]:
     """Every canonical CPU-series form stated in ``text``; more than one is ambiguous."""
     text = parse_text(text)
     return {form(match) for pattern, form in CPU_SERIES_RULES for match in pattern.finditer(text)}
+
+
+# An isolated Intel Core tier token ("i5", "I7") in a field already labeled CPU/Processor. Only
+# the bare token counts: "i5-N305", "Inteli5", or "i5" glued to other text do not.
+_LABELED_CORE_TIER = re.compile(r"(?<![A-Za-z0-9-])[iI]([3579])(?![A-Za-z0-9-])")
+
+
+def labeled_cpu_series_forms(text: str) -> set[str]:
+    """CPU-series forms for text from a labeled CPU/Processor field.
+
+    The general rules apply, and an isolated ``i3``/``i5``/``i7``/``i9`` token also gives
+    ``Core iN`` (balanced policy, 2026-10-15), so ``i5 / Ryzen 5`` stays ambiguous. Generic
+    wording such as ``Intel Core`` or a bare number still gives nothing.
+    """
+    tiers = {f"Core i{match[1]}" for match in _LABELED_CORE_TIER.finditer(parse_text(text))}
+    return cpu_series_forms(text) | tiers
 
 
 def is_canonical_cpu_series(value: str) -> bool:

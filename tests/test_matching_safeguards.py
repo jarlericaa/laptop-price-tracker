@@ -152,13 +152,14 @@ def test_processor_numbers_and_part_numbers_are_not_model_codes() -> None:
             "MISSING_CORE_FIELDS",
             "AMBIGUOUS_RAM_CAPACITY_GB",
         )),
-        ({"Storage": "512GB SSD + 512GB HDD"}, (
+        # A stated total plus its drive list is never double counted or guessed.
+        ({"Storage": "1TB (512GB SSD + 512GB SSD)"}, (
             "MISSING_CORE_FIELDS",
             "AMBIGUOUS_STORAGE_CAPACITY_GB",
         )),
     ],
     ids=["missing-model", "no-unit-no-display-word", "no-cpu-number", "ram-sum-mismatch",
-         "two-drives"],
+         "total-plus-drives"],
 )
 def test_missing_or_ambiguous_core_evidence_requires_review(
     changes: dict[str, str | None], reasons: tuple[str, ...]
@@ -184,16 +185,29 @@ def test_secondary_conflict_keeps_the_core_candidate_but_requires_review() -> No
     }
 
 
-def test_color_conflict_keeps_the_core_candidate_but_requires_review() -> None:
-    # The LF extractor does not extract color, so a structured color is supplied directly.
+def test_two_installed_drives_are_a_different_configuration_not_a_guess() -> None:
+    result = match(lf_offer(Storage="512GB SSD + 512GB HDD"))
+
+    # 1024GB with mixed media differs from the 512GB target: no target, no near-match guess.
+    assert result.status is MatchStatus.UNMATCHED
+    assert result.target_id is None
+    assert result.reason_codes[0] == "NO_CORE_MATCH"
+
+
+def test_color_difference_is_a_visible_warning_not_a_blocker() -> None:
+    # Color is descriptive in TARGET_MASTER (matching role "No"): warning by default
+    # (balanced policy, 2026-10-15). The LF extractor does not extract color, so a structured
+    # color is supplied directly.
     offer = lf_offer()
     attributes = dict(match(offer).offer_attributes or {}) | {"color": "Example Grey"}
 
     result = ExactMatcher([TARGET]).match(offer, attributes)
 
-    assert result.status is MatchStatus.REVIEW_REQUIRED
-    assert result.candidate_target_ids == ("TGT-000001",)
-    assert result.reason_codes == ("SECONDARY_CONFLICT", "SECONDARY_CONFLICT_COLOR")
+    assert (result.status, result.target_id) == (MatchStatus.EXACT, "TGT-000001")
+    assert "SECONDARY_WARNING_COLOR" in result.reason_codes
+    assert result.warnings == ("SECONDARY_WARNING_COLOR",)
+    color = next(item for item in result.evidence if item.field == "color")
+    assert (color.status, color.offer_value) == (EvidenceStatus.CONFLICT, "Example Grey")
 
 
 def test_listing_only_target_never_receives_a_cross_retailer_match() -> None:

@@ -20,7 +20,7 @@ from laptop_tracker.adapters.pcc import PCCAdapter
 from laptop_tracker.adapters.pcx import HOST as PCX_HOST
 from laptop_tracker.adapters.pcx import PCXAdapter
 from laptop_tracker.extraction import ExtractionStatus, extract_offer_attributes
-from laptop_tracker.matching import ExactMatcher, MatchStatus
+from laptop_tracker.matching import EvidenceStatus, ExactMatcher, MatchStatus
 from laptop_tracker.offers import (
     Availability,
     OfferDetails,
@@ -171,10 +171,12 @@ def synthetic_offer(
 
 
 def statuses(name_or_offer: str | OfferObservation) -> dict[str, tuple[str, str]]:
+    """Primary evidence per field; SUPPORTING items are checked separately."""
     offer = fixture_offer(name_or_offer) if isinstance(name_or_offer, str) else name_or_offer
     return {
         item.field: (item.status.value, item.value)
         for item in extract_offer_attributes(offer).evidence
+        if item.status is not ExtractionStatus.SUPPORTING
     }
 
 
@@ -215,9 +217,17 @@ def test_laptop_factory_unrecognized_cpu_and_missing_rows_stay_missing() -> None
     assert bundle["storage_capacity_gb"] == (M, "")
 
 
-def test_datablitz_extracts_labeled_rows_but_has_no_model_label() -> None:
+def title_model_source(name: str) -> str:
+    extracted = extract_offer_attributes(fixture_offer(name))
+    return next(item.source_label for item in extracted.evidence if item.field == "model")
+
+
+def test_datablitz_extracts_labeled_rows_and_a_corroborated_title_model() -> None:
+    # No model row: the title's one full code is accepted because the other four fields come
+    # from labeled rows (balanced policy, 2026-10-15).
+    assert title_model_source("dbz_sale").startswith("title [TITLE_MODEL_CORROBORATED;")
     assert statuses("dbz_sale") == {
-        "model": (M, ""),
+        "model": (E, "EM14-001PH"),
         "screen_size_in": (E, "14"),
         "cpu_series": (E, "Core 5"),
         "ram_capacity_gb": (E, "16"),
@@ -246,8 +256,9 @@ def test_datablitz_title_specs_are_never_used() -> None:
 
 
 def test_octagon_single_variant_uses_tech_specification_rows() -> None:
+    assert title_model_source("oct_regular").startswith("title [TITLE_MODEL_CORROBORATED;")
     assert statuses("oct_regular") == {
-        "model": (M, ""),
+        "model": (E, "EX14-0001PH"),
         "screen_size_in": (E, "14"),
         "cpu_series": (E, "Core i5"),
         "ram_capacity_gb": (E, "8"),
@@ -296,8 +307,9 @@ def test_pc_central_selected_variant_does_not_use_the_shared_description() -> No
 
 
 def test_pc_express_layout_and_total_capacity_must_agree() -> None:
+    assert title_model_source("pcx_regular").startswith("title [TITLE_MODEL_CORROBORATED;")
     assert statuses("pcx_regular") == {
-        "model": (M, ""),
+        "model": (E, "14-EX0001TU"),
         "screen_size_in": (E, "14"),
         "cpu_series": (E, "Core 5"),
         "ram_capacity_gb": (E, "16"),
@@ -318,7 +330,8 @@ def test_pc_express_layout_and_total_capacity_must_agree() -> None:
     [
         ("Storage", "1TB NVMe SSD", "storage_capacity_gb", (E, "1000")),
         ("Storage", "2 x 512GB SSD", "storage_capacity_gb", (E, "1024")),
-        ("Storage", "512GB SSD + 1TB HDD", "storage_capacity_gb", (A, "512; 1000")),
+        # Installed drives are summed (1 TB = 1000 GB); media stay separate evidence.
+        ("Storage", "512GB SSD + 1TB HDD", "storage_capacity_gb", (E, "1512")),
         ("Storage", "SSD", "storage_capacity_gb", (U, "")),
         ("RAM", "16GB (2x 16GB)", "ram_capacity_gb", (A, "16; 32")),
         ("RAM", "0.5GB", "ram_capacity_gb", (U, "")),
@@ -348,15 +361,18 @@ def test_conflicting_rows_for_one_field_are_ambiguous() -> None:
     assert statuses(offer)["ram_capacity_gb"] == (A, "8; 16")
 
 
-# Regression: repeated equal amounts are separate components, never one deduplicated value.
+# Components: an explicit "+" list of installed parts is summed (balanced policy, 2026-10-15);
+# any other repetition of amounts inside one row stays in review, never deduplicated.
 
 
 @pytest.mark.parametrize(
     ("label", "value", "field", "expected"),
     [
-        ("Storage", "512GB SSD + 512GB HDD", "storage_capacity_gb", (A, "512; 512")),
+        ("Storage", "512GB SSD + 512GB HDD", "storage_capacity_gb", (E, "1024")),
         ("Storage", "512GB SSD, 512GB SSD", "storage_capacity_gb", (A, "512; 512")),
-        ("RAM", "8GB + 8GB", "ram_capacity_gb", (A, "8; 8")),
+        ("Storage", "512GB SSD + 512GB external HDD", "storage_capacity_gb", (A, "512; 512")),
+        ("Storage", "512GB + 512GB", "storage_capacity_gb", (A, "512; 512")),
+        ("RAM", "8GB + 8GB", "ram_capacity_gb", (E, "16")),
         ("RAM", "8GB DDR5 8GB DDR5", "ram_capacity_gb", (A, "8; 8")),
         # A layout plus a separate amount is two components, even when the totals agree.
         ("RAM", "2x 8GB + 16GB", "ram_capacity_gb", (A, "16; 16")),
@@ -379,9 +395,46 @@ def test_multiple_capacity_components_go_to_review(
 @pytest.mark.parametrize(
     ("label", "field"), [("RAM", "ram_capacity_gb"), ("Storage", "storage_capacity_gb")]
 )
-def test_repeated_equal_capacity_rows_are_ambiguous(label: str, field: str) -> None:
+def test_repeated_equivalent_capacity_rows_are_one_fact(label: str, field: str) -> None:
     offer = synthetic_offer("laptop_factory", ((label, "512GB"), (label, "512GB")))
-    assert statuses(offer)[field] == (A, "512; 512")
+    assert statuses(offer)[field] == (E, "512")
+    extracted = extract_offer_attributes(offer)
+    assert "EQUIVALENT_REPEATED_FACTS_DEDUPLICATED" in extracted.notes
+
+
+def test_equal_storage_rows_for_different_media_stay_ambiguous() -> None:
+    offer = synthetic_offer("laptop_factory", (("Storage", "512GB SSD"), ("Storage", "512GB HDD")))
+    assert statuses(offer)["storage_capacity_gb"] == (A, "512; 512")
+
+
+def test_mixed_drives_keep_their_layout_and_media() -> None:
+    offer = synthetic_offer("laptop_factory", (("Storage", "512GB SSD + 512GB HDD"),))
+    extracted = extract_offer_attributes(offer)
+    supporting = {item.field: item.value for item in extracted.evidence
+                  if item.status is ExtractionStatus.SUPPORTING}
+    assert extracted.values["storage_capacity_gb"] == "1024"
+    # Never "1024GB SSD": the layout and both media stay visible.
+    assert extracted.values["storage_type"] == "HDD+SSD"
+    assert supporting["storage_layout"] == "512GB SSD + 512GB HDD"
+    assert "STORAGE_MIXED_MEDIA" in extracted.notes
+
+
+def test_mixed_drive_media_conflict_with_a_target_blocks_assignment() -> None:
+    specs = {
+        "Model Name": "Acer Aspire AI 14 A14-11M-X3BP (Steam Blue)",
+        "Processor": "Snapdragon X X1-26-100",
+        "RAM": "16GB",
+        "Storage": "512GB SSD + 512GB HDD",
+        "Display Size": '14"',
+    }
+    offer = synthetic_offer("laptop_factory", tuple(specs.items()))
+    target = LF_TARGET | {"storage_capacity_gb": "1024", "storage_type": "SSD"}
+
+    result = ExactMatcher([target]).match_observation(offer)
+
+    assert result.status is MatchStatus.REVIEW_REQUIRED
+    assert result.target_id is None
+    assert "SECONDARY_CONFLICT_STORAGE_TYPE" in result.reason_codes
 
 
 @pytest.mark.parametrize(
@@ -394,6 +447,8 @@ def test_repeated_equal_capacity_rows_are_ambiguous(label: str, field: str) -> N
 def test_multiple_components_never_match_a_single_component_target(
     label: str, value: str, field: str, target_override: dict[str, str]
 ) -> None:
+    # The summed total differs from the single-component target: a different configuration,
+    # never the target and never a near-miss assignment.
     specs = {
         "Model Name": "Acer Aspire AI 14 A14-11M-X3BP (Steam Blue)",
         "Processor": "Snapdragon X X1-26-100",
@@ -406,9 +461,11 @@ def test_multiple_components_never_match_a_single_component_target(
 
     result = ExactMatcher([target]).match_observation(offer)
 
-    assert result.status is MatchStatus.REVIEW_REQUIRED
+    assert result.status is MatchStatus.UNMATCHED
     assert result.target_id is None
-    assert f"AMBIGUOUS_{field.upper()}" in result.reason_codes
+    assert result.reason_codes[0] == "NO_CORE_MATCH"
+    differing = [e.field for e in result.evidence if e.status is EvidenceStatus.CONFLICT]
+    assert differing == [field]
 
 
 def test_unlisted_labels_and_titles_are_ignored() -> None:

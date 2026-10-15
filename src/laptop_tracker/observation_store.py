@@ -25,7 +25,7 @@ from decimal import Decimal
 from pathlib import Path
 
 from .matching import MatchResult, MatchStatus
-from .offers import OfferObservation, observation_from_record
+from .offers import EXTENSION_DETAIL_COLUMNS, OfferObservation, observation_from_record
 from .scraping import ScrapeResult
 
 SCHEMA_VERSION = "1"
@@ -239,8 +239,15 @@ def canonical_record(observation: OfferObservation) -> tuple[dict[str, str], str
     record = observation.to_full_record()
     if observation_from_record(record).to_full_record() != record:
         raise ObservationStoreError("An observation does not round-trip through its record.")
-    text = json.dumps(record, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-    return record, text, _sha256_text(text)
+    # Columns added later are omitted while blank, so a record stored before they existed keeps
+    # exactly the same canonical text, fingerprint, and duplicate/conflict behavior.
+    stored = {
+        key: value
+        for key, value in record.items()
+        if not (key in EXTENSION_DETAIL_COLUMNS and value == "")
+    }
+    text = json.dumps(stored, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return stored, text, _sha256_text(text)
 
 
 def _utc_text(moment: datetime) -> str:

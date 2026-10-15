@@ -23,6 +23,7 @@ from html.parser import HTMLParser
 from urllib.parse import parse_qs, urlsplit
 
 from ..offers import (
+    IDENTIFIER,
     Availability,
     ObservationValidationError,
     OfferDetails,
@@ -93,6 +94,16 @@ _SPEC_HEADING = "tech specification"
 # (``"gtin12": 097855145710``) makes the whole block invalid JSON. Such values are quoted
 # before parsing; nothing else in the block is changed.
 _BARE_GTIN = re.compile(r'("gtin(?:8|12|13|14)?"\s*:\s*)([0-9]+)')
+# A label/value gap: three or more whitespace characters including at least one no-break
+# space. A single "word&nbsp; word" spacing is not a gap.
+_LABEL_GAP = re.compile(r"(?=[ \t\xa0]{3,})[ \t]*\xa0[ \t\xa0]*")
+
+
+def _is_short_label(text: str) -> bool:
+    """A specification label: 1-5 words, no digits except a trailing footnote marker."""
+    words = text.split()
+    core = re.sub(r"[0-9]+(?:\s*,\s*[0-9]+)*\Z", "", text)
+    return 0 < len(words) <= 5 and not re.search(r"[0-9]", core)
 
 
 def product_request(url: str, variant_id: str | None = None) -> ScrapeRequest:
@@ -119,7 +130,10 @@ class OCTAdapter:
     retailer_id = RETAILER_ID
     retailer_code = RETAILER_CODE
     # Bump when parsing rules change; recorded in every observation's source metadata.
-    adapter_version = "oct-1"
+    # oct-2 (2026-10-13): adds identifier provenance as scoped evidence; parsing is unchanged.
+    # oct-3 (2026-10-15): description lines laid out as label + no-break-space gap + value keep
+    # their label/value boundary. Other lines are unchanged.
+    adapter_version = "oct-3"
     allowed_hosts = frozenset({HOST})
     # Project-owner authorization under the project-wide decision; not retailer consent.
     live_use_approved = True
@@ -175,6 +189,24 @@ class OCTAdapter:
         bundle_evidence = _bundle_evidence(title, "title") + _bundle_evidence(
             variant_title, "variant"
         )
+        # Identifiers with their source. A barcode or SKU is not a model code, and the JSON-LD
+        # brand names the store; both are kept for review, never used as identity fields.
+        identifiers: list[tuple[str, str, str]] = []
+        for key in ("sku", "mpn", "gtin12", "gtin13", "productID"):
+            if key in product:
+                identifiers.append(
+                    (IDENTIFIER, f"JSON-LD Product.{key}", _text(product.get(key)) or "(blank)")
+                )
+        for index, offer in enumerate(ld_offers, start=1):
+            for key in ("sku", "gtin12", "gtin13", "mpn"):
+                if key in offer:
+                    identifiers.append(
+                        (IDENTIFIER, f"JSON-LD Offer {index} {key}", _text(offer.get(key)))
+                    )
+        if _brand_name(product):
+            identifiers.append(
+                (IDENTIFIER, "JSON-LD Product.brand (store name; not used)", _brand_name(product))
+            )
         details = OfferDetails(
             retailer_product_id=_first(list(filter(None, parsed.product_ids)))
             or _text(meta.get("id")),
@@ -190,6 +222,7 @@ class OCTAdapter:
             raw_categories=tuple(value for value in (_text(meta.get("type")),) if value),
             bundle_flag=bool(bundle_evidence),
             bundle_evidence=tuple(dict.fromkeys(bundle_evidence)),
+            scoped_evidence=tuple(item for item in dict.fromkeys(identifiers) if item[2]),
         )
         return [
             ParsedOffer(
@@ -678,6 +711,11 @@ def _path(value: object) -> str:
     return urlsplit(value.strip()).path.rstrip("/").lower()
 
 
+def _brand_name(product: dict) -> str:
+    brand = product.get("brand")
+    return _text(brand.get("name")) if isinstance(brand, dict) else _text(brand)
+
+
 def _first(values: list[str]) -> str:
     return values[0] if values else ""
 
@@ -878,10 +916,21 @@ class _ProductPageParser(HTMLParser):
     def description_lines(self) -> list[tuple[str, str]]:
         """Description lines as shown, split at the first colon into ``(label, value)``.
 
-        A line without a colon is kept with an empty value. Nothing is renamed or inferred.
+        A line laid out as ``Label`` + a run of no-break spaces + ``value`` (reviewed 2026-10-15
+        ASUS page: ``Model \\xa0 \\xa0FA506NCQ``) is split at that gap when it comes before any
+        colon and the label is short (up to five words, no digits other than a trailing
+        footnote). A line without either is kept with an empty value. Nothing is renamed or
+        inferred.
         """
         rows: list[tuple[str, str]] = []
         for line in "\n".join(self.description[:1]).split("\n"):
+            gap = _LABEL_GAP.search(line)
+            colon = line.find(":")
+            if gap and (colon < 0 or gap.start() < colon):
+                label, value = clean_text(line[: gap.start()]), clean_text(line[gap.end():])
+                if value and _is_short_label(label):
+                    rows.append((label, value))
+                    continue
             line = clean_text(line)
             if not line:
                 continue

@@ -216,14 +216,47 @@ def test_missing_secondary_values_do_not_block_exact_match() -> None:
     assert all(item.field not in {"resolution", "gpu_model", "os"} for item in result.evidence)
 
 
-def test_duplicate_active_core_targets_are_ambiguous_despite_secondary_differences() -> None:
+def test_duplicate_core_targets_are_narrowed_only_by_a_verified_blocking_conflict() -> None:
+    # The offer states the GPU; the second target states a different one, so it is excluded.
     targets = [BASE_TARGET, BASE_TARGET | {"target_id": "TGT-000002", "gpu_model": "Other GPU"}]
+
+    result = ExactMatcher(targets).match(offer(), BASE_ATTRIBUTES)
+
+    assert (result.status, result.target_id) == (MatchStatus.EXACT, "TGT-000001")
+    assert "DUPLICATE_CORE_NARROWED_BY_GPU_MODEL" in result.reason_codes
+
+
+def test_duplicate_core_targets_stay_ambiguous_without_offer_evidence() -> None:
+    targets = [BASE_TARGET, BASE_TARGET | {"target_id": "TGT-000002", "gpu_model": "Other GPU"}]
+
+    result = ExactMatcher(targets).match(offer(), BASE_ATTRIBUTES | {"gpu_model": ""})
+
+    assert result.status is MatchStatus.AMBIGUOUS
+    assert result.target_id is None
+    assert result.candidate_target_ids == ("TGT-000001", "TGT-000002")
+    assert result.evidence == ()
+
+
+def test_a_target_missing_the_discriminator_is_not_excluded() -> None:
+    # Only one target states the GPU; the other is unknown, not different. Never pick one.
+    targets = [BASE_TARGET, BASE_TARGET | {"target_id": "TGT-000002", "gpu_model": ""}]
 
     result = ExactMatcher(targets).match(offer(), BASE_ATTRIBUTES)
 
     assert result.status is MatchStatus.AMBIGUOUS
     assert result.target_id is None
-    assert result.evidence == ()
+
+
+def test_a_warning_field_never_narrows_duplicate_targets() -> None:
+    # Color is descriptive; a color difference cannot choose between identical cores.
+    targets = [
+        BASE_TARGET | {"color": "Silver"},
+        BASE_TARGET | {"target_id": "TGT-000002", "color": "Gray"},
+    ]
+
+    result = ExactMatcher(targets).match(offer(), BASE_ATTRIBUTES | {"color": "Silver"})
+
+    assert result.status is MatchStatus.AMBIGUOUS
 
 
 def test_inactive_targets_are_not_near_candidates() -> None:

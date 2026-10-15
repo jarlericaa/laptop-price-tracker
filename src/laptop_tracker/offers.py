@@ -59,7 +59,22 @@ OFFER_DETAIL_COLUMNS: tuple[str, ...] = (
     "raw_categories",
     "bundle_flag",
     "bundle_evidence",
+    "scoped_evidence",
 )
+# Detail columns added after the first stored observations. A blank value is omitted from
+# canonical record hashes, so earlier records keep their identity and fingerprint.
+EXTENSION_DETAIL_COLUMNS: tuple[str, ...] = ("scoped_evidence",)
+
+# Where a scoped evidence item came from. Scope says what the text applies to; it never makes
+# the text a trusted specification by itself.
+SELECTED_VARIANT = "SELECTED_VARIANT"  # Option values of the variant the page verifiably selected.
+ENUMERATED_VARIANT = "ENUMERATED_VARIANT"  # Another variant listed by the page; not collected.
+PRODUCT_DESCRIPTION = "PRODUCT_DESCRIPTION"  # Marketing/description prose (not a spec row).
+VARIANT_DEFINITIONS = "VARIANT_DEFINITIONS"  # Complete product-picker option matrix and locator.
+IDENTIFIER = "IDENTIFIER"  # A product, SKU, barcode, or part identifier and where it appeared.
+EVIDENCE_SCOPES = frozenset({
+    SELECTED_VARIANT, ENUMERATED_VARIANT, PRODUCT_DESCRIPTION, IDENTIFIER, VARIANT_DEFINITIONS
+})
 
 
 class Availability(StrEnum):
@@ -203,6 +218,8 @@ class OfferDetails:
     raw_categories: tuple[str, ...] = ()
     bundle_flag: bool | None = None
     bundle_evidence: tuple[str, ...] = ()
+    # (scope, label, value) items, for example ("SELECTED_VARIANT", "RAM", "16GB (2x8) DDR4 RAM").
+    scoped_evidence: tuple[tuple[str, str, str], ...] = ()
 
     _TEXT_FIELDS = (
         "retailer_product_id",
@@ -245,6 +262,22 @@ class OfferDetails:
             raise ObservationValidationError("bundle_evidence", "requires bundle_flag=True")
         if self.bundle_flag is True and not self.bundle_evidence:
             raise ObservationValidationError("bundle_evidence", "is required when flagged")
+        scoped = self.scoped_evidence
+        if not isinstance(scoped, tuple) or not all(
+            isinstance(item, tuple) and len(item) == 3 and all(isinstance(p, str) for p in item)
+            for item in scoped
+        ):
+            raise ObservationValidationError("scoped_evidence", "must be (scope, label, value)")
+        cleaned_items = tuple(
+            (scope, clean_text(label), clean_text(value)) for scope, label, value in scoped
+        )
+        if any(scope not in EVIDENCE_SCOPES for scope, _, _ in cleaned_items):
+            raise ObservationValidationError("scoped_evidence", "has an unknown scope")
+        object.__setattr__(
+            self,
+            "scoped_evidence",
+            tuple(item for item in cleaned_items if item[1] or item[2]),
+        )
 
     def check_against_price(self, price: Decimal) -> None:
         """The detail prices must agree with the observation's current ``price``."""
@@ -274,6 +307,7 @@ class OfferDetails:
             "raw_categories": _json_list(list(self.raw_categories)),
             "bundle_flag": {None: "", True: "TRUE", False: "FALSE"}[self.bundle_flag],
             "bundle_evidence": _json_list(list(self.bundle_evidence)),
+            "scoped_evidence": _json_list([list(item) for item in self.scoped_evidence]),
         }
         return {column: values[column] for column in OFFER_DETAIL_COLUMNS}
 
@@ -465,6 +499,12 @@ def observation_from_record(record: Mapping[str, str]) -> OfferObservation:
         bundle = text("bundle_flag")
         if bundle not in {"", "TRUE", "FALSE"}:
             raise ObservationValidationError("bundle_flag", "must be TRUE, FALSE, or blank")
+        scoped = json_texts("scoped_evidence")
+        if not all(
+            isinstance(item, list) and len(item) == 3 and all(isinstance(p, str) for p in item)
+            for item in scoped
+        ):
+            raise ObservationValidationError("scoped_evidence", "must be (scope, label, value)")
         details = OfferDetails(
             retailer_product_id=text("retailer_product_id"),
             retailer_sku=text("retailer_sku"),
@@ -479,6 +519,7 @@ def observation_from_record(record: Mapping[str, str]) -> OfferObservation:
             raw_categories=tuple(lists["raw_categories"]),  # type: ignore[arg-type]
             bundle_flag={"": None, "TRUE": True, "FALSE": False}[bundle],
             bundle_evidence=tuple(lists["bundle_evidence"]),  # type: ignore[arg-type]
+            scoped_evidence=tuple(tuple(item) for item in scoped),  # type: ignore[misc]
         )
 
     price = decimal("price")

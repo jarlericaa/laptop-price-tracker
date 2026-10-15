@@ -93,7 +93,7 @@ def test_jsonld_page_yields_an_attributed_sale_offer() -> None:
         "JSON-LD availability: http://schema.org/InStock; "
         "add to cart button: Add to cart (enabled)"
     )
-    assert offer.source.adapter_version == "dbz-1"
+    assert offer.source.adapter_version == "dbz-3"
     details = offer.details
     assert details.price_type is PriceType.SALE
     assert (details.regular_price, details.regular_price_text) == (

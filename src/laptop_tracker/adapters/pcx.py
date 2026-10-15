@@ -23,6 +23,7 @@ from html.parser import HTMLParser
 from urllib.parse import urlsplit
 
 from ..offers import (
+    IDENTIFIER,
     Availability,
     ObservationValidationError,
     OfferDetails,
@@ -90,7 +91,8 @@ class PCXAdapter:
     retailer_id = RETAILER_ID
     retailer_code = RETAILER_CODE
     # Bump when parsing rules change; recorded in every observation's source metadata.
-    adapter_version = "pcx-1"
+    # pcx-2 (2026-10-13): adds identifier provenance as scoped evidence; parsing is unchanged.
+    adapter_version = "pcx-2"
     allowed_hosts = frozenset({HOST})
     # Explicit project-owner authorization; not a claim of retailer consent.
     live_use_approved = True
@@ -135,6 +137,28 @@ class PCXAdapter:
         # manufacturer part number, so a value equal to the SKU is not kept.
         mpns = [_text(node.get("mpn")) for node in products]
         mpns += [_text(offer.get("mpn")) for offer in offers]
+        # Every identifier is kept with its source. A JSON-LD "mpn" key is not proof of a
+        # manufacturer role (one block repeats the retailer SKU, another is blank), and the
+        # model code in the title or the unlabeled summary is not a labeled model field.
+        identifiers: list[tuple[str, str, str]] = []
+        for index, node in enumerate(products, start=1):
+            for key in ("sku", "mpn", "productID", "gtin", "gtin13"):
+                if key in node:
+                    value = _text(node.get(key))
+                    label = f"JSON-LD Product block {index} {key}"
+                    identifiers.append((IDENTIFIER, label, value or "(blank)"))
+        for index, offer in enumerate(offers, start=1):
+            for key in ("sku", "mpn"):
+                if key in offer:
+                    value = _text(offer.get(key))
+                    label = f"JSON-LD Offer {index} {key}"
+                    identifiers.append((IDENTIFIER, label, value or "(blank)"))
+        for value in dict.fromkeys(parsed.skus):
+            identifiers.append((IDENTIFIER, "visible SKU", value))
+        for value in dict.fromkeys(parsed.product_ids):
+            identifiers.append((IDENTIFIER, "product form product-id", value))
+        for value in dict.fromkeys(parsed.form_variant_ids):
+            identifiers.append((IDENTIFIER, "product form variant id", value))
         details = OfferDetails(
             retailer_product_id=_digits(parsed.product_ids)
             or _agreed([_text(node.get("productID")) for node in products], "product ID"),
@@ -150,6 +174,7 @@ class PCXAdapter:
             raw_categories=tuple(dict.fromkeys(parsed.types + parsed.categories)),
             bundle_flag=bool(bundle_evidence),
             bundle_evidence=bundle_evidence,
+            scoped_evidence=tuple(dict.fromkeys(identifiers)),
         )
         return [
             ParsedOffer(
@@ -520,6 +545,7 @@ class _ProductPageParser(HTMLParser):
         self.categories: list[str] = []
         self.skus: list[str] = []
         self.product_ids: list[str] = []
+        self.form_variant_ids: list[str] = []
         self.price_blocks: list[_PriceBlock] = []
         self.buttons: list[_Button] = []
         self.notify: list[bool] = []
@@ -596,6 +622,7 @@ class _ProductPageParser(HTMLParser):
         elif tag == "input" and attributes.get("name") == "id":
             self.variant_ids += 1
             self.variant_markup = self.variant_markup or self.variant_ids > 1
+            self.form_variant_ids.append(attributes.get("value", "").strip())
         elif tag == "select" and attributes.get("name") == "id":
             self.variant_markup = True
         elif "t4s-vendor-value" in classes:

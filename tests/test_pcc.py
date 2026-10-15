@@ -105,7 +105,7 @@ def test_selected_variant_on_sale_yields_an_attributed_offer() -> None:
     assert offer.raw_price_text == "₱41,999.00"
     assert offer.availability is Availability.IN_STOCK
     assert offer.availability_evidence == IN_STOCK_EVIDENCE
-    assert offer.source.adapter_version == "pcc-1"
+    assert offer.source.adapter_version == "pcc-4"
     details = offer.details
     assert details.price_type is PriceType.SALE
     assert (details.regular_price, details.regular_price_text) == (

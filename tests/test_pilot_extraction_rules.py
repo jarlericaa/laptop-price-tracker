@@ -118,9 +118,13 @@ def test_unit_less_diagonal_is_not_read_under_a_generic_display_label() -> None:
         ("16GB DDR4", (E, "16")),
         ("16GB (2x 8GB) DDR4", (E, "16")),
         ("16GB*1 DDR5", (E, "16")),
-        # Still unresolved: no total, sum mismatch, extra or alternative amounts, malformed.
-        ("8GB + 8GB", (A, "8; 8")),
+        # Explicit installed components in a memory row are summed (balanced policy, 2026-10-15).
+        ("8GB + 8GB", (E, "16")),
+        ("8GB onboard + 8GB SO-DIMM", (E, "16")),
+        # Still unresolved: sum mismatch, extra or alternative amounts, malformed.
         ("(8GB on board + 8GB SO-DIMM)", (A, "8; 8")),
+        ("8GB + 8GB optional", (A, "8; 8")),
+        ("8GB + 8GB slot", (A, "8; 8")),
         ("16GB (8GB + 4GB)", (A, "16; 8; 4")),
         ("16GB (8GB on board)", (A, "16; 8")),
         ("16GB (8GB + 8GB), expandable to 32GB", (A, "16; 8; 8; 32")),
@@ -139,17 +143,25 @@ def test_ram_total_with_component_breakdown(value: str, expected: tuple[str, str
     assert statuses(lf("RAM", value))["ram_capacity_gb"] == expected
 
 
-def test_repeated_equal_ram_rows_stay_ambiguous() -> None:
+def test_repeated_equivalent_ram_rows_are_one_fact() -> None:
+    # The same installed amount stated twice is one fact, never 32GB or an ambiguity.
     offer = synthetic_offer(
         "laptop_factory", (("RAM", "16GB (8GB + 8GB)"), ("RAM", "16GB (8GB + 8GB)"))
     )
-    assert statuses(offer)["ram_capacity_gb"] == (A, "16; 16")
+    assert statuses(offer)["ram_capacity_gb"] == (E, "16")
 
 
-@pytest.mark.parametrize(
-    "value", ["1TB (512GB SSD + 512GB SSD)", "512GB SSD + 512GB HDD", "1TB (512GB + 512GB)"]
-)
+def test_equal_ram_rows_for_different_components_stay_ambiguous() -> None:
+    # 8GB onboard and 8GB SO-DIMM are two parts, not a repeated fact.
+    offer = synthetic_offer(
+        "laptop_factory", (("RAM", "8GB onboard"), ("RAM", "8GB SO-DIMM"))
+    )
+    assert statuses(offer)["ram_capacity_gb"] == (A, "8; 8")
+
+
+@pytest.mark.parametrize("value", ["1TB (512GB SSD + 512GB SSD)", "1TB (512GB + 512GB)"])
 def test_the_breakdown_rule_does_not_apply_to_storage(value: str) -> None:
+    # A stated total with a parenthesized drive list stays in review (no double counting).
     assert statuses(lf("Storage", value))["storage_capacity_gb"][0] == A
 
 
@@ -164,9 +176,12 @@ def test_the_breakdown_rule_does_not_apply_to_storage(value: str) -> None:
         ("i3-1115G4 processor", (E, "Core i3")),
         ("Intel Core i5-13420H", (E, "Core i5")),
         ("13th Gen i9-13980HX", (E, "Core i9")),
-        # Not enough: a bare tier, a non-Core SKU, a glued or lower-case number, a short number.
-        ("Intel i5", (U, "")),
-        ("i5 processor", (U, "")),
+        # An isolated tier token in a labeled processor field (balanced policy, 2026-10-15).
+        ("Intel i5", (E, "Core i5")),
+        ("i5 processor", (E, "Core i5")),
+        # Not enough: generic wording, a non-Core SKU, a glued or lower-case number, a short
+        # number.
+        ("Intel Core processor", (U, "")),
         ("i3-N305", (U, "")),
         ("Inteli5-13450HX", (U, "")),
         ("EXi5-13420H", (U, "")),
@@ -216,6 +231,9 @@ def adapter_offer(**cells: str):
             body,
         )
         assert count == 1, label
+    # Keep the title consistent with the replaced Model Name: a title naming another model
+    # code is a genuine model conflict (MODEL_TITLE_CONFLICT), which is not under test here.
+    body = body.replace("Acer Aspire AI 14 A14-11M-X3BP", "ExampleBrand Example Go EXG14-75-55MB")
     url = f"https://{LF_HOST}/product/acer-aspire-ai-14-a14-11m-x3bp/"
     clock = FakeClock()
     transport = FakeTransport(clock, TransportResponse(200, url, body.encode(), HTML))
@@ -259,8 +277,16 @@ def test_adapter_path_ram_breakdown_matches_with_its_evidence() -> None:
     )
 
 
+def test_adapter_path_installed_ram_components_are_summed() -> None:
+    result = match(adapter_offer(RAM="8GB + 8GB"))
+
+    assert (result.status, result.target_id) == (MatchStatus.EXACT, "TGT-000001")
+    components = evidence(result, "ram_components")
+    assert (components.value, components.source_text) == ("8GB + 8GB", "8GB + 8GB")
+
+
 @pytest.mark.parametrize(
-    "ram", ["16GB (8GB + 4GB)", "8GB + 8GB", "16GB (8GB + 8GB), expandable to 32GB"]
+    "ram", ["16GB (8GB + 4GB)", "8GB + 8GB optional", "16GB (8GB + 8GB), expandable to 32GB"]
 )
 def test_adapter_path_unresolved_ram_never_gets_a_target(ram: str) -> None:
     result = match(adapter_offer(RAM=html.escape(ram)))
