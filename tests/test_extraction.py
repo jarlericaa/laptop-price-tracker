@@ -336,7 +336,8 @@ def test_pc_express_layout_and_total_capacity_must_agree() -> None:
         ("RAM", "16GB (2x 16GB)", "ram_capacity_gb", (A, "16; 32")),
         ("RAM", "0.5GB", "ram_capacity_gb", (U, "")),
         ("RAM", "1TB", "ram_capacity_gb", (U, "")),
-        ("RAM", "8GB, expandable to 32GB", "ram_capacity_gb", (A, "8; 32")),
+        # A maximum clause is never installed memory (2026-10-19 scope rule).
+        ("RAM", "8GB, expandable to 32GB", "ram_capacity_gb", (E, "8")),
         ("Display Size", "15.6-inch FHD", "screen_size_in", (E, "15.6")),
         ("Display Size", "14.0'' 2-in-1 touch", "screen_size_in", (E, "14")),
         ("Display Size", "FHD touch", "screen_size_in", (U, "")),

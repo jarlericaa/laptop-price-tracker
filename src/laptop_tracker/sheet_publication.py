@@ -65,6 +65,11 @@ REASON_TEXT = {
     "AVAILABILITY_UNKNOWN": "stock unknown",
     "BUNDLE_OFFER": "bundle offer",
     "BUNDLE_STATUS_UNKNOWN": "bundle status unknown",
+    "INCLUDED_ITEMS_OFFER": "includes stated items",
+    "PAID_PACKAGE_PRICE": "paid package price",
+    "PURCHASE_CONDITION_REQUIRED": "price requires another purchase",
+    "PURCHASE_TERMS_UNKNOWN": "bundle terms not stated",
+    "RESTRICTED_PRICE": "restricted price (financing, card, trade-in or member)",
     "CURRENCY_NOT_PHP": "not priced in PHP",
     "PRICE_TYPE_UNKNOWN": "price type unknown",
     "PRICE_INVALID": "invalid price",
@@ -646,11 +651,13 @@ def _outcome(row: Mapping[str, str]) -> str:
 
 def _minimum_retailers(retailers: str, notes: str) -> str:
     """Label the actual minimum's package, including ties and in-stock alternatives."""
-    bundled = {
-        note.split(":", 1)[0] for note in notes.split(";") if note.endswith(":BUNDLE_OFFER")
+    labels = {"BUNDLE_OFFER": "bundle offer", "INCLUDED_ITEMS_OFFER": "includes stated items"}
+    noted = {
+        note.split(":", 1)[0]: labels[note.split(":", 1)[1]]
+        for note in notes.split(";") if ":" in note and note.split(":", 1)[1] in labels
     }
     return ", ".join(
-        RETAILER_NAMES[code] + (" (bundle offer)" if code in bundled else "")
+        RETAILER_NAMES[code] + (f" ({noted[code]})" if code in noted else "")
         for code in retailers.split(";") if code
     )
 

@@ -29,6 +29,7 @@ from .match_run import NumberedObservation
 from .matching import ExactMatcher, MatchResult, MatchStatus
 from .normalization import CORE_MATCH_COLUMNS
 from .observation_store import ObservationConflictError, ObservationStore, observation_id
+from .offer_terms import DEFAULT_OFFER_TERMS_POLICY, classify_offer_terms
 from .offers import OfferObservation
 from .price_tracking import price_rule_reasons
 from .scraping import FetchedPage, ParseError, build_observation
@@ -108,12 +109,18 @@ def record_differences(original: OfferObservation, replayed: OfferObservation) -
     return [key for key in after if before.get(key, "") != after[key]]
 
 
-def price_comparability(observation: OfferObservation, result: MatchResult) -> str:
+def price_comparability(
+    observation: OfferObservation,
+    result: MatchResult,
+    policy: str = DEFAULT_OFFER_TERMS_POLICY,
+) -> str:
     """The weekly-comparison price rule applied to one offer, as a status plus reasons."""
     if result.status is not MatchStatus.EXACT:
         return f"NOT_PRICED: MATCH_{result.status.value}"
     details = observation.details
     reasons = price_rule_reasons(
+        terms=classify_offer_terms(observation),
+        policy=policy,
         retailer_id=observation.retailer_id,
         currency=observation.currency,
         availability=observation.availability.value,

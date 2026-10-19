@@ -37,6 +37,7 @@ from laptop_tracker.matching import (
     offer_outcome,
 )
 from laptop_tracker.observation_store import observation_id
+from laptop_tracker.offer_terms import BUNDLE_FLAG_POLICY
 from laptop_tracker.offers import IDENTIFIER, Availability, PriceType
 from laptop_tracker.pilot_coverage import (
     CANDIDATE_NOT_FETCHED,
@@ -127,10 +128,6 @@ def test_all_five_values_only_in_the_title_go_to_review() -> None:
          "TITLE_MULTIPLE_MODEL_CODES"),
         # An unexplained designation after the code is never stripped.
         ("ASUS Vivobook S3607VA-RP181WSM OPI Laptop", VIVO_URL, "TITLE_MODEL_UNEXPLAINED_SUFFIX"),
-        # The product URL names the same stem with another final segment.
-        ("ASUS Vivobook S3607VA-RP181WSM Laptop",
-         "https://pcx.com.ph/products/asus-vivobook-s3607va-rp181awsm-laptop",
-         "MODEL_URL_CONFLICT"),
     ],
 )
 def test_unsafe_title_codes_are_not_used(title: str, url: str, note: str) -> None:
@@ -139,6 +136,45 @@ def test_unsafe_title_codes_are_not_used(title: str, url: str, note: str) -> Non
     assert primary(page)["model"] == (M, "")
     result = match(page)
     assert result.status is MatchStatus.REVIEW_REQUIRED and result.target_id is None
+
+
+SLUG_URL = "https://pcx.com.ph/products/asus-vivobook-s3607va-rp181awsm-laptop"
+
+
+def test_a_differing_url_slug_is_a_warning_once_the_page_establishes_the_model() -> None:
+    # Policy 2026-10-19: the URL wording is outdated or wrong more often than the page heading
+    # and specification rows. Both wordings are kept; nothing is aliased.
+    page = pcx("ASUS Vivobook S3607VA-RP181WSM Laptop", url=SLUG_URL)
+    assert "MODEL_URL_DIFFERS" in notes(page)
+    assert primary(page)["model"] == (E, "S3607VA-RP181WSM")
+    kept = [item for item in extract_offer_attributes(page).evidence if item.scope == "URL"]
+    assert [item.value for item in kept] == [
+        "URL: s3607va-rp181awsm; page model: S3607VA-RP181WSM"
+    ]
+    assert kept[0].source_text == SLUG_URL
+    result = match(page)
+    assert (result.status, result.target_id) == (MatchStatus.EXACT, "TGT-000031")
+    assert "MODEL_URL_DIFFERS" in result.warnings
+
+
+def test_a_differing_url_slug_never_rescues_an_unestablished_model() -> None:
+    # The slug is only checked; with an unexplained suffix the model stays unresolved, and a
+    # slug naming the target's own code never supplies it.
+    page = pcx("ASUS Vivobook S3607VA-RP181WSM OPI Laptop", url=SLUG_URL)
+    assert primary(page)["model"] == (M, "")
+    assert "MODEL_URL_DIFFERS" not in notes(page)
+    url_only = pcx("ASUS Vivobook S16 Laptop",
+                   url="https://pcx.com.ph/products/asus-vivobook-s3607va-rp181wsm-laptop")
+    assert primary(url_only)["model"] == (M, "")
+    assert match(url_only).status is MatchStatus.REVIEW_REQUIRED
+
+
+def test_a_page_model_claim_conflict_still_blocks_even_when_the_url_agrees() -> None:
+    page = pcx("ASUS Vivobook S3607VA-RP181WSM Laptop",
+               specs=(("Model", "FA506NC"), *PCX_SPECS),
+               url="https://pcx.com.ph/products/asus-vivobook-s3607va-rp181wsm-laptop")
+    assert "MODEL_CLAIM_CONFLICT" in notes(page)
+    assert match(page).status is MatchStatus.REVIEW_REQUIRED
 
 
 @pytest.mark.parametrize(
@@ -449,16 +485,27 @@ def test_pc_central_span_layout_keeps_label_and_value() -> None:
 # H. Price eligibility stays separate from identity
 
 
-def test_exact_bundle_is_comparable_and_unknown_package_keeps_its_price_reason() -> None:
-    page = replace(pcx("ASUS Vivobook S16 S3607VA-RP181WSM Laptop"))
-    bundled = offer("pcx", PCX_SPECS, title=page.raw_title, url=VIVO_URL, bundle=True)
-    unknown = offer("pcx", PCX_SPECS, title=page.raw_title, url=VIVO_URL, bundle=None)
-    for observation, expected in (
-        (bundled, "COMPARABLE"), (unknown, "NOT_COMPARABLE: BUNDLE_STATUS_UNKNOWN")
+def test_exact_bundle_price_eligibility_depends_on_its_purchase_terms() -> None:
+    title = "ASUS Vivobook S16 S3607VA-RP181WSM Laptop"
+
+    def page(bundle, evidence=("Synthetic backpack bundle",), heading=title):
+        return offer("pcx", PCX_SPECS, title=heading, url=VIVO_URL, bundle=bundle,
+                     bundle_evidence=evidence, price_type=PriceType.REGULAR)
+
+    included = page(True, ("title term FREE: + FREE",), f"{title} + FREE Backpack")
+    wording_only = page(True)  # "backpack bundle": the keyword does not state the terms
+    unknown = page(None)
+    for observation, expected, legacy in (
+        (included, "COMPARABLE", "COMPARABLE"),
+        (wording_only, "NOT_COMPARABLE: PURCHASE_TERMS_UNKNOWN", "COMPARABLE"),
+        (unknown, "NOT_COMPARABLE: BUNDLE_STATUS_UNKNOWN",
+         "NOT_COMPARABLE: BUNDLE_STATUS_UNKNOWN"),
     ):
         result = match(observation)
+        # Identity is unaffected by the commercial terms.
         assert result.status is MatchStatus.EXACT
         assert price_comparability(observation, result) == expected
+        assert price_comparability(observation, result, BUNDLE_FLAG_POLICY) == legacy
 
 
 def test_out_of_stock_exact_offer_remains_comparable() -> None:

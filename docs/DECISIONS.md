@@ -182,3 +182,27 @@ currency, stock, known price type and valid-price requirements continue to apply
 reports retain their historical policy; regenerating them records comparison policy
 `displayed-price/stock-and-bundles/2026-10-15`. No retailer recollection is required to apply this
 change to stored observations.
+
+## Discovery, evidence scope, URL slugs, coverage and purchase terms (requested 2026-10-19)
+
+Requested revision, implemented locally; owner acceptance after a real-data replay is pending.
+
+- **Discovery.** Search the complete model code first, without specification filters; continue
+  through fallbacks (part number, code with RAM/storage, family, family with specifications)
+  while the results hold only other configurations or unresolved candidates. Earlier `EXACT`
+  offer URLs are re-checked as seeds. Search results stay candidates; target values never fill a
+  missing specification.
+- **URL slugs.** Once page evidence establishes a consistent model, a differing slug is a warning
+  (supersedes the 2026-10-15 implementation default that blocked title and shared-model routes).
+  No alias; genuine page-claim conflicts still block.
+- **Evidence scope.** Family capabilities, maximums and optional configurations never stand for
+  the installed configuration (supersedes the earlier `AMBIGUOUS` result for
+  `8GB, expandable to 32GB`). Unexplained suffixes on model-name rows are no longer dropped.
+- **Purchase terms.** Supersedes the 2026-10-15 "every confirmed bundle comparable" default:
+  ordinary inclusions remain comparable with a note; paid packages, conditional and restricted
+  prices, and bundle wording without stated terms are excluded with their reason. The earlier
+  rule remains selectable (`--offer-terms-policy bundle-flag/2026-10-15`) and the effect is
+  reported separately in `offer_terms_effect`.
+- Unchanged: five required fields, no fuzzy/four-of-five matching, no suffix removal, exact screen
+  sizes, explicit capacity units, catalog/mappings/approvals untouched, stock eligibility and the
+  two minimums.

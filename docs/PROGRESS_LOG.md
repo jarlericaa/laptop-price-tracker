@@ -249,3 +249,38 @@ catalog's 14. Outputs: `data/output/policy_review_2026-10-15/` (with `preview.ht
 the delivery notes. No retailer requests, Sheets writes, store imports, catalog/approval edits or
 commits; price reports ran on throwaway store copies and the production store hash is unchanged.
 Phase 10 remains IN_PROGRESS.
+
+## Discovery continuation, scoped evidence, coverage ledger and purchase terms (2026-10-19)
+
+Implemented the five requested improvements (DECISIONS.md, MATCHING.md,
+PRICE_TRACKING_OUTPUT_SCHEMA.md, SETUP_AND_OPERATIONS.md): discovery tiers with recorded run and
+stop reasons, same-run reuse and saved-response replay (`--search-cache`, `--replay-only`),
+historical verified URL seeds, same-code different-configuration pages collected for checking;
+URL slug warnings once page evidence establishes the model; evidence scope with family
+capability, maximum and optional clauses; unresolved model-name suffixes; blank-cell candidates
+(`CANDIDATE_NOT_CONFIRMED`) and an extended coverage ledger; the purchase-terms price policy
+(default) with the earlier bundle-flag rule selectable and its effect reported separately.
+
+The real saved pilot (`data/collection/…`, `data/output/…`, history store) is not on the machine
+used, so it was not replayed. A synthetic replay of the documented pilot case shapes (15 offers,
+8 configurations, plus a Laptop Factory discovery/collection run through a fake transport) was run
+with identical inputs against the previous commit and the revised tree:
+
+- Matching: 7 EXACT / 8 REVIEW → 12 EXACT / 3 REVIEW. New: PCC Nitro (r2auh slug) and PCX Vivobook (outdated slug) with
+  `MODEL_URL_DIFFERS`; MSI CPU "up to Core i7" and MSI "upgradable up to 64GB"; Swift Go
+  "512GB SSD | Up to 2TB". Unchanged review: PCX TUF `FA506NC` claim conflict, HP "8GB or 16GB",
+  Octagon page without a model code. No earlier EXACT changed target.
+- Purchase terms, identity held fixed: of the 12 exact offers, 12 are comparable under the
+  bundle-flag rule and 9 under the purchase-terms rule (paid monitor package, trade-in price, bare
+  `BUNDLE` keyword excluded); Office/backpack inclusions stay comparable with a note. Overall
+  comparable offers 7 → 9.
+- Comparison cells: 6 priced / 29 "no exact offer" → 8 priced, 3 excluded with a terms reason,
+  4 `CANDIDATE_NOT_CONFIRMED` with link and reason, 20 not observed.
+- Discovery: MSI 16GB found through the code-with-RAM/storage query after the code query showed
+  only the 8GB page (both collected; 8GB confirmed as the out-of-scope 8GB target); out-of-stock
+  Nitro recollected from its seed; Aspire found past an `OPI` result, which now stays in review
+  instead of matching. Requests 5 → 13 within the limits.
+
+Tests: full suite passes (previously two bundle tests failed because their synthetic offers had no
+price type). No retailer requests, store imports, Sheets writes, catalog/mapping/approval edits or
+commits.

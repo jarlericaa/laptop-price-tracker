@@ -504,6 +504,38 @@ AMBIGUOUS_TARGET = "AMBIGUOUS_TARGET"
 INACTIVE_TARGET = "INACTIVE_TARGET"
 
 
+SAME_MODEL_DIFFERENT_CONFIGURATION = "SAME_MODEL_DIFFERENT_CONFIGURATION"
+
+
+def core_differences(
+    offer_attributes: Mapping[str, object], target_row: Mapping[str, object]
+) -> list[tuple[str, str, str]]:
+    """``(field, offer value, target value)`` for each core field both state differently.
+
+    Values are compared with the matcher's own normalization; a missing value on either side is
+    not a difference. Used only to explain a non-match, never to assign one.
+    """
+    from .normalization import core_value_key
+
+    differences = []
+    for field in CORE_MATCH_COLUMNS:
+        offer_value, target_value = offer_attributes.get(field), target_row.get(field)
+        if is_blank(offer_value) or is_blank(target_value):
+            continue
+        try:
+            same = core_value_key(field, offer_value) == core_value_key(field, target_value)
+        except ValueError:
+            same = False
+        if not same:
+            differences.append((field, str(offer_value), str(target_value)))
+    return differences
+
+
+def describe_differences(differences: Iterable[tuple[str, str, str]]) -> str:
+    return "; ".join(f"{field}: offer {offer} vs target {target}"
+                     for field, offer, target in differences)
+
+
 def offer_outcome(status: str, reason_codes: Iterable[str]) -> str:
     """One outcome per match result. ``DIFFERENT_CONFIGURATION`` needs a complete, verified core
     that no target has; it never names a target. A missing or unresolved model with the other
@@ -534,6 +566,23 @@ def match_basis_from_codes(reason_codes: Iterable[str]) -> str:
     if "SHARED_CPU_DISPLAY_RAM_STORAGE_ONLY" in codes:
         tags += ["SELECTED_VARIANT", "SHARED_PRODUCT"]
     return "+".join(tags) or "LABELED_SPECIFICATION"
+
+
+# Provenance and summary codes that explain nothing on their own beside the specific codes.
+_BOOKKEEPING_CODES = frozenset({
+    "MISSING_CORE_FIELDS", "INCOMPLETE_OR_INVALID_CORE_FIELDS",
+    "MULTI_VARIANT_SHARED_DESCRIPTION", "SHARED_CPU_DISPLAY_RAM_STORAGE_ONLY",
+    "EQUIVALENT_REPEATED_FACTS_DEDUPLICATED", "TITLE_MODEL_CORROBORATED",
+})
+
+
+def review_codes(reason_codes: Iterable[str]) -> list[str]:
+    """The reason codes a reader needs: no warnings, provenance, or supporting-evidence notes."""
+    return [
+        code for code in reason_codes
+        if not is_warning_code(code) and code not in _BOOKKEEPING_CODES
+        and not code.startswith("SUPPORTING_EVIDENCE_")
+    ] or [code for code in reason_codes if not is_warning_code(code)]
 
 
 def is_warning_code(code: str) -> bool:

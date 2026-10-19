@@ -34,12 +34,16 @@ from laptop_tracker.product_discovery import (
     CANDIDATE_COLUMNS,
     COLLECTABLE,
     COVERAGE_COLUMNS,
+    HISTORICAL_VERIFIED_URL,
     RankedCandidate,
     SearchTarget,
     candidate_row,
-    has_code_signal,
+    configuration_difference,
     inspect_product_page,
+    plausible_candidate,
     rank_target_hits,
+    results_summary,
+    seed_candidate,
     strip_variant,
     variant_decision,
 )
@@ -48,11 +52,13 @@ from laptop_tracker.retailer_search import (
     NO_RESULTS,
     NOT_SENT_BUDGET,
     NOT_SENT_LIMIT,
+    NOT_SENT_QUERY_LIMIT,
+    NOT_SENT_REPLAY_ONLY,
     RESULTS,
     SEARCH_ERROR,
     SEARCH_METHODS,
     SEARCH_RECORD_COLUMNS,
-    TIER_FAMILY,
+    TIER_MODEL_CODE,
     UNSUPPORTED_LAYOUT,
     BudgetedTransport,
     SearchLayoutError,
@@ -64,6 +70,7 @@ from laptop_tracker.retailer_search import (
 from laptop_tracker.scraping import (
     Clock,
     FetchConfig,
+    FetchedPage,
     Fetcher,
     FetchError,
     ScrapeRequest,
@@ -89,6 +96,20 @@ from laptop_tracker.verified_top import (
 ROOT = Path(__file__).resolve().parent
 NOT_SENT_RETAILER = "NOT_SENT_RETAILER_FAILING"
 CONSECUTIVE_ERRORS_TO_STOP = 2
+
+# Why a target/retailer search job stopped (search_jobs.csv).
+STOP_PLAUSIBLE = "PLAUSIBLE_CANDIDATE_FOUND"
+STOP_ALL_TIERS = "ALL_QUERY_TIERS_TRIED"
+STOP_QUERY_LIMIT = "QUERY_LIMIT_PER_TARGET_RETAILER"
+STOP_SEARCH_LIMIT = "SEARCH_REQUEST_LIMIT_REACHED"
+STOP_BUDGET = "TOTAL_REQUEST_BUDGET_REACHED"
+STOP_RETAILER = "RETAILER_STOPPED_AFTER_ERRORS"
+STOP_REPLAY = "REPLAY_ONLY_NO_SAVED_RESPONSE"
+SEARCH_JOB_COLUMNS = (
+    "target_id", "rank", "retailer_id", "queries_planned", "queries_run", "pages_sent",
+    "pages_from_cache", "pages_not_sent", "tiers_run", "stop_reason", "plausible_candidate_url",
+    "historical_seeds",
+)
 
 
 def positive(value: str) -> int:
@@ -130,8 +151,35 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--max-search-pages", type=positive, default=2,
                         help="Result pages per query where pagination exists (default 2).")
     parser.add_argument("--max-candidates-per-target-retailer", type=positive, default=2)
+    parser.add_argument("--max-queries-per-target-retailer", type=positive, default=5,
+                        help="Query tiers tried per target and retailer (default 5: code, part "
+                             "number, code with RAM/storage, family, family with specs).")
     parser.add_argument("--max-product-fetches", type=positive, default=20,
                         help="Product-page inspections plus collection fetches (default 20).")
+    parser.add_argument("--min-seconds-between-requests", type=float,
+                        default=FetchConfig().min_request_interval_seconds,
+                        help="Per-retailer spacing between requests; never below the default "
+                             f"{FetchConfig().min_request_interval_seconds:g} seconds.")
+    parser.add_argument("--search-cache", type=Path, action="append", default=[],
+                        help="An earlier discovery folder (repeatable). Its saved search and "
+                             "inspection responses are replayed instead of sending the same "
+                             "request again.")
+    parser.add_argument("--cache-max-age-hours", type=float,
+                        help="Replay saved responses only when retrieved within this many hours.")
+    parser.add_argument("--replay-only", action="store_true",
+                        help="With --live: send no request at all; use only --search-cache "
+                             "responses and record every other request as not sent.")
+    parser.add_argument("--seed-urls", type=Path, action="append", default=[],
+                        help="CSV of earlier verified offers (repeatable), e.g. a collection's "
+                             "match_results.csv: rows with match_status EXACT seed their offer "
+                             "URL as a candidate for that target. Re-checked, never assumed.")
+    parser.add_argument("--seed-store", type=Path,
+                        help="History store whose EXACT results seed offer URLs as candidates.")
+    parser.add_argument("--max-seed-urls-per-target-retailer", type=positive, default=2)
+    parser.add_argument("--no-collect-title-differences", action="store_true",
+                        help="Do not collect same-code pages whose title states another "
+                             "configuration (default: collect them so the page's own "
+                             "specifications decide, within the candidate limit).")
     parser.add_argument("--collect", action="store_true",
                         help="Collect and match the manifest with collect_and_match.py.")
     parser.add_argument("--store", type=Path,
@@ -142,6 +190,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     args = parser.parse_args(argv)
     if args.live and args.max_total_requests is None:
         parser.error("--live requires --max-total-requests.")
+    if args.replay_only and args.collect:
+        parser.error("--replay-only cannot collect pages; run collect_and_match.py separately.")
+    if args.replay_only and not args.search_cache:
+        parser.error("--replay-only needs at least one --search-cache folder.")
+    if args.min_seconds_between_requests < FetchConfig().min_request_interval_seconds:
+        parser.error("--min-seconds-between-requests may not be below the default spacing.")
     return args
 
 
@@ -203,34 +257,54 @@ def load_targets(args):
 
 
 class SearchJob:
-    """The search requests for one target at one retailer, in tier order."""
+    """The search requests for one target at one retailer, in tier order.
 
-    def __init__(self, target: SearchTarget, retailer_id: str, max_pages: int) -> None:
+    The complete model code always runs first, without specification filters. Each later tier
+    (part number, code with RAM/storage, family, family with specifications) runs only while the
+    results so far hold no plausible candidate: a page showing the complete code (or verified
+    part number) whose title does not state another configuration. Results showing only another
+    RAM/storage configuration, an unexplained suffix, or a code only in the URL keep the search
+    going (2026-10-19). Every query records why it ran, and the job records why it stopped.
+    """
+
+    def __init__(self, target: SearchTarget, retailer_id: str, max_pages: int,
+                 max_queries: int = 5) -> None:
         method = SEARCH_METHODS[retailer_id]
         self.target = target
         self.method = method
         self.retailer_id = retailer_id
-        self.queries = search_queries(
+        self.all_queries = search_queries(
             target.target_id, retailer_id, model=target.model, part_number=target.part_number,
-            brand=target.brand, series=target.series,
+            brand=target.brand, series=target.series, core=target.core,
         )
+        self.queries = self.all_queries[:max_queries]
         self.max_pages = max_pages if method.paginated else 1
         self.index = 0
         self.page = 1
         self.next_url = ""
         self.records: list[SearchRecord] = []
         self.done = False
+        self.stop_reason = ""
+        self.plausible_url = ""
 
     def current(self) -> tuple[SearchQuery, int, str] | None:
-        while not self.done and self.index < len(self.queries):
-            query = self.queries[self.index]
-            if query.tier == TIER_FAMILY and has_code_signal(self.target, self.records):
-                self.done = True  # The family query runs only when it is needed.
-                return None
-            url = self.next_url if self.page > 1 else self.method.first_page_url(query.text)
-            return query, self.page, url
-        self.done = True
-        return None
+        if self.done:
+            return None
+        if self.index >= len(self.queries):
+            self._finish()
+            return None
+        query = self.queries[self.index]
+        url = self.next_url if self.page > 1 else self.method.first_page_url(query.text)
+        return query, self.page, url
+
+    def run_reason(self, query: SearchQuery, page_number: int) -> str:
+        if page_number > 1:
+            return f"result page {page_number} of the same query"
+        if query.tier == TIER_MODEL_CODE:
+            return "first query: complete model code without specification filters"
+        tiers = ", ".join(dict.fromkeys(r.query.tier for r in self.records))
+        return (f"no plausible candidate after {tiers}; "
+                f"{results_summary(self.target, self.records)}")
 
     def advance(self, record: SearchRecord) -> None:
         self.records.append(record)
@@ -240,18 +314,55 @@ class SearchJob:
             return
         self.page, self.next_url = 1, ""
         self.index += 1
-        if self.index < len(self.queries) and self.queries[self.index].tier != TIER_FAMILY:
-            return
-        if has_code_signal(self.target, self.records):
-            self.done = True
+        url = plausible_candidate(self.target, self.records)
+        if url:
+            self.done, self.stop_reason, self.plausible_url = True, STOP_PLAUSIBLE, url
+        elif self.index >= len(self.queries):
+            self._finish()
 
-    def skip_rest(self, outcome: str, message: str) -> None:
+    def _finish(self) -> None:
+        if self.done:
+            return
+        self.done = True
+        if len(self.all_queries) > len(self.queries):
+            self.stop_reason = self.stop_reason or STOP_QUERY_LIMIT
+            for query in self.all_queries[len(self.queries):]:
+                self.records.append(SearchRecord(
+                    query, 1, self.method.first_page_url(query.text), NOT_SENT_QUERY_LIMIT,
+                    message="--max-queries-per-target-retailer reached.",
+                    run_reason="not run: query limit",
+                ))
+        self.stop_reason = self.stop_reason or STOP_ALL_TIERS
+
+    def skip_rest(self, outcome: str, message: str, stop_reason: str = "") -> None:
         while (planned := self.current()) is not None:
             query, page, url = planned
-            self.records.append(SearchRecord(query, page, url, outcome, message=message))
+            self.records.append(SearchRecord(query, page, url, outcome, message=message,
+                                             run_reason=self.run_reason(query, page)))
             self.page, self.next_url = 1, ""
             self.index += 1
         self.done = True
+        self.stop_reason = stop_reason or self.stop_reason or STOP_ALL_TIERS
+
+    def job_row(self, seeds: int) -> dict[str, str]:
+        sent = [r for r in self.records if r.outcome in {RESULTS, NO_RESULTS, SEARCH_ERROR,
+                                                         UNSUPPORTED_LAYOUT} and not r.cache]
+        cached = [r for r in self.records if r.cache]
+        return {
+            "target_id": self.target.target_id,
+            "rank": self.target.rank,
+            "retailer_id": self.retailer_id,
+            "queries_planned": str(len(self.all_queries)),
+            "queries_run": str(len({r.query.tier for r in sent + cached})),
+            "pages_sent": str(len(sent)),
+            "pages_from_cache": str(len(cached)),
+            "pages_not_sent": str(sum(1 for r in self.records if r.outcome.startswith(
+                "NOT_SENT"))),
+            "tiers_run": ";".join(dict.fromkeys(r.query.tier for r in sent + cached)),
+            "stop_reason": self.stop_reason,
+            "plausible_candidate_url": self.plausible_url,
+            "historical_seeds": str(seeds),
+        }
 
 
 def evidence_name(body: bytes, content_type: str) -> str:
@@ -259,11 +370,103 @@ def evidence_name(body: bytes, content_type: str) -> str:
     return f"{hashlib.sha256(body).hexdigest()}.{ext}"
 
 
-def run_searches(jobs, fetcher, transport, args, evidence_dir: Path, log) -> int:
-    """Round-robin across retailers so per-retailer throttling waits overlap."""
+def _parse_time(text: str):
+    from datetime import datetime
+
+    try:
+        moment = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return moment if moment.tzinfo else None
+
+
+def load_saved_responses(folders, csv_name, url_column, max_age_hours, now) -> dict:
+    """``url -> (row, body path, folder)`` for saved responses that can be replayed.
+
+    Only successful, readable responses are replayed (searches: RESULTS or NO_RESULTS;
+    inspections: anything but FETCH_FAILED). The latest saved copy of each URL wins.
+    """
+    saved: dict[str, tuple[dict[str, str], Path, Path]] = {}
+    for folder in folders:
+        path = folder / csv_name
+        if not path.is_file():
+            continue
+        for row in read_rows(path):
+            if csv_name == "search_requests.csv" and row.get("outcome") not in {
+                RESULTS, NO_RESULTS
+            }:
+                continue
+            if csv_name == "product_inspections.csv" and row.get("outcome") in {
+                "FETCH_FAILED", "STEP_FAILED", ""
+            }:
+                continue
+            body = folder / row.get("evidence_file", "")
+            moment = _parse_time(row.get("retrieved_at", ""))
+            if not row.get("evidence_file") or not body.is_file() or moment is None:
+                continue
+            if max_age_hours is not None and (now - moment).total_seconds() > max_age_hours * 3600:
+                continue
+            url = row.get(url_column, "")
+            if url and (url not in saved or row["retrieved_at"] > saved[url][0]["retrieved_at"]):
+                saved[url] = (row, body, folder)
+    return saved
+
+
+def saved_page(retailer_id: str, url: str, entry) -> FetchedPage:
+    row, body, _ = entry
+    content_type = ("application/json; charset=utf-8" if body.suffix == ".json"
+                    else "text/html; charset=utf-8")
+    return FetchedPage(retailer_id, url, row.get("final_url") or url,
+                       int(row.get("http_status") or 200), body.read_bytes(), content_type,
+                       _parse_time(row["retrieved_at"]), 1)
+
+
+def _copy_record(source: SearchRecord, query: SearchQuery, run_reason: str) -> SearchRecord:
+    return SearchRecord(
+        query, source.page_number, source.url, source.outcome, source.http_status,
+        source.final_url, source.retrieved_at, source.attempts, source.content_sha256,
+        source.evidence_file, source.hits, source.filtered_links, source.possibly_truncated,
+        source.next_url, source.message, list(source.hit_items), cache="SAME_RUN",
+        run_reason=run_reason,
+    )
+
+
+def _store_page(record: SearchRecord, job, page: FetchedPage, evidence_dir: Path) -> None:
+    name = evidence_name(page.body, page.content_type)
+    (evidence_dir / name).write_bytes(page.body)
+    record.http_status = str(page.status_code)
+    record.final_url = page.final_url
+    record.retrieved_at = utc_text(page.retrieved_at)
+    record.attempts = str(page.attempts)
+    record.content_sha256 = page.content_sha256
+    record.evidence_file = f"evidence/{name}"
+    try:
+        parsed = job.method.parse(page)
+    except SearchLayoutError as error:
+        record.outcome = UNSUPPORTED_LAYOUT
+        record.message = str(error)
+    else:
+        record.hit_items = list(parsed.hits)
+        record.hits = len(parsed.hits)
+        record.filtered_links = parsed.filtered_links
+        record.possibly_truncated = parsed.possibly_truncated
+        record.next_url = parsed.next_url
+        record.outcome = RESULTS if parsed.hits else NO_RESULTS
+
+
+def run_searches(jobs, fetcher, transport, args, evidence_dir: Path, log, *,
+                 saved: dict | None = None) -> int:
+    """Round-robin across retailers so per-retailer throttling waits overlap.
+
+    An identical search already answered in this run is reused (``SAME_RUN``), and a saved
+    response from an earlier run is replayed (``SAVED:<folder>``) instead of a new request.
+    Reused responses count toward no limit, because nothing is sent.
+    """
     sent = 0
     errors: Counter[str] = Counter()
     stopped: set[str] = set()
+    answered: dict[str, SearchRecord] = {}
+    saved = saved or {}
     pending = list(jobs)
     while pending:
         progressed = False
@@ -273,136 +476,187 @@ def run_searches(jobs, fetcher, transport, args, evidence_dir: Path, log) -> int
                 pending.remove(job)
                 continue
             query, page_number, url = planned
-            if job.retailer_id in stopped:
-                job.skip_rest(NOT_SENT_RETAILER, "Retailer search stopped after repeated errors.")
+            reason = job.run_reason(query, page_number)
+            if url in answered:
+                record = _copy_record(answered[url], query, reason)
+            elif url in saved:
+                record = SearchRecord(query, page_number, url, run_reason=reason,
+                                      cache=f"SAVED:{saved[url][2]}")
+                _store_page(record, job, saved_page(job.retailer_id, url, saved[url]),
+                            evidence_dir)
+                answered[url] = record
+            elif args.replay_only:
+                record = SearchRecord(query, page_number, url, NOT_SENT_REPLAY_ONLY,
+                                      message="--replay-only: no saved response.",
+                                      run_reason=reason)
+            elif job.retailer_id in stopped:
+                job.skip_rest(NOT_SENT_RETAILER, "Retailer search stopped after repeated errors.",
+                              STOP_RETAILER)
                 pending.remove(job)
                 continue
-            if sent >= args.max_search_requests:
-                job.skip_rest(NOT_SENT_LIMIT, "--max-search-requests reached.")
+            elif sent >= args.max_search_requests:
+                job.skip_rest(NOT_SENT_LIMIT, "--max-search-requests reached.", STOP_SEARCH_LIMIT)
                 pending.remove(job)
                 continue
-            if transport.remaining <= 0:
-                job.skip_rest(NOT_SENT_BUDGET, "--max-total-requests reached.")
+            elif transport.remaining <= 0:
+                job.skip_rest(NOT_SENT_BUDGET, "--max-total-requests reached.", STOP_BUDGET)
                 pending.remove(job)
                 continue
-            record = SearchRecord(query, page_number, url)
-            try:
-                page = fetcher.fetch(ScrapeRequest(job.retailer_id, url),
-                                     allowed_hosts=frozenset({job.method.host}))
-            except FetchError as error:
-                if error.code == BUDGET_CODE:
-                    record.outcome = NOT_SENT_BUDGET
-                else:
-                    record.outcome = SEARCH_ERROR
-                    errors[job.retailer_id] += 1
-                    if errors[job.retailer_id] >= CONSECUTIVE_ERRORS_TO_STOP:
-                        stopped.add(job.retailer_id)
-                record.http_status = str(error.http_status or "")
-                record.attempts = str(error.attempts)
-                record.message = f"{error.code}: {error.message}"
             else:
-                sent += 1
-                errors[job.retailer_id] = 0
-                name = evidence_name(page.body, page.content_type)
-                (evidence_dir / name).write_bytes(page.body)
-                record.http_status = str(page.status_code)
-                record.final_url = page.final_url
-                record.retrieved_at = utc_text(page.retrieved_at)
-                record.attempts = str(page.attempts)
-                record.content_sha256 = page.content_sha256
-                record.evidence_file = f"evidence/{name}"
+                record = SearchRecord(query, page_number, url, run_reason=reason)
                 try:
-                    parsed = job.method.parse(page)
-                except SearchLayoutError as error:
-                    record.outcome = UNSUPPORTED_LAYOUT
-                    record.message = str(error)
+                    page = fetcher.fetch(ScrapeRequest(job.retailer_id, url),
+                                         allowed_hosts=frozenset({job.method.host}))
+                except FetchError as error:
+                    if error.code == BUDGET_CODE:
+                        record.outcome = NOT_SENT_BUDGET
+                    else:
+                        record.outcome = SEARCH_ERROR
+                        errors[job.retailer_id] += 1
+                        if errors[job.retailer_id] >= CONSECUTIVE_ERRORS_TO_STOP:
+                            stopped.add(job.retailer_id)
+                    record.http_status = str(error.http_status or "")
+                    record.attempts = str(error.attempts)
+                    record.message = f"{error.code}: {error.message}"
                 else:
-                    record.hit_items = list(parsed.hits)
-                    record.hits = len(parsed.hits)
-                    record.filtered_links = parsed.filtered_links
-                    record.possibly_truncated = parsed.possibly_truncated
-                    record.next_url = parsed.next_url
-                    record.outcome = RESULTS if parsed.hits else NO_RESULTS
+                    sent += 1
+                    errors[job.retailer_id] = 0
+                    _store_page(record, job, page, evidence_dir)
+                    if record.outcome in {RESULTS, NO_RESULTS}:
+                        answered[url] = record
             log(f"  search {job.retailer_id:15} {job.target.target_id} {query.tier} "
-                f"p{page_number}: {record.outcome} ({record.hits} results)")
+                f"p{page_number}: {record.outcome} ({record.hits} results)"
+                + (f" [{record.cache.split(':', 1)[0]}]" if record.cache else ""))
             job.advance(record)
             progressed = True
             if record.outcome == NOT_SENT_BUDGET:
-                job.skip_rest(NOT_SENT_BUDGET, "--max-total-requests reached.")
+                job.skip_rest(NOT_SENT_BUDGET, "--max-total-requests reached.", STOP_BUDGET)
         if not progressed:
             break
+    for job in jobs:
+        if args.replay_only and job.stop_reason in {STOP_ALL_TIERS, STOP_QUERY_LIMIT} and all(
+            r.outcome == NOT_SENT_REPLAY_ONLY for r in job.records if r.query.tier
+            == TIER_MODEL_CODE
+        ):
+            job.stop_reason = STOP_REPLAY
     return sent
 
 
-def select_and_inspect(candidates, job, fetcher, transport, args, state, evidence_dir, log):
-    """Decide each candidate; inspect selected Shopify pages for their variants."""
-    inspections: list[dict[str, str]] = []
-    variants: list[dict[str, str]] = []
-    manifest: list[tuple[RankedCandidate, str, str]] = []
-    chosen = 0
+def _inspect(job, url, fetcher, transport, args, state, evidence_dir, log):
+    """``(inspection, row)`` for a product page, reusing this run's or a saved inspection.
+
+    Returns ``(None, row)`` when the page could not be fetched or the budget is used up.
+    """
     method = job.method
-    for candidate in candidates:
-        clues = candidate.clues
-        title_differs = any(
-            clues[name].startswith("DIFFERS")
-            for name in ("ram_capacity_gb", "storage_capacity_gb", "screen_size_in", "cpu_series")
-        )
-        if candidate.category not in COLLECTABLE:
-            candidate.decision = "NOT_SELECTED"
-            candidate.decision_reason = f"Category {candidate.category} is never collected " \
-                                        "automatically; listed for review."
-            continue
-        if chosen >= args.max_candidates_per_target_retailer:
-            candidate.decision = "NOT_SELECTED_LIMIT"
-            candidate.decision_reason = "--max-candidates-per-target-retailer reached."
-            continue
-        chosen += 1
-        if method.kind == "woocommerce_html":  # No variant inspection: one page per product.
-            if title_differs:
-                candidate.decision = "REVIEW_DIFFERENT_CONFIGURATION_BY_TITLE"
-                candidate.decision_reason = "Title clues state a different configuration."
-                continue
-            candidate.decision = "COLLECT"
-            candidate.decision_reason = "Product page; collected as listed."
-            manifest.append((candidate, candidate.hit.product_url, ""))
-            continue
-        if state["product_fetches"] >= args.max_product_fetches or transport.remaining <= 0:
-            candidate.decision = "NOT_INSPECTED_BUDGET"
-            candidate.decision_reason = "Product-fetch or total request budget reached."
-            continue
-        url = candidate.hit.product_url
-        row = {"target_id": job.target.target_id, "retailer_id": job.retailer_id,
-               "product_url": url}
+    row = {"target_id": job.target.target_id, "retailer_id": job.retailer_id,
+           "product_url": url}
+    cache = state.setdefault("inspected", {})
+    if url in cache:
+        inspection, meta = cache[url]
+        return inspection, row | meta | {"cache": "SAME_RUN"}
+    saved = state.get("saved_inspections", {}).get(url)
+    if saved is not None:
+        page = saved_page(job.retailer_id, url, saved)
+        source = f"SAVED:{saved[2]}"
+    elif getattr(args, "replay_only", False):
+        return None, row | {"outcome": "NOT_SENT_REPLAY_ONLY", "message": "no saved page"}
+    elif state["product_fetches"] >= args.max_product_fetches or transport.remaining <= 0:
+        return None, row | {"outcome": "NOT_INSPECTED_BUDGET",
+                            "message": "Product-fetch or total request budget reached."}
+    else:
         try:
             page = fetcher.fetch(ScrapeRequest(job.retailer_id, url),
                                  allowed_hosts=frozenset({method.host}))
         except FetchError as error:
             state["product_fetches"] += error.code != BUDGET_CODE
-            candidate.decision = "REVIEW_INSPECTION_FAILED"
-            candidate.decision_reason = f"{error.code}: {error.message}"
-            inspections.append(row | {"outcome": "FETCH_FAILED", "message": error.code})
             log(f"  inspect {job.retailer_id:14} {job.target.target_id}: FETCH_FAILED "
                 f"{error.code}")
-            continue
+            return None, row | {"outcome": "FETCH_FAILED", "message": error.code,
+                                "error": f"{error.code}: {error.message}"}
         state["product_fetches"] += 1
-        name = evidence_name(page.body, page.content_type)
-        (evidence_dir / name).write_bytes(page.body)
-        inspection = inspect_product_page(method, url, page.text())
-        inspections.append(row | {
-            "outcome": inspection.outcome, "variants": str(len(inspection.variants)),
-            "retrieved_at": utc_text(page.retrieved_at), "content_sha256": page.content_sha256,
-            "evidence_file": f"evidence/{name}", "message": inspection.message,
-        })
-        log(f"  inspect {job.retailer_id:14} {job.target.target_id}: {inspection.outcome} "
-            f"({len(inspection.variants)} variants)")
-        if inspection.outcome == "SINGLE_VARIANT":
-            if title_differs:
-                candidate.decision = "REVIEW_DIFFERENT_CONFIGURATION_BY_TITLE"
-                candidate.decision_reason = "Single variant; title clues state a different " \
-                                            "configuration."
+        source = ""
+    name = evidence_name(page.body, page.content_type)
+    (evidence_dir / name).write_bytes(page.body)
+    inspection = inspect_product_page(method, url, page.text())
+    meta = {
+        "outcome": inspection.outcome, "variants": str(len(inspection.variants)),
+        "retrieved_at": utc_text(page.retrieved_at), "content_sha256": page.content_sha256,
+        "evidence_file": f"evidence/{name}", "message": inspection.message, "cache": source,
+    }
+    cache[url] = (inspection, meta)
+    log(f"  inspect {job.retailer_id:14} {job.target.target_id}: {inspection.outcome} "
+        f"({len(inspection.variants)} variants)" + (" [saved]" if source else ""))
+    return inspection, row | meta
+
+
+def select_and_inspect(candidates, job, fetcher, transport, args, state, evidence_dir, log):
+    """Decide each candidate; inspect selected Shopify pages for their variants.
+
+    A historical verified URL is re-checked like any candidate. A page whose title states
+    another configuration of the same code is collected too (``COLLECT_CHECK_CONFIGURATION``),
+    so its own specifications decide, unless --no-collect-title-differences is given.
+    """
+    inspections: list[dict[str, str]] = []
+    variants: list[dict[str, str]] = []
+    manifest: list[tuple[RankedCandidate, str, str]] = []
+    chosen = 0
+    seeds = 0
+    method = job.method
+    collect_differences = not getattr(args, "no_collect_title_differences", False)
+    max_seeds = getattr(args, "max_seed_urls_per_target_retailer", 2)
+    for candidate in candidates:
+        title_differs = bool(configuration_difference(candidate))
+        seeded = candidate.category == HISTORICAL_VERIFIED_URL
+        if candidate.category not in COLLECTABLE:
+            candidate.decision = "NOT_SELECTED"
+            candidate.decision_reason = f"Category {candidate.category} is never collected " \
+                                        "automatically; listed for review."
+            continue
+        if seeded:
+            if seeds >= max_seeds:
+                candidate.decision = "NOT_SELECTED_LIMIT"
+                candidate.decision_reason = "--max-seed-urls-per-target-retailer reached."
                 continue
-            candidate.decision = "COLLECT"
-            candidate.decision_reason = "Single-variant product page."
+            seeds += 1
+        else:
+            if chosen >= args.max_candidates_per_target_retailer:
+                candidate.decision = "NOT_SELECTED_LIMIT"
+                candidate.decision_reason = "--max-candidates-per-target-retailer reached."
+                continue
+            if title_differs and not collect_differences:
+                candidate.decision = "REVIEW_DIFFERENT_CONFIGURATION_BY_TITLE"
+                candidate.decision_reason = "Title clues state a different configuration: " \
+                                            + configuration_difference(candidate) + "."
+                continue
+            chosen += 1
+        collect = "COLLECT_CHECK_CONFIGURATION" if title_differs else "COLLECT"
+        why = (f"Title states another configuration ({configuration_difference(candidate)}); "
+               "collected so the page's own specifications decide."
+               if title_differs else "")
+        if method.kind == "woocommerce_html":  # No variant inspection: one page per product.
+            candidate.decision = collect
+            candidate.decision_reason = why or (
+                "Historical verified URL; re-checked." if seeded
+                else "Product page; collected as listed.")
+            manifest.append((candidate, candidate.seed_url or candidate.hit.product_url, ""))
+            continue
+        url = candidate.hit.product_url
+        inspection, row = _inspect(job, url, fetcher, transport, args, state, evidence_dir, log)
+        inspections.append(row)
+        if inspection is None:
+            if row["outcome"] == "FETCH_FAILED":
+                candidate.decision = "REVIEW_INSPECTION_FAILED"
+                candidate.decision_reason = row.get("error", row["outcome"])
+            else:
+                candidate.decision = "NOT_INSPECTED_BUDGET" if row["outcome"] == (
+                    "NOT_INSPECTED_BUDGET") else row["outcome"]
+                candidate.decision_reason = row.get("message", "")
+            continue
+        if inspection.outcome == "SINGLE_VARIANT":
+            candidate.decision = collect
+            candidate.decision_reason = why or (
+                "Historical verified URL; single-variant page." if seeded
+                else "Single-variant product page.")
             manifest.append((candidate, url, ""))
             continue
         if inspection.outcome != "MULTI_VARIANT":
@@ -423,28 +677,93 @@ def select_and_inspect(candidates, job, fetcher, transport, args, state, evidenc
                 "availability": variant.available, "price": variant.price,
                 "decision": decision, "reason": reason,
             })
-        collect = [(v, reason) for v, decision, reason in decisions if decision == "COLLECT"]
+        collect_variants = [(v, reason) for v, decision, reason in decisions
+                            if decision == "COLLECT"]
+        seed_variant = next((v for v in inspection.variants
+                             if candidate.seed_url and v.url == candidate.seed_url), None)
         if not method.multi_variant_collection:
             candidate.decision = "REVIEW_MULTI_VARIANT_NOT_SUPPORTED"
             candidate.decision_reason = (
                 f"{len(inspection.variants)} variants; this retailer's adapter collects "
                 "single-variant pages only. Variants are listed in variants.csv."
             )
-        elif len(collect) == 1:
-            variant, reason = collect[0]
+        elif seed_variant is not None and not collect_variants:
+            # The variant that matched before is still offered; its page decides again.
+            candidate.decision = "COLLECT_VARIANT"
+            candidate.decision_reason = f"Variant {seed_variant.variant_id}: historical verified " \
+                                        "variant still offered; re-checked."
+            manifest.append((candidate, seed_variant.url, seed_variant.variant_id))
+        elif len(collect_variants) == 1:
+            variant, reason = collect_variants[0]
             candidate.decision = "COLLECT_VARIANT"
             candidate.decision_reason = f"Variant {variant.variant_id}: {reason}"
             manifest.append((candidate, variant.url, variant.variant_id))
-        elif collect:
+        elif collect_variants:
             candidate.decision = "REVIEW_SEVERAL_MATCHING_VARIANTS"
             candidate.decision_reason = "More than one variant states the target RAM/storage."
         else:
             candidate.decision = "REVIEW_NO_MATCHING_VARIANT"
             candidate.decision_reason = (
                 f"{len(inspection.variants)} variants listed; none states the target RAM and "
-                "storage. All are kept in variants.csv."
+                "storage. All are kept in variants.csv with their differences."
             )
     return manifest, inspections, variants
+
+
+def load_seeds(args, targets, retailers) -> dict[tuple[str, str], list[tuple[str, str]]]:
+    """Earlier verified offer URLs per (target, retailer): EXACT results only.
+
+    A seed is re-fetched and re-matched like any candidate; it never carries a match forward.
+    """
+    wanted = {t.target_id for t in targets}
+    found: dict[tuple[str, str], dict[str, str]] = {}
+
+    def add(retailer_id: str, url: str, target_id: str, source: str) -> None:
+        if target_id not in wanted or retailer_id not in retailers or not url:
+            return
+        try:
+            ROUTES[retailer_id].product_request(url)
+        except ValueError:
+            return  # Only URLs the retailer's adapter accepts.
+        found.setdefault((target_id, retailer_id), {}).setdefault(url, source)
+
+    for path in args.seed_urls:
+        for row in read_rows(path):
+            if row.get("match_status", "EXACT") == "EXACT":
+                add(row.get("retailer_id", ""), row.get("offer_url") or row.get("product_url", ""),
+                    row.get("target_id") or row.get("expected_target_id", ""), path.name)
+    if args.seed_store and args.seed_store.exists():
+        connection = sqlite3.connect(f"file:{args.seed_store}?mode=ro", uri=True)
+        try:
+            rows = connection.execute(
+                "SELECT DISTINCT o.retailer_id, o.offer_url, m.target_id FROM match_results m "
+                "JOIN observations o ON o.observation_id = m.observation_id "
+                "WHERE m.match_status = 'EXACT' AND m.target_id != ''"
+            ).fetchall()
+        finally:
+            connection.close()
+        for retailer_id, url, target_id in rows:
+            add(retailer_id, url, target_id, args.seed_store.name)
+    return {key: list(urls.items()) for key, urls in found.items()}
+
+
+def merge_seeds(ranked, target, retailer_id, seeds) -> list[RankedCandidate]:
+    """Add historical seeds to a job's ranked candidates; a seed already found is flagged."""
+    by_url = {strip_variant(c.hit.product_url): c for c in ranked}
+    for url, source in seeds:
+        existing = by_url.get(strip_variant(url))
+        if existing is not None:
+            existing.seed_url = existing.seed_url or url
+            existing.flags.append("ALSO_HISTORICAL_VERIFIED_URL")
+            existing.reasons.append(f"Also matched this configuration in {source}.")
+        else:
+            candidate = seed_candidate(target, retailer_id, url, source)
+            ranked.append(candidate)
+            by_url[strip_variant(url)] = candidate
+    ranked.sort(key=lambda c: c.sort_key)
+    for index, candidate in enumerate(ranked, start=1):
+        candidate.rank = index
+    return ranked
 
 
 def backup_store(store: Path, destination: Path) -> str:
@@ -544,20 +863,24 @@ def main(argv: list[str] | None = None, *, transport: Transport | None = None,
     out = args.output_dir
     log = print
 
-    jobs = [SearchJob(target, retailer, args.max_search_pages)
+    jobs = [SearchJob(target, retailer, args.max_search_pages,
+                      args.max_queries_per_target_retailer)
             for target in targets for retailer in retailers]
     plan_rows = []
     worst_search = 0
     for job in jobs:
-        for order, query in enumerate(job.queries, start=1):
+        for order, query in enumerate(job.all_queries, start=1):
             pages = job.max_pages
-            worst_search += pages
+            limited = order > len(job.queries)
+            worst_search += 0 if limited else pages
             plan_rows.append({
                 "target_id": query.target_id, "rank": job.target.rank,
                 "retailer_id": query.retailer_id, "order": str(order), "tier": query.tier,
                 "query": query.text,
                 "verified_identifier": "TRUE" if query.verified_identifier else "FALSE",
-                "runs": "ONLY_IF_NO_MODEL_CODE_RESULT" if query.tier == TIER_FAMILY else "ALWAYS",
+                "runs": "NOT_RUN_QUERY_LIMIT" if limited else (
+                    "ALWAYS" if query.tier == TIER_MODEL_CODE
+                    else "ONLY_IF_NO_PLAUSIBLE_CANDIDATE"),
                 "max_pages": str(pages), "first_page_url": job.method.first_page_url(query.text),
                 "mechanism": job.method.kind, "notes": job.method.notes,
             })
@@ -571,8 +894,14 @@ def main(argv: list[str] | None = None, *, transport: Transport | None = None,
         "max_search_pages": args.max_search_pages,
         "max_candidates_per_target_retailer": args.max_candidates_per_target_retailer,
         "max_product_fetches": args.max_product_fetches,
+        "max_queries_per_target_retailer": args.max_queries_per_target_retailer,
+        "max_seed_urls_per_target_retailer": args.max_seed_urls_per_target_retailer,
         "retry_attempts_per_request": FetchConfig().max_attempts,
-        "min_seconds_between_requests_per_retailer": FetchConfig().min_request_interval_seconds,
+        "min_seconds_between_requests_per_retailer": args.min_seconds_between_requests,
+        "search_cache_folders": [str(path) for path in args.search_cache],
+        "cache_max_age_hours": args.cache_max_age_hours,
+        "replay_only": args.replay_only,
+        "collect_title_differences": not args.no_collect_title_differences,
     }
     summary: dict = {
         "description": "Automatic product discovery (bounded search, ranking, collection).",
@@ -607,14 +936,28 @@ def main(argv: list[str] | None = None, *, transport: Transport | None = None,
         log(f"Preview only: no request was made. Plan written to {out}.")
         return 0
 
-    # Live search.
+    # Live search (or replay of saved responses).
     evidence_dir = out / "evidence"
     evidence_dir.mkdir()
     budget = BudgetedTransport(transport or UrllibTransport(), args.max_total_requests)
-    fetcher = Fetcher(budget, FetchConfig(), clock)
+    config = FetchConfig(min_request_interval_seconds=args.min_seconds_between_requests)
+    fetcher = Fetcher(budget, config, clock)
+    now = clock.now().astimezone(UTC)
+    saved_searches = load_saved_responses(args.search_cache, "search_requests.csv", "url",
+                                          args.cache_max_age_hours, now)
+    saved_inspections = load_saved_responses(args.search_cache, "product_inspections.csv",
+                                             "product_url", args.cache_max_age_hours, now)
+    seeds = load_seeds(args, targets, retailers)
+    log(f"Saved responses available: {len(saved_searches)} searches, "
+        f"{len(saved_inspections)} product pages; historical seed URLs: "
+        f"{sum(len(v) for v in seeds.values())}.")
     log("Searching...")
-    searches_sent = run_searches(jobs, fetcher, budget, args, evidence_dir, log)
+    searches_sent = run_searches(jobs, fetcher, budget, args, evidence_dir, log,
+                                 saved=saved_searches)
     records = [record for job in jobs for record in job.records]
+    write_csv(out / "search_jobs.csv", SEARCH_JOB_COLUMNS,
+              (job.job_row(len(seeds.get((job.target.target_id, job.retailer_id), [])))
+               for job in jobs))
     write_csv(out / "search_requests.csv", SEARCH_RECORD_COLUMNS,
               (search_record_row(r) for r in records))
     hit_rows = [
@@ -632,14 +975,17 @@ def main(argv: list[str] | None = None, *, transport: Transport | None = None,
 
     # Rank, inspect, and decide.
     log("Ranking and inspecting candidates...")
-    state = {"product_fetches": 0}
+    state = {"product_fetches": 0, "saved_inspections": saved_inspections}
     all_candidates: list[RankedCandidate] = []
     manifest: list[tuple[RankedCandidate, str, str]] = []
     inspections: list[dict[str, str]] = []
     variant_rows: list[dict[str, str]] = []
     for job in jobs:
         try:
-            ranked = rank_target_hits(job.target, job.retailer_id, job.records)
+            ranked = merge_seeds(
+                rank_target_hits(job.target, job.retailer_id, job.records), job.target,
+                job.retailer_id, seeds.get((job.target.target_id, job.retailer_id), []),
+            )
             chosen, inspected, variants = select_and_inspect(
                 ranked, job, fetcher, budget, args, state, evidence_dir, log
             )
@@ -654,11 +1000,13 @@ def main(argv: list[str] | None = None, *, transport: Transport | None = None,
         manifest += chosen
         inspections += inspected
         variant_rows += variants
-    write_csv(out / "product_inspections.csv", [
+    inspection_columns = [
         "target_id", "retailer_id", "product_url", "outcome", "variants", "retrieved_at",
-        "content_sha256", "evidence_file", "message",
-    ], ({**{k: "" for k in ("variants", "retrieved_at", "content_sha256", "evidence_file",
-                            "product_url")}, **row} for row in inspections))
+        "content_sha256", "evidence_file", "message", "cache",
+    ]
+    write_csv(out / "product_inspections.csv", inspection_columns, (
+        {column: row.get(column, "") for column in inspection_columns} for row in inspections
+    ))
     write_csv(out / "variants.csv", [
         "target_id", "retailer_id", "product_url", "variant_id", "variant_url", "option_title",
         "availability", "price", "decision", "reason",
@@ -705,8 +1053,16 @@ def main(argv: list[str] | None = None, *, transport: Transport | None = None,
     summary |= {
         "requests_sent": budget.sent,
         "search_requests_sent": searches_sent,
+        "search_responses_reused": dict(Counter(
+            r.cache.split(":", 1)[0] for r in records if r.cache
+        )),
         "product_inspections": state["product_fetches"],
         "search_outcomes": dict(Counter(f"{r.query.retailer_id}:{r.outcome}" for r in records)),
+        "search_tiers_run": dict(Counter(
+            r.query.tier for r in records if r.outcome in {RESULTS, NO_RESULTS}
+        )),
+        "search_stop_reasons": dict(Counter(job.stop_reason for job in jobs)),
+        "historical_seed_urls": sum(len(v) for v in seeds.values()),
         "candidates": dict(Counter(c.category for c in all_candidates)),
         "decisions": dict(Counter(c.decision for c in all_candidates)),
         "manifest_rows": len(manifest_rows),
@@ -781,10 +1137,13 @@ def main(argv: list[str] | None = None, *, transport: Transport | None = None,
     errors = sum(1 for r in records if r.outcome in {SEARCH_ERROR, UNSUPPORTED_LAYOUT})
     if status == "SEARCH_ONLY" and errors:
         status = "SEARCH_ONLY_WITH_ERRORS"
+    if status == "SEARCH_ONLY" and args.replay_only:
+        status = "REPLAY_ONLY"
     summary["run_status"] = status
     summary["finished_at_utc"] = utc_text(clock.now())
     (out / "discovery_summary.json").write_text(json.dumps(summary, indent=2) + "\n",
                                                 encoding="utf-8")
+    log(f"Search jobs stopped: {dict(Counter(job.stop_reason for job in jobs))}.")
     log(f"Discovery {status}: {budget.sent} requests sent ({searches_sent} searches, "
         f"{state['product_fetches']} inspections); candidates "
         f"{dict(Counter(c.category for c in all_candidates))}; manifest rows "
@@ -792,7 +1151,7 @@ def main(argv: list[str] | None = None, *, transport: Transport | None = None,
     if manifest_issue:
         log(f"  Manifest not collected: {manifest_issue}")
     log(f"Reports written to {out}.")
-    return 0 if status in {"SUCCESS", "SEARCH_ONLY"} else 2
+    return 0 if status in {"SUCCESS", "SEARCH_ONLY", "REPLAY_ONLY"} else 2
 
 
 if __name__ == "__main__":

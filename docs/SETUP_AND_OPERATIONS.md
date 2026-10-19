@@ -311,12 +311,40 @@ python discover_products.py --live --scope-file <pilot_scope.csv> <same inputs> 
   --store data/history/price_history.sqlite3 --output-dir data/output/<run>/discovery_all
 ```
 
-**Searches.** Per target and retailer, in order:
-1. The full model code from `TARGET_MASTER`.
+**Searches** (2026-10-19). Per target and retailer, in order:
+1. The complete model code from `TARGET_MASTER`, with no specification filter.
 2. The verified `manufacturer_part_number`, when the catalog has one.
-3. Brand + series, only when the earlier queries found no result showing the model code.
+3. The model code with the configuration's RAM and storage (`B13UC-3474PH 16GB 512GB`).
+4. Brand + series. 5. Brand + series with CPU family, RAM, and storage.
 
-Retailer SKUs and unverified identifiers are never search terms. The mechanisms were
+Queries 2-5 are fallbacks: each runs only while the results so far hold no *plausible*
+candidate (the complete code or verified part number in the title, with no title clue stating
+another screen, CPU, RAM, or storage). A result showing only another RAM/storage configuration,
+an unexplained suffix (`OPI`), or the code only in the URL keeps the search going; that result
+is kept and explained, not discarded. `search_requests.csv` gives each query's `run_reason` and
+`cache` source; `search_jobs.csv` gives the tiers run and why the job stopped
+(`PLAUSIBLE_CANDIDATE_FOUND`, `ALL_QUERY_TIERS_TRIED`, `QUERY_LIMIT_PER_TARGET_RETAILER`,
+`SEARCH_REQUEST_LIMIT_REACHED`, `TOTAL_REQUEST_BUDGET_REACHED`, `RETAILER_STOPPED_AFTER_ERRORS`).
+`--max-queries-per-target-retailer` (default 5) caps the tiers.
+
+**Limits, caching, seeds** (2026-10-19):
+- An identical search or product page already answered in the run is reused (`SAME_RUN`); nothing
+  is sent and no limit is used. `--search-cache <earlier discovery folder>` (repeatable) replays
+  saved search/inspection responses (`SAVED:<folder>`), optionally only within
+  `--cache-max-age-hours`. `--replay-only` sends nothing at all (an offline discovery replay of a
+  saved run; it cannot be combined with `--collect`).
+- `--min-seconds-between-requests` can raise, never lower, the per-retailer spacing.
+- `--seed-urls <match_results.csv>` (repeatable) and `--seed-store <store>` add offer URLs that
+  matched a scope configuration `EXACT` in an earlier collection as `HISTORICAL_VERIFIED_URL`
+  candidates (up to `--max-seed-urls-per-target-retailer`, default 2). This recovers known Laptop
+  Factory pages that its search omits while out of stock. A seed is re-fetched and re-matched; it
+  never carries a match forward.
+- A same-code page whose title states another configuration is collected
+  (`COLLECT_CHECK_CONFIGURATION`, within the candidate limit) so its own specifications decide;
+  `--no-collect-title-differences` restores review-only handling.
+
+Retailer SKUs and unverified identifiers are never search terms. A search result is a candidate,
+never a match, and the configuration's values never fill an offer's missing specification. The mechanisms were
 inspected live before implementation (evidence: ignored `data/collection/search_inspection_2026-10-13/`):
 
 | Retailer | Mechanism | Limits |
@@ -343,8 +371,9 @@ A failure is never reported as "not found", and one failing retailer does not st
 - `UNRELATED`.
 
 Title RAM, storage, screen, and CPU clues, plus bundle wording, only order candidates; they never
-fill a field. Only the code, part-number, and URL categories can be collected, up to
-`--max-candidates-per-target-retailer` per target and retailer.
+fill a field. `configuration_difference` states a title's differing values (`ram_capacity_gb:
+title 8 vs target 16`). Only the historical-seed, code, part-number, and URL categories can be
+collected, up to `--max-candidates-per-target-retailer` per target and retailer.
 
 **Variants.** For Shopify candidates, the product page is fetched once and its own JSON-LD offers
 list the variants; no variant URL or ID is built.

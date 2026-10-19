@@ -20,7 +20,7 @@ from __future__ import annotations
 import json
 import re
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from decimal import Decimal, InvalidOperation
 from enum import StrEnum
 from urllib.parse import urlsplit
@@ -60,6 +60,32 @@ class ExtractionStatus(StrEnum):
     SUPPORTING = "SUPPORTING"
 
 
+# Evidence scope (2026-10-19): what a piece of evidence applies to, resolved before any value is
+# compared. Only the selected variant, the product's own specification rows, a shared product
+# description proven constant across the relevant variants, explicit product prose (screen
+# size only), a corroborated title code, and owner-approved interpretations can supply a value.
+# Family capabilities, maximums, optional or alternative configurations, URLs, and identifiers
+# are kept with their raw wording and locator for review; they never stand for the installed
+# configuration.
+SCOPE_SELECTED_VARIANT = "SELECTED_VARIANT"
+SCOPE_PRODUCT_SPECIFICATION = "PRODUCT_SPECIFICATION"
+SCOPE_SHARED_PRODUCT = "SHARED_PRODUCT"
+SCOPE_PRODUCT_DESCRIPTION = "PRODUCT_DESCRIPTION"
+SCOPE_FAMILY_CAPABILITY = "MODEL_FAMILY_CAPABILITY"
+SCOPE_MAXIMUM = "MAXIMUM_SUPPORTED"
+SCOPE_OPTIONAL = "OPTIONAL_OR_ALTERNATIVE"
+SCOPE_TITLE = "TITLE"
+SCOPE_URL = "URL"
+SCOPE_IDENTIFIER = "IDENTIFIER"
+SCOPE_ENUMERATED_VARIANT = "OTHER_VARIANT"
+SCOPE_OWNER_APPROVED = "OWNER_APPROVED"
+EVIDENCE_SCOPES: tuple[str, ...] = (
+    SCOPE_SELECTED_VARIANT, SCOPE_PRODUCT_SPECIFICATION, SCOPE_SHARED_PRODUCT,
+    SCOPE_PRODUCT_DESCRIPTION, SCOPE_FAMILY_CAPABILITY, SCOPE_MAXIMUM, SCOPE_OPTIONAL,
+    SCOPE_TITLE, SCOPE_URL, SCOPE_IDENTIFIER, SCOPE_ENUMERATED_VARIANT, SCOPE_OWNER_APPROVED,
+)
+
+
 @dataclass(frozen=True)
 class FieldExtraction:
     field: str
@@ -67,6 +93,7 @@ class FieldExtraction:
     value: str
     source_label: str
     source_text: str
+    scope: str = ""
 
 
 @dataclass(frozen=True)
@@ -265,9 +292,30 @@ _SIZE_BY_COUNT = re.compile(
 )
 _CAPACITY = re.compile(rf"(?<![0-9.])([0-9]+(?:\.[0-9]+)?)\s*(GB|TB)\b{_NOT_RATE}", re.I)
 
-# Memory clauses (split at ";", " | " and line breaks). A maximum clause opens with "up to" or
-# "max" and is never installed memory.
-_MAXIMUM_CLAUSE = re.compile(r"\s*(?:supports?\s+)?(?:up\s+to|max(?:imum)?)\b", re.I)
+# Memory and storage clauses (split at ";", " | " and line breaks, or a comma before a scoped
+# clause). A maximum clause opens with "up to", "max", or an expandable/upgradable "to"
+# (2026-10-19) and is never installed capacity. An optional or alternative clause opens with
+# "optional", "option upgrade", "available with", or "alternatively" and is never installed
+# capacity either. A parenthesized group that opens the same way and states its own amount
+# ("16GB DDR5 (upgradable up to 32GB)") is the same kind of clause.
+_MAXIMUM_OPENER = (
+    r"(?:supports?\s+)?(?:up\s+to|max(?:imum)?)\b"
+    r"|(?:expandable|expandible|upgrad(?:e)?able|extendable|configurable)\s+(?:up\s+)?to\b"
+)
+_OPTIONAL_OPENER = (
+    r"(?:optional(?:ly)?|option(?:al)?\s+upgrades?|available\s+with|alternative(?:ly)?)\b"
+)
+_MAXIMUM_CLAUSE = re.compile(rf"\s*(?:{_MAXIMUM_OPENER})", re.I)
+_OPTIONAL_CLAUSE = re.compile(rf"\s*(?:{_OPTIONAL_OPENER})", re.I)
+_SCOPED_GROUP = re.compile(rf"\(\s*(?:{_MAXIMUM_OPENER}|{_OPTIONAL_OPENER})[^()]*\)", re.I)
+# A processor clause that describes the product line's options rather than this processor:
+# "(up to Core i7)", "/ configurable to Core i7", ", options up to Ryzen 7".
+_CPU_CAPABILITY = re.compile(
+    r"\s*(?:(?:supports?\s+)?up\s+to\b|(?:configurable|upgrad(?:e)?able)\s+(?:up\s+)?(?:to|with)\b"
+    r"|options?\s+(?:up\s+to|include|available)\b|available\s+(?:with|in|up\s+to)\b"
+    r"|optional\b|also\s+available\b)",
+    re.I,
+)
 _SLOTS = re.compile(
     r"(?<![0-9.])([0-9]+)\s*(?:x\s*)?(?:(?:DDR[0-9]X?|SO-?DIMM|DIMM|memory|RAM)\s+){0,3}slots?\b",
     re.I,
@@ -343,6 +391,10 @@ def _model(text: str) -> set[str]:
     codes = model_codes(value)
     if len(codes) > 1:
         raise _MultipleValues(codes)
+    if codes and _title_code_suffix(value, codes[0]):
+        # An unexplained designation right after the code ("A14-11M-X3BP OPI") is never
+        # dropped as a family word (2026-10-19), exactly as for code-rule labels and titles.
+        raise _Unresolved(value)
     return {codes[0] if codes else value}
 
 
@@ -374,6 +426,45 @@ def _cpu_series(text: str) -> set[str]:
 
 # A CPU row that opens with "up to" states a product line's best option, not this processor.
 _GENERIC_CPU_CLAIM = re.compile(r"(?:supports?\s+)?up\s+to\b", re.I)
+_CPU_CLAUSE_BREAK = re.compile(r"(;|\s\|\s|,|\s/\s|\n)")
+
+
+def _cpu_scopes(text: str) -> tuple[str, list[str]]:
+    """``(installed processor wording, family capability clauses)`` for one CPU statement.
+
+    A parenthesized group or a clause (split at ``;``, `` | ``, ``,``, `` / ``, line breaks)
+    that opens with capability wording ("up to", "configurable to", "options up to", "available
+    with", "optional") describes the product line's options, so ``Intel Core i5-1335U (up to
+    Core i7)`` is a Core i5 with a Core i7 family capability, never an ambiguity. Alternatives
+    without such wording (``i5-13420H / i7-13620H``) are not split off and stay ambiguous.
+    """
+    capability: list[str] = []
+
+    def take(match: re.Match[str]) -> str:
+        inner = clean_text(match[0][1:-1])
+        if _CPU_CAPABILITY.match(inner):
+            capability.append(inner)
+            return " "
+        return match[0]
+
+    stripped = re.sub(r"\([^()]*\)", take, text)
+    parts = _CPU_CLAUSE_BREAK.split(stripped)
+    kept: list[str] = []
+    for index in range(0, len(parts), 2):
+        clause = parts[index]
+        if index and _CPU_CAPABILITY.match(clause) and cpu_series_forms(clause):
+            capability.append(clean_text(clause))
+            continue
+        if index and kept:
+            kept.append(parts[index - 1])
+        kept.append(clause)
+    if not capability:
+        return text, []
+    return clean_text("".join(kept)), capability
+
+
+def _installed_cpu_series(text: str) -> set[str]:
+    return labeled_cpu_series_forms(_cpu_scopes(text)[0])
 
 
 def _screen_size(text: str) -> set[str]:
@@ -522,27 +613,72 @@ def _ram_total_with_breakdown(text: str) -> str | None:
 
 
 def _memory_clauses(text: str) -> list[str]:
-    # A comma ends a clause only before a maximum clause ("8GB DDR5, Max Capacity:64GB").
+    # A comma ends a clause only before a maximum or optional clause
+    # ("8GB DDR5, Max Capacity:64GB", "8GB, expandable to 32GB").
     return [
         clause
-        for clause in re.split(rf";|\s\|\s|\n|,(?={_MAXIMUM_CLAUSE.pattern})", text, flags=re.I)
+        for clause in re.split(
+            rf";|\s\|\s|\n|,(?=\s*(?:{_MAXIMUM_OPENER}|{_OPTIONAL_OPENER}))", text, flags=re.I
+        )
         if clause.strip()
     ]
 
 
-def _installed_memory_text(text: str) -> str | None:
-    """The memory text without its maximum clauses, or None when it has none.
+@dataclass(frozen=True)
+class _CapacityScopes:
+    """A capacity row split by scope: installed wording, maximums, and optional alternatives."""
 
-    A clause (split at ``;``, `` | `` and line breaks) that opens with "up to" or "max" states
-    an upgrade limit, never installed memory: ``1x 16GB | Up to 32GB`` gives ``1x 16GB`` and
-    ``Up to 32GB`` alone gives no installed amount. A limit inside a clause
-    (``16GB (8GB + 8GB up to 32GB)``) is not split off and stays ambiguous for review.
+    installed: str
+    maximums: tuple[str, ...]
+    optional: tuple[str, ...]
+
+    @property
+    def changed(self) -> bool:
+        return bool(self.maximums or self.optional)
+
+
+def _capacity_scopes(text: str) -> _CapacityScopes:
+    """Separate maximum and optional clauses from the installed wording of one row.
+
+    A clause (split at ``;``, `` | ``, line breaks, or a comma before such a clause) or a
+    parenthesized group that opens with maximum wording states an upgrade limit, and one that
+    opens with optional/alternative wording states another configuration. Neither is installed
+    capacity: ``1x 16GB | Up to 32GB`` and ``16GB (upgradable up to 32GB)`` give ``16`` as the
+    installed text, and ``Up to 32GB`` alone gives none. A parenthesized group is split off only
+    when it states its own amount, so ``512GB SSD + 1TB HDD (optional)`` stays whole and
+    ambiguous. A limit inside a breakdown (``16GB (8GB + 8GB up to 32GB)``) is not split off.
     """
-    clauses = _memory_clauses(text)
-    maximums = [clause for clause in clauses if _MAXIMUM_CLAUSE.match(clause)]
-    if not maximums:
-        return None
-    return " ; ".join(clause for clause in clauses if clause not in maximums)
+    maximums: list[str] = []
+    optional: list[str] = []
+
+    def take(match: re.Match[str]) -> str:
+        group = match[0]
+        if not _CAPACITY.search(_parse_text(group)):
+            return group
+        inner = clean_text(group[1:-1])
+        (maximums if _MAXIMUM_CLAUSE.match(inner) else optional).append(inner)
+        return " "
+
+    stripped = _SCOPED_GROUP.sub(take, text)
+    kept: list[str] = []
+    for clause in _memory_clauses(stripped):
+        if _MAXIMUM_CLAUSE.match(clause):
+            maximums.append(clean_text(clause))
+        elif _OPTIONAL_CLAUSE.match(clause) and _CAPACITY.search(_parse_text(clause)):
+            optional.append(clean_text(clause))
+        else:
+            kept.append(clause)
+    if not maximums and not optional:
+        return _CapacityScopes(text, (), ())
+    return _CapacityScopes(
+        clean_text(" ; ".join(kept)), tuple(dict.fromkeys(maximums)), tuple(dict.fromkeys(optional))
+    )
+
+
+def _installed_memory_text(text: str) -> str | None:
+    """The capacity text without its maximum and optional clauses, or None when it has none."""
+    scopes = _capacity_scopes(text)
+    return scopes.installed if scopes.changed else None
 
 
 # Wording that makes a "+" row something other than installed components: an optional or
@@ -621,10 +757,17 @@ def _ram(text: str) -> set[str]:
 
 def _memory_details(text: str) -> dict[str, list[str]]:
     """Supporting memory facts kept apart from installed capacity: stated amounts outside
-    maximum clauses, maximums, slot counts, and frequencies."""
-    details: dict[str, list[str]] = {"stated": [], "maximum": [], "slots": [], "frequency": []}
-    for clause in _memory_clauses(text):
-        bucket = "maximum" if _MAXIMUM_CLAUSE.match(clause) else "stated"
+    maximum and optional clauses, maximums, optional amounts, slot counts, and frequencies."""
+    details: dict[str, list[str]] = {
+        "stated": [], "maximum": [], "optional": [], "slots": [], "frequency": [],
+    }
+    scopes = _capacity_scopes(text)
+    clauses = [
+        *(("stated", clause) for clause in _memory_clauses(scopes.installed)),
+        *(("maximum", clause) for clause in scopes.maximums),
+        *(("optional", clause) for clause in scopes.optional),
+    ]
+    for bucket, clause in clauses:
         parsed = _parse_text(clause)
         for match in _FREQUENCY.finditer(parsed):
             details["frequency"].append(f"{match[1]} {match[2]}")
@@ -641,8 +784,12 @@ def _storage(text: str) -> set[str]:
     """One stated drive capacity, or the total of explicitly installed drives.
 
     ``512GB SSD + 512GB HDD`` gives ``1024`` (1 TB = 1000 GB; drives are never collapsed into one
-    medium). The layout and media are recorded separately as supporting evidence.
+    medium). The layout and media are recorded separately as supporting evidence. Maximum and
+    optional clauses are removed first (``512GB SSD | Up to 2TB`` gives ``512``).
     """
+    scopes = _capacity_scopes(text)
+    if scopes.changed:
+        text = scopes.installed
     try:
         return _capacities(text, allow_tb=True)
     except _MultipleValues:
@@ -1119,16 +1266,40 @@ def _url_model_conflict(code: str, url: str) -> str:
     return ""
 
 
+def _url_slug_differs(
+    offer: OfferObservation, model: str, supporting: list[FieldExtraction], notes: list[str]
+) -> None:
+    """Record a URL slug that names the accepted model's stem with another final segment.
+
+    Policy (2026-10-19): product URLs are often created once and never renamed, so once the
+    page's own evidence has established a consistent model (a trusted model row, a shared model
+    proven for the selected variant, or a corroborated title code), a differing slug is the
+    warning ``MODEL_URL_DIFFERS``, not a block. Both wordings are kept; the URL never supplies or
+    aliases a model. Conflicts between the page's own model claims still block elsewhere.
+    """
+    differs = _url_model_conflict(model, offer.offer_url)
+    if not differs:
+        return
+    notes.append("MODEL_URL_DIFFERS")
+    supporting.append(FieldExtraction(
+        "model", ExtractionStatus.SUPPORTING, f"URL: {differs}; page model: {model}",
+        "offer URL path [wording retained; checked only; never a model source]",
+        offer.offer_url, SCOPE_URL,
+    ))
+
+
 def _title_core_claims(title: str) -> dict[str, set[str]]:
     """Core values a title states explicitly; used only to detect conflicts."""
     low, high = _LAPTOP_DIAGONAL_INCHES
     text = _parse_text(title)
+    installed = _capacity_scopes(text).installed
     return {
         "screen_size_in": {s for s in _screen_size(text) if low <= Decimal(s) <= high},
-        "cpu_series": cpu_series_forms(text),
-        "ram_capacity_gb": {m[1] or m[2] for m in _TITLE_RAM.finditer(text)},
+        "cpu_series": cpu_series_forms(_cpu_scopes(text)[0]),
+        "ram_capacity_gb": {m[1] or m[2] for m in _TITLE_RAM.finditer(installed)},
         "storage_capacity_gb": {
-            str(_gigabytes(m[1], m[2], allow_tb=True)) for m in _TITLE_STORAGE.finditer(text)
+            str(_gigabytes(m[1], m[2], allow_tb=True))
+            for m in _TITLE_STORAGE.finditer(installed)
         },
     }
 
@@ -1172,20 +1343,7 @@ def _apply_title_model(
                 f"{model.source_label}; title", f"{model.source_text} | {offer.raw_title}",
             )
             return
-        differs = _url_model_conflict(model.value, offer.offer_url)
-        if differs:
-            notes.append("MODEL_URL_DIFFERS")
-            supporting.append(FieldExtraction(
-                "model", ExtractionStatus.SUPPORTING, differs,
-                "offer URL path [conflict check only; never a model source]", offer.offer_url,
-            ))
-            if "SHARED_PRODUCT" in model.source_label:
-                # Inherited shared models need the same freedom from conflicts as title models.
-                notes.append("MODEL_URL_CONFLICT")
-                evidence[evidence.index(model)] = FieldExtraction(
-                    "model", ExtractionStatus.NOT_EXTRACTED, "",
-                    model.source_label, model.source_text,
-                )
+        _url_slug_differs(offer, model.value, supporting, notes)
         return
     if model.status not in {
         ExtractionStatus.MISSING, ExtractionStatus.EXTRACTED, ExtractionStatus.NOT_EXTRACTED,
@@ -1219,14 +1377,6 @@ def _apply_title_model(
             "title [code with an unexplained designation; not stripped]", offer.raw_title,
         ))
         return
-    differs = _url_model_conflict(code, offer.offer_url)
-    if differs:
-        notes.append("MODEL_URL_CONFLICT")
-        supporting.append(FieldExtraction(
-            "model", ExtractionStatus.SUPPORTING, f"title: {code}; URL: {differs}",
-            "offer URL path [conflict check only; never a model source]", offer.offer_url,
-        ))
-        return
     if binding.startswith("NOT_CONFIRMED") or (shared and not shared_locator):
         notes.append("TITLE_MODEL_SCOPE_UNPROVEN")
         return
@@ -1257,6 +1407,8 @@ def _apply_title_model(
             "model", ExtractionStatus.SUPPORTING, model.value or "",
             f"{model.source_label} [less specific or shared model statement]", model.source_text,
         ))
+    # The page's own evidence establishes the model; a differing URL slug is a warning.
+    _url_slug_differs(offer, code, supporting, notes)
     corroboration = "; ".join(f"{item.field}: {item.source_label}" for item in others)
     scope = f"SHARED_PRODUCT; {shared_locator}; " if shared else ""
     evidence[evidence.index(model)] = FieldExtraction(
@@ -1359,7 +1511,7 @@ def extract_offer_attributes(offer: OfferObservation) -> ExtractedAttributes:
     ] = (
         ("model", rows(labels.model | labels.model_code), model_value, False, True),
         ("screen_size_in", display_rows, _screen_size_row, False, True),
-        ("cpu_series", cpu_rows, labeled_cpu_series_forms, False, False),
+        ("cpu_series", cpu_rows, _installed_cpu_series, False, False),
         ("ram_capacity_gb", rows(labels.memory), _ram, True, False),
         ("storage_capacity_gb", rows(labels.storage), _storage, True, False),
     )
@@ -1377,9 +1529,9 @@ def extract_offer_attributes(offer: OfferObservation) -> ExtractedAttributes:
     if binding.startswith("NOT_CONFIRMED"):
         notes.append("SELECTED_VARIANT_NOT_CONFIRMED")
 
-    def support(field: str, value: str, label: str, text: str = "") -> None:
+    def support(field: str, value: str, label: str, text: str = "", *, scope: str = "") -> None:
         supporting.append(
-            FieldExtraction(field, ExtractionStatus.SUPPORTING, value, label, text or value)
+            FieldExtraction(field, ExtractionStatus.SUPPORTING, value, label, text or value, scope)
         )
 
     for field, field_rows, parse, one_row, with_label in core_plan:
@@ -1398,7 +1550,7 @@ def extract_offer_attributes(offer: OfferObservation) -> ExtractedAttributes:
                     item.source_text,
                 )
                 title_values = (
-                    _cpu_series(offer.raw_title) if field == "cpu_series"
+                    _cpu_series(_cpu_scopes(offer.raw_title)[0]) if field == "cpu_series"
                     else _screen_size(offer.raw_title) if field == "screen_size_in" else set()
                 )
                 conflict = title_values and title_values != {item.value}
@@ -1484,13 +1636,14 @@ def extract_offer_attributes(offer: OfferObservation) -> ExtractedAttributes:
             s.field == "ram_capacity_gb" for s in supporting
         ):
             support("ram_capacity_gb", "; ".join(memory["stated"]), memory_label, memory_text)
-        for key, field in (
-            ("maximum", "ram_maximum_gb"),
-            ("slots", "ram_slots"),
-            ("frequency", "ram_frequency"),
+        for key, field, scope in (
+            ("maximum", "ram_maximum_gb", SCOPE_MAXIMUM),
+            ("optional", "ram_optional_gb", SCOPE_OPTIONAL),
+            ("slots", "ram_slots", ""),
+            ("frequency", "ram_frequency", ""),
         ):
             if memory[key]:
-                support(field, "; ".join(memory[key]), memory_label, memory_text)
+                support(field, "; ".join(memory[key]), memory_label, memory_text, scope=scope)
         ram = primary["ram_capacity_gb"]
         if bound and ram.status is ExtractionStatus.EXTRACTED and memory["stated"] and (
             ram.value not in memory["stated"]
@@ -1512,6 +1665,18 @@ def extract_offer_attributes(offer: OfferObservation) -> ExtractedAttributes:
         support("storage_amount_without_unit", amount, storage_label, storage_text)
     for match in _THROUGHPUT.finditer(_parse_text(storage_text)):
         support("storage_throughput", f"{match[1]} {match[2]}", storage_label, storage_text)
+    for _, value in storage_rows:
+        scopes = _capacity_scopes(value)
+        for name, clauses, scope in (
+            ("storage_maximum_gb", scopes.maximums, SCOPE_MAXIMUM),
+            ("storage_optional_gb", scopes.optional, SCOPE_OPTIONAL),
+        ):
+            amounts = [
+                str(_gigabytes(m[1], m[2], allow_tb=True))
+                for clause in clauses for m in _CAPACITY.finditer(_parse_text(clause))
+            ]
+            if amounts:
+                support(name, "; ".join(dict.fromkeys(amounts)), storage_label, value, scope=scope)
     if unitless and storage.status is not ExtractionStatus.EXTRACTED:
         notes.append("STORAGE_CAPACITY_UNIT_MISSING")
 
@@ -1526,7 +1691,7 @@ def extract_offer_attributes(offer: OfferObservation) -> ExtractedAttributes:
             support("ram_components", " + ".join(text for _, text in parts),
                     ram.source_label, ram.source_text)
     if storage.status is ExtractionStatus.EXTRACTED and "+" in storage.source_text:
-        parts = _storage_components(storage.source_text)
+        parts = _storage_components(_capacity_scopes(storage.source_text).installed)
         if parts:
             row_media = _storage_media(_parse_text(storage.source_text))
             media = sorted({
@@ -1544,10 +1709,16 @@ def extract_offer_attributes(offer: OfferObservation) -> ExtractedAttributes:
             if len(media) > 1:
                 notes.append("STORAGE_MIXED_MEDIA")
     for label, value in generic_cpu_rows:
-        support("cpu_series", value, f"{label} [generic capability claim; not this processor]")
+        support("cpu_series", value, f"{label} [generic capability claim; not this processor]",
+                scope=SCOPE_FAMILY_CAPABILITY)
+    for label, value in cpu_rows:
+        for clause in _cpu_scopes(value)[1]:
+            support("cpu_series", clause,
+                    f"{label} [family capability clause; not this processor]", value,
+                    scope=SCOPE_FAMILY_CAPABILITY)
 
     # Title versus specification: reported, never used to choose a value.
-    specified = _processor_numbers(" | ".join(value for _, value in cpu_rows))
+    specified = _processor_numbers(" | ".join(_cpu_scopes(value)[0] for _, value in cpu_rows))
     titled = _processor_numbers(offer.raw_title)
     if specified and titled and not specified & titled:
         notes.append("CPU_NUMBER_TITLE_DIFFERS")
@@ -1621,6 +1792,45 @@ def extract_offer_attributes(offer: OfferObservation) -> ExtractedAttributes:
         offer.retailer_id,
         offer.retailer_id,
         values,
-        tuple(evidence + supporting),
+        tuple(_with_scope(item) for item in evidence + supporting),
         notes=tuple(dict.fromkeys(notes)),
     )
+
+
+def evidence_scope(item: FieldExtraction) -> str:
+    """The scope an evidence item applies to: explicit, or recovered from its source label."""
+    if item.scope:
+        return item.scope
+    label = item.source_label
+    if not label and item.status is ExtractionStatus.MISSING:
+        return ""
+    if label.startswith("OWNER_APPROVED"):
+        return SCOPE_OWNER_APPROVED
+    if "[selected variant" in label:
+        return SCOPE_SELECTED_VARIANT
+    if "SHARED_PRODUCT" in label or "[shared product" in label or item.field == (
+        "variant_definitions"
+    ):
+        return SCOPE_SHARED_PRODUCT
+    if "[PRODUCT_DESCRIPTION" in label:
+        return SCOPE_PRODUCT_DESCRIPTION
+    if "[generic capability" in label or "[family capability" in label:
+        return SCOPE_FAMILY_CAPABILITY
+    if label.casefold().startswith("title"):
+        return SCOPE_TITLE
+    if label.startswith("offer URL path"):
+        return SCOPE_URL
+    if item.field in {"identifier", "part_number_candidate"}:
+        return SCOPE_IDENTIFIER
+    if item.field == "enumerated_variant":
+        return SCOPE_ENUMERATED_VARIANT
+    if item.field.endswith("_maximum_gb"):
+        return SCOPE_MAXIMUM
+    if item.field.endswith("_optional_gb"):
+        return SCOPE_OPTIONAL
+    return SCOPE_PRODUCT_SPECIFICATION
+
+
+def _with_scope(item: FieldExtraction) -> FieldExtraction:
+    scope = evidence_scope(item)
+    return item if scope == item.scope else replace(item, scope=scope)

@@ -44,7 +44,9 @@ from laptop_tracker.product_discovery import (
 from laptop_tracker.retailer_search import (
     SEARCH_METHODS,
     TIER_FAMILY,
+    TIER_FAMILY_SPECS,
     TIER_MODEL_CODE,
+    TIER_MODEL_SPECS,
     TIER_PART_NUMBER,
     BudgetedTransport,
     SearchHit,
@@ -199,6 +201,16 @@ def test_queries_run_code_then_verified_part_number_then_family() -> None:
     no_mpn = search_queries("T", "pcx", model="S3607VA-RP181WSM", part_number="",
                             brand="ASUS", series="Vivobook")
     assert [q.text for q in no_mpn] == ["S3607VA-RP181WSM", "ASUS Vivobook"]
+    # The complete code first, without filters; specifications only in later fallbacks.
+    core = {"cpu_series": "Core 5", "ram_capacity_gb": "16", "storage_capacity_gb": "1000"}
+    full = search_queries("T", "pcx", model="S3607VA-RP181WSM", part_number="", brand="ASUS",
+                          series="Vivobook", core=core)
+    assert [(q.tier, q.text) for q in full] == [
+        (TIER_MODEL_CODE, "S3607VA-RP181WSM"),
+        (TIER_MODEL_SPECS, "S3607VA-RP181WSM 16GB 1TB"),
+        (TIER_FAMILY, "ASUS Vivobook"),
+        (TIER_FAMILY_SPECS, "ASUS Vivobook Core 5 16GB 1TB"),
+    ]
 
 
 @pytest.mark.parametrize(
@@ -444,7 +456,18 @@ def standard_routes() -> dict[str, TransportResponse | Exception]:
         )
         for method in (lf, pcc)
     }
-    return empty_family | {
+    # Fallback tiers (2026-10-19): code with RAM/storage and family with specifications.
+    fallbacks = {}
+    for query in ("A14-11M-X3BP 16GB 512GB", "EN15-0002 16GB 512GB",
+                  "ExampleBook Snapdragon X 16GB 512GB",
+                  "ExampleBrand ExampleBook Core 5 16GB 512GB"):
+        for method in (lf, pcc):
+            url = method.first_page_url(query)
+            fallbacks[url] = (
+                html(url, lf_search(no_results=True)) if method is lf
+                else TransportResponse(200, url, shopify().encode(), JSON)
+            )
+    return empty_family | fallbacks | {
         lf_a: html(lf_a, lf_search([(LF_PRODUCT, "Acer Aspire AI 14 A14-11M-X3BP"),
                                     ("/product/acer-aspire-ai-14-a14-11m-x9zz/",
                                      "Acer Aspire AI 14 A14-11M-X9ZZ")])),
@@ -482,11 +505,13 @@ def test_preview_makes_no_request_and_shows_the_plan(tmp_path: Path, capsys) -> 
     code, transport, out = run(tmp_path, "--preview", {})
     assert code == 0 and transport.calls == []
     plan = rows(out / "search_plan.csv")
-    assert [(r["target_id"], r["retailer_id"], r["tier"]) for r in plan][:2] == [
+    assert [(r["target_id"], r["retailer_id"], r["tier"]) for r in plan][:4] == [
         ("TGT-000001", "laptop_factory", TIER_MODEL_CODE),
+        ("TGT-000001", "laptop_factory", TIER_MODEL_SPECS),
         ("TGT-000001", "laptop_factory", TIER_FAMILY),
+        ("TGT-000001", "laptop_factory", TIER_FAMILY_SPECS),
     ]
-    assert {r["runs"] for r in plan} == {"ALWAYS", "ONLY_IF_NO_MODEL_CODE_RESULT"}
+    assert {r["runs"] for r in plan} == {"ALWAYS", "ONLY_IF_NO_PLAUSIBLE_CANDIDATE"}
     summary = json.loads((out / "discovery_summary.json").read_text())
     assert summary["run_status"] == "PREVIEW_ONLY" and summary["requests_sent"] == 0
     assert "Preview only" in capsys.readouterr().out

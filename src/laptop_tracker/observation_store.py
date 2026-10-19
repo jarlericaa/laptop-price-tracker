@@ -19,7 +19,7 @@ import json
 import sqlite3
 from collections.abc import Iterable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
@@ -202,6 +202,8 @@ class StoredMatch:
     candidate_target_ids: tuple[str, ...]
     reason_codes: tuple[str, ...]
     extractor: str
+    # The offer's extracted canonical fields under this context (EXTRACTED values only).
+    offer_attributes: Mapping[str, str] = field(default_factory=dict)
 
 
 def _sha256_text(text: str) -> str:
@@ -592,10 +594,12 @@ class ObservationStore:
                 candidate_target_ids=tuple(filter(None, row[3].split(";"))),
                 reason_codes=tuple(filter(None, row[4].split(";"))),
                 extractor=row[5],
+                offer_attributes=_attributes(row[6]),
             )
             for row in self._db.execute(
                 "SELECT observation_id, match_status, target_id, candidate_target_ids, "
-                "reason_codes, extractor FROM match_results WHERE context_id = ?",
+                "reason_codes, extractor, offer_attributes_json FROM match_results "
+                "WHERE context_id = ?",
                 (context_id,),
             )
         }
@@ -613,6 +617,14 @@ class ObservationStore:
         }
 
 
+def _attributes(text: str) -> dict[str, str]:
+    try:
+        value = json.loads(text or "{}")
+    except ValueError:
+        return {}
+    return {str(k): str(v) for k, v in value.items()} if isinstance(value, dict) else {}
+
+
 def _evidence(result: MatchResult) -> list[dict[str, str]]:
     rows = [
         {
@@ -624,6 +636,7 @@ def _evidence(result: MatchResult) -> list[dict[str, str]]:
             "target_value": "",
             "source_label": item.source_label,
             "source_text": item.source_text,
+            **({"scope": item.scope} if item.scope else {}),
         }
         for item in result.extraction_evidence
     ]

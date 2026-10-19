@@ -127,7 +127,8 @@ def test_unit_less_diagonal_is_not_read_under_a_generic_display_label() -> None:
         ("8GB + 8GB slot", (A, "8; 8")),
         ("16GB (8GB + 4GB)", (A, "16; 8; 4")),
         ("16GB (8GB on board)", (A, "16; 8")),
-        ("16GB (8GB + 8GB), expandable to 32GB", (A, "16; 8; 8; 32")),
+        # The maximum clause is split off (2026-10-19); the breakdown still has to sum.
+        ("16GB (8GB + 8GB), expandable to 32GB", (E, "16")),
         ("16GB (8GB + 8GB) or 32GB (16GB + 16GB)", (A, "16; 8; 8; 32; 16; 16")),
         ("16GB (8GB/8GB)", (A, "16; 8; 8")),
         ("16GB + (8GB + 8GB)", (A, "16; 8; 8")),
@@ -286,7 +287,7 @@ def test_adapter_path_installed_ram_components_are_summed() -> None:
 
 
 @pytest.mark.parametrize(
-    "ram", ["16GB (8GB + 4GB)", "8GB + 8GB optional", "16GB (8GB + 8GB), expandable to 32GB"]
+    "ram", ["16GB (8GB + 4GB)", "8GB + 8GB optional", "16GB (8GB + 8GB) or 32GB"]
 )
 def test_adapter_path_unresolved_ram_never_gets_a_target(ram: str) -> None:
     result = match(adapter_offer(RAM=html.escape(ram)))

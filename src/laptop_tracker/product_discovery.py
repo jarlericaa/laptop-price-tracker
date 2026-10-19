@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 import re
+from collections import Counter
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from urllib.parse import parse_qs, urlsplit
@@ -28,7 +29,9 @@ from .normalization import CORE_MATCH_COLUMNS, core_value_key
 from .offers import clean_text
 from .retailer_search import SearchHit, SearchMethod, SearchRecord
 
-# Candidate categories, in priority order.
+# Candidate categories, in priority order. A historical verified URL is a page that matched this
+# configuration exactly in an earlier collection; it is a seed to re-check, never a match.
+HISTORICAL_VERIFIED_URL = "HISTORICAL_VERIFIED_URL"
 CODE_MATCH = "CODE_MATCH"
 CODE_WITH_SUFFIX = "CODE_MATCH_WITH_UNEXPLAINED_SUFFIX"
 PART_NUMBER_MATCH = "VERIFIED_PART_NUMBER_MATCH"
@@ -38,12 +41,18 @@ FAMILY_ONLY = "FAMILY_ONLY"
 DIFFERENT_MODEL = "DIFFERENT_MODEL_CODE"
 UNRELATED = "UNRELATED"
 CATEGORY_PRIORITY = {
+    HISTORICAL_VERIFIED_URL: -1,
     CODE_MATCH: 0, CODE_WITH_SUFFIX: 1, PART_NUMBER_MATCH: 2, CODE_SPELLING: 3,
     CODE_URL_ONLY: 4, FAMILY_ONLY: 5, DIFFERENT_MODEL: 6, UNRELATED: 7,
 }
 # Categories whose page may be inspected and collected automatically (within the limits).
-COLLECTABLE = frozenset({CODE_MATCH, CODE_WITH_SUFFIX, PART_NUMBER_MATCH, CODE_SPELLING,
-                         CODE_URL_ONLY})
+COLLECTABLE = frozenset({HISTORICAL_VERIFIED_URL, CODE_MATCH, CODE_WITH_SUFFIX,
+                         PART_NUMBER_MATCH, CODE_SPELLING, CODE_URL_ONLY})
+# Categories that, without contrary title clues, make a result plausible enough to stop the
+# fallback searches. An unexplained suffix or a code only in the URL is unresolved: searching
+# continues (2026-10-19).
+PLAUSIBLE = frozenset({CODE_MATCH, PART_NUMBER_MATCH, CODE_SPELLING})
+_CONFIGURATION_CLUES = ("screen_size_in", "cpu_series", "ram_capacity_gb", "storage_capacity_gb")
 
 _BUNDLE = re.compile(r"\b(?:free|bundle|backpack|printer|monitor|bag|mouse|headset|chair)\b",
                      re.I)
@@ -163,14 +172,16 @@ class RankedCandidate:
     rank: int = 0
     decision: str = ""
     decision_reason: str = ""
+    # An earlier verified offer URL for this product (may name a ?variant=), when known.
+    seed_url: str = ""
 
     @property
     def sort_key(self) -> tuple:
         agree = sum(value == "AGREES" for value in self.clues.values())
         differ = sum(value.startswith("DIFFERS") for value in self.clues.values())
         first = min((record.page_number, hit_position(record, self.hit.product_url))
-                    for record in self.records)
-        tier = min(record.query.tier for record in self.records)
+                    for record in self.records) if self.records else (0, 0)
+        tier = min(record.query.tier for record in self.records) if self.records else "0"
         bundle = "BUNDLE_WORDING_IN_TITLE" in self.flags
         return (CATEGORY_PRIORITY[self.category], differ, bundle, -agree, tier, first,
                 self.hit.product_url)
@@ -266,6 +277,69 @@ def rank_target_hits(
     for index, candidate in enumerate(ranked, start=1):
         candidate.rank = index
     return ranked
+
+
+def configuration_difference(candidate: RankedCandidate) -> str:
+    """The configuration fields a title clue states differently from the target, in words."""
+    parts = []
+    for name in _CONFIGURATION_CLUES:
+        value = candidate.clues.get(name, "NOT_STATED")
+        if value.startswith(("DIFFERS", "MIXED")):
+            stated = value.split("(", 1)[-1].rstrip(")")
+            parts.append(f"{name}: title {stated} vs target {candidate.target.core[name]}")
+    return "; ".join(parts)
+
+
+def is_plausible(candidate: RankedCandidate) -> bool:
+    """Shows the complete code (or verified part number) and no contrary configuration clue."""
+    return candidate.category in PLAUSIBLE and not configuration_difference(candidate)
+
+
+def plausible_candidate(target: SearchTarget, records: Sequence[SearchRecord]) -> str:
+    """The first plausible candidate's URL among the results so far, or ''.
+
+    Results showing only another RAM/storage configuration, an unexplained suffix, a code only
+    in the URL, or another model do not stop discovery: the fallback searches continue.
+    """
+    from .retailer_search import unique_hits
+
+    for hit, recs in unique_hits(records):
+        if is_plausible(rank_hit(target, hit, recs)):
+            return hit.product_url
+    return ""
+
+
+def results_summary(target: SearchTarget, records: Sequence[SearchRecord]) -> str:
+    """Why the results so far leave no plausible candidate, for the next query's run reason."""
+    from .retailer_search import unique_hits
+
+    hits = unique_hits(records)
+    if not hits:
+        return "no results so far"
+    kinds = Counter()
+    for hit, recs in hits:
+        candidate = rank_hit(target, hit, recs)
+        if candidate.category in PLAUSIBLE and configuration_difference(candidate):
+            kinds["same code, other configuration"] += 1
+        elif candidate.category in {CODE_WITH_SUFFIX, CODE_URL_ONLY}:
+            kinds["unresolved code match"] += 1
+        else:
+            kinds[candidate.category.lower().replace("_", " ")] += 1
+    return "results so far: " + ", ".join(f"{name} x{n}" for name, n in sorted(kinds.items()))
+
+
+def seed_candidate(
+    target: SearchTarget, retailer_id: str, seed_url: str, source: str
+) -> RankedCandidate:
+    """A historical verified URL as a candidate to re-check (no search result behind it)."""
+    product_url = strip_variant(seed_url) + ("/" if seed_url.split("?")[0].endswith("/") else "")
+    hit = SearchHit(retailer_id, product_url, "(historical verified URL)", seed_url, 0, 0)
+    reason = (f"Matched this configuration exactly in an earlier collection ({source}); "
+              "re-checked as a seed, never assumed to match.")
+    clues = dict.fromkeys(_CONFIGURATION_CLUES, "NOT_STATED")
+    return RankedCandidate(target, hit, [], HISTORICAL_VERIFIED_URL, "historical exact match",
+                           "", "", clues, ["HISTORICAL_VERIFIED_URL"], [reason],
+                           seed_url=seed_url)
 
 
 def has_code_signal(target: SearchTarget, records: Sequence[SearchRecord]) -> bool:
@@ -406,7 +480,11 @@ def variant_decision(variant: VariantInfo, target: SearchTarget) -> tuple[str, s
     if not variant.title:
         return "REVIEW", "Variant has no option title on the page."
     if ram.startswith("DIFFERS") or storage.startswith("DIFFERS"):
-        return "ALTERNATIVE", f"Different configuration: RAM {ram}, storage {storage}."
+        return "ALTERNATIVE", (
+            f"Different configuration: RAM {ram}, storage {storage} (target RAM "
+            f"{target.core['ram_capacity_gb']}, storage {target.core['storage_capacity_gb']}); "
+            "kept as a same-product alternative."
+        )
     if ram == "AGREES" and storage == "AGREES":
         return "COLLECT", "Option title states the target RAM and storage."
     if ram == "AGREES" and storage == "NOT_STATED":
@@ -426,6 +504,7 @@ CANDIDATE_COLUMNS: tuple[str, ...] = (
     *(f"clue_{name}" for name in CORE_MATCH_COLUMNS if name != "model"),
     "flags", "queries", "search_positions", "vendor", "product_type", "search_available",
     "search_price", "decision", "decision_reason", "reasons",
+    "configuration_difference", "plausible", "seed_url",
 )
 
 
@@ -456,6 +535,9 @@ def candidate_row(candidate: RankedCandidate) -> dict[str, str]:
         "decision": candidate.decision,
         "decision_reason": candidate.decision_reason,
         "reasons": " ".join(candidate.reasons),
+        "configuration_difference": configuration_difference(candidate),
+        "plausible": "TRUE" if is_plausible(candidate) else "FALSE",
+        "seed_url": candidate.seed_url,
     }
     return {column: row.get(column, "") for column in CANDIDATE_COLUMNS}
 

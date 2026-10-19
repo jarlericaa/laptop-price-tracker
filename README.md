@@ -300,10 +300,14 @@ The final two commands need the live configuration above. Writing Sheets is neve
 verification sequence; run `python run_phase1.py --write-sheets` only after reviewing the local
 outputs.
 
-### Current price comparison policy (2026-10-15)
+### Current price comparison policy (2026-10-19)
 
 Valid displayed prices are compared for exact configurations whether IN_STOCK or OUT_OF_STOCK.
-Selected sold-out prices are labeled OUT OF STOCK; availability remains in history. Confirmed
-bundles participate at their displayed price with a visible bundle-offer note. Unknown bundle
-status, preorder/unknown availability, missing prices and unresolved matches remain excluded. This
-owner-approved update is documented in `docs/PRICE_TRACKING_OUTPUT_SCHEMA.md`.
+Selected sold-out prices are labeled OUT OF STOCK; availability remains in history. Purchase terms
+decide bundles (`--offer-terms-policy purchase-terms/2026-10-19`, the default): an ordinary laptop
+offer with stated inclusions (Office, warranty, backpack) is comparable with an included-items
+note; paid packages, prices that require another purchase, restricted (financing, card, trade-in,
+member) prices and bundle wording without evidence of the terms are excluded with their reason.
+`bundle-flag/2026-10-15` keeps the earlier rule (every checked bundle comparable). Unknown bundle
+status, preorder/unknown availability, missing prices and unresolved matches remain excluded.
+Details: `docs/PRICE_TRACKING_OUTPUT_SCHEMA.md`.

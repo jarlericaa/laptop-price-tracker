@@ -36,6 +36,7 @@ from laptop_tracker.collection import ManifestEntry, expected_target_check
 from laptop_tracker.extraction import ExtractionStatus, extract_offer_attributes
 from laptop_tracker.match_run import read_observations_csv
 from laptop_tracker.matching import ExactMatcher, MatchStatus
+from laptop_tracker.offer_terms import BUNDLE_FLAG_POLICY
 from laptop_tracker.offers import (
     IDENTIFIER,
     OBSERVATION_COLUMNS,
@@ -45,6 +46,7 @@ from laptop_tracker.offers import (
     VARIANT_DEFINITIONS,
     ObservationValidationError,
     OfferDetails,
+    PriceType,
 )
 from laptop_tracker.replay import price_comparability
 
@@ -146,11 +148,18 @@ def test_accessory_external_and_comparison_wording_cannot_supply_size(sentence: 
     assert all(item.source_label.startswith(LOCATOR) for item in kept)
 
 
-def test_swift_go_bundle_is_comparable_after_its_exact_match() -> None:
-    page = dbz_page((("Size", "14.0"),), ("A 14-inch display.",), bundle=True)
+def test_swift_go_bundle_price_follows_its_purchase_terms_after_its_exact_match() -> None:
+    page = dbz_page((("Size", "14.0"),), ("A 14-inch display.",), bundle=True,
+                    price_type=PriceType.REGULAR)
     result = ExactMatcher([TARGET | {"model": "SFG14-75-55MB"}]).match_observation(page)
     assert (result.status, result.target_id) == (MatchStatus.EXACT, "TGT-000001")
-    assert price_comparability(page, result) == "COMPARABLE"
+    # "Synthetic backpack bundle" alone does not state what the price covers.
+    assert price_comparability(page, result) == "NOT_COMPARABLE: PURCHASE_TERMS_UNKNOWN"
+    assert price_comparability(page, result, BUNDLE_FLAG_POLICY) == "COMPARABLE"
+    free = dbz_page((("Size", "14.0"),), ("A 14-inch display. Free backpack included.",),
+                    bundle=True, price_type=PriceType.REGULAR)
+    assert price_comparability(free, ExactMatcher(
+        [TARGET | {"model": "SFG14-75-55MB"}]).match_observation(free)) == "COMPARABLE"
     assert page.details is not None and page.details.bundle_flag is True
 
 

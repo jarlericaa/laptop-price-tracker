@@ -23,6 +23,11 @@ from laptop_tracker.observation_store import (
     ObservationStore,
     ObservationStoreError,
 )
+from laptop_tracker.offer_terms import (
+    BUNDLE_FLAG_POLICY,
+    DEFAULT_OFFER_TERMS_POLICY,
+    OFFER_TERMS_POLICIES,
+)
 from laptop_tracker.price_tracking import (
     COMPARISON_COLUMNS,
     HISTORY_COLUMNS,
@@ -144,11 +149,41 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Monday of the first history week (default: the first week with observations).",
     )
     parser.add_argument(
+        "--offer-terms-policy",
+        choices=OFFER_TERMS_POLICIES,
+        default=DEFAULT_OFFER_TERMS_POLICY,
+        help=(
+            "Commercial-terms rule for price eligibility (default: the purchase-terms policy of "
+            f"2026-10-19; '{BUNDLE_FLAG_POLICY}' keeps every checked bundle comparable)."
+        ),
+    )
+    parser.add_argument(
+        "--search-context",
+        type=Path,
+        action="append",
+        default=[],
+        help=(
+            "A collection match_results.csv (repeatable). Its expected_target_id links each "
+            "observation to the configuration it was searched for, so a blank price can name the "
+            "unconfirmed candidate. Context only: never an assignment."
+        ),
+    )
+    parser.add_argument(
         "--output-dir",
         type=Path,
         help="Report directory (default: data/output/price_tracking/week_<week-start>).",
     )
     return parser.parse_args(argv)
+
+
+def read_search_context(paths: list[Path]) -> dict[str, list[str]]:
+    """``observation_id -> [expected target IDs]`` from collection match results."""
+    context: dict[str, list[str]] = {}
+    for path in paths:
+        for row in read_csv_rows(path, ("observation_id", "expected_target_id"), "Search context"):
+            if row["observation_id"] and row["expected_target_id"]:
+                context.setdefault(row["observation_id"], []).append(row["expected_target_id"])
+    return context
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -208,6 +243,7 @@ def main(argv: list[str] | None = None) -> int:
         batches = [
             (path, read_observations_csv(path), sha256_file(path)) for path in args.observations
         ]
+        search_context = read_search_context(args.search_context)
     except (
         FileNotFoundError,
         UnicodeDecodeError,
@@ -249,6 +285,8 @@ def main(argv: list[str] | None = None) -> int:
             week=week,
             as_of=as_of,
             history_start=history_start,
+            offer_terms_policy=args.offer_terms_policy,
+            search_context=search_context,
         )
     except (
         ObservationConflictError,
@@ -277,6 +315,7 @@ def main(argv: list[str] | None = None) -> int:
             args.contributions,
             *((args.sales_ranking,) if use_sales else ()),
             *args.observations,
+            *args.search_context,
         )
     }
     summary = {
@@ -303,11 +342,25 @@ def main(argv: list[str] | None = None) -> int:
             "price_basis": "Trusted displayed price (REGULAR or SALE price type); vouchers and "
             "shipping are not observed and stay unknown.",
             "comparable": "EXACT match to a selected target, IN_STOCK or OUT_OF_STOCK, "
-            "checked bundle status (TRUE or FALSE), PHP, known price type. Stock status remains "
-            "visible; confirmed bundles participate with a BUNDLE_OFFER note.",
-            "bundles": "Included at the displayed package price; no accessory value is "
-            "estimated or deducted. Unknown bundle status remains excluded.",
-            "comparison_policy_version": "displayed-price/stock-and-bundles/2026-10-15",
+            "acceptable purchase terms, PHP, known price type. Stock status remains visible.",
+            "offer_terms_policy": args.offer_terms_policy,
+            "bundles": (
+                "Ordinary offers with stated inclusions (Office, warranty, backpack, ...) are "
+                "comparable with an INCLUDED_ITEMS_OFFER note. Paid packages, prices that "
+                "require another purchase, restricted (financing, card, trade-in, member) "
+                "prices, and bundle wording without evidence of the terms are excluded with "
+                "their reason. No accessory value is estimated or deducted."
+                if args.offer_terms_policy != BUNDLE_FLAG_POLICY else
+                "Included at the displayed package price; no accessory value is estimated or "
+                "deducted. Unknown bundle status remains excluded."
+            ),
+            "comparison_policy_version": (
+                "displayed-price/stock-and-purchase-terms/2026-10-19"
+                if args.offer_terms_policy != BUNDLE_FLAG_POLICY
+                else "displayed-price/stock-and-bundles/2026-10-15"
+            ),
+            "unconfirmed_candidates": "A blank price may name an unconfirmed candidate offer "
+            "(link, outcome, differing values); its price is never shown or used in minimums.",
             "representative_observation": "Latest observation of each offer within the week.",
             "selection": "Lowest comparable price per target and retailer; no averaging.",
             "tie_break": TIE_BREAK,
@@ -366,6 +419,9 @@ def main(argv: list[str] | None = None) -> int:
         },
         "input_sha256": inputs,
         "counts": result.counts,
+        # Price eligibility of this week's exact matches under each offer-terms policy, with the
+        # same matches: the commercial-terms effect, separate from identity matching.
+        "offer_terms_effect": result.terms_effect,
         "outputs": {key: str(path) for key, path in outputs.items()},
     }
     outputs["summary"].write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")

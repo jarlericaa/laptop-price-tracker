@@ -210,3 +210,51 @@ bundle status remains excluded (`BUNDLE_STATUS_UNKNOWN`).
 - Regenerated summaries record `displayed-price/stock-and-bundles/2026-10-15`; existing report
   folders retain their earlier policy. Rebuild price/coverage reports before preview/publication;
   publishing alone does not recalculate prices.
+
+## Purchase terms, unconfirmed candidates, and the coverage ledger (2026-10-19)
+
+**Purchase terms** (`offer_terms.py`; `track_prices.py --offer-terms-policy`). Bundle keywords
+(`FREE`, `BUNDLE`, `BACKPACK`, `Office`) no longer decide eligibility on their own. The offer's own
+wording (title, price text, inclusion/promo specification rows, description, adapter bundle
+evidence) is classified:
+
+| Category | Default policy `purchase-terms/2026-10-19` | `bundle-flag/2026-10-15` |
+|---|---|---|
+| `STANDARD_OFFER` | comparable | comparable |
+| `INCLUDED_ITEMS` (stated free/included Office, warranty, backpack, mouse, ...) | comparable, note `INCLUDED_ITEMS_OFFER` | comparable, `BUNDLE_OFFER` if flagged |
+| `PAID_PACKAGE` (`+ 24" Monitor`, non-ordinary bundle components) | excluded `PAID_PACKAGE_PRICE` | comparable, `BUNDLE_OFFER` |
+| `CONDITIONAL_PURCHASE` (the price needs another purchase) | excluded `PURCHASE_CONDITION_REQUIRED` | by bundle flag |
+| `RESTRICTED_PRICE` (financing/installment-only, card, trade-in, member) | excluded `RESTRICTED_PRICE` | by bundle flag |
+| `PURCHASE_TERMS_UNKNOWN` (bundle wording without stated terms) | excluded `PURCHASE_TERMS_UNKNOWN` | comparable, `BUNDLE_OFFER` |
+| `BUNDLE_NOT_CHECKED` (adapter did not check) | excluded `BUNDLE_STATUS_UNKNOWN` | excluded `BUNDLE_STATUS_UNKNOWN` |
+
+A freebie that needs another purchase ("free sleeve with purchase of Microsoft 365") does not
+restrict the laptop price; it is recorded as a conditional extra and is not an inclusion.
+Payment options mentioned in prose ("0% installment available") do not restrict a price. Stock
+eligibility and the separate lowest-observed / lowest-in-stock minimums are unchanged. History
+and review rows add `offer_terms_category`, `offer_terms_evidence` (the deciding wording),
+`price_notes`, and `search_context_target_ids`. The run summary's `offer_terms_effect` lists,
+for this week's exact matches with identity held fixed, the comparable count under each policy
+and every observation whose eligibility depends on the policy: the commercial-terms effect,
+reported separately from matching changes.
+
+**Unconfirmed candidates beside a blank price.** `track_prices.py --search-context
+<collection>/match_results.csv` (repeatable) links observations to the configuration they were
+collected for. A cell with no exact offer but a related offer (search context or a near-match
+candidate) has status `CANDIDATE_NOT_CONFIRMED` and new columns `<code>_Candidate_URL`,
+`<code>_Candidate_Status` (`MODEL_UNVERIFIED`, `EXTRACTION_INCOMPLETE`, `IDENTITY_CONFLICT`,
+`SAME_MODEL_DIFFERENT_CONFIGURATION`, `MATCHED_OTHER_CONFIGURATION`, ...) and
+`<code>_Candidate_Detail` (blocking codes and differing values, e.g. `confirmed as TGT-000219
+(outside the selected list); ram_capacity_gb: offer 8 vs target 16`). Selections add
+`candidate_offer_url`, `candidate_status`, `candidate_detail`, `candidate_observation_id`. The
+candidate's price is never shown in the comparison and never enters a minimum.
+
+**Coverage ledger** (`coverage_report.py`). Statuses add `SAME_MODEL_DIFFERENT_CONFIGURATION`,
+`SEARCH_FAILED` and `CONFIRMED_OUTSIDE_SCOPE`; searches that were never sent (limits, budget)
+are `DISCOVERY_NOT_ATTEMPTED`, not `NO_CANDIDATE_FOUND`. New columns: `in_reporting_scope`,
+`current_reason`, `candidate_url`, `candidate_outcome`, `differing_fields`, `confirmed_price`,
+`unconfirmed_candidate_price`, `searches_failed`, `searches_not_sent`, `search_stop_reason`,
+`current_offers`, `historical_observations`. `best_offer_price` now holds a confirmed price only.
+Offer details add `is_current`, `price_role` (`CONFIRMED` / `UNCONFIRMED_NOT_COMPARED`),
+`differing_fields`, `offer_terms_category`, and relation `SEARCHED_FOR` beside `MATCHED`,
+`CANDIDATE` and `COLLECTED_FOR` (search context is never an assignment).

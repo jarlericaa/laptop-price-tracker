@@ -26,7 +26,7 @@ from __future__ import annotations
 import html
 import json
 import re
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from html.parser import HTMLParser
 from urllib.parse import quote_plus, urlencode, urljoin, urlsplit
@@ -41,8 +41,10 @@ SEARCH_ERROR = "SEARCH_ERROR"
 UNSUPPORTED_LAYOUT = "UNSUPPORTED_LAYOUT"
 NOT_SENT_BUDGET = "NOT_SENT_BUDGET_EXHAUSTED"
 NOT_SENT_LIMIT = "NOT_SENT_SEARCH_LIMIT"
+NOT_SENT_REPLAY_ONLY = "NOT_SENT_REPLAY_ONLY"
+NOT_SENT_QUERY_LIMIT = "NOT_SENT_QUERY_LIMIT"
 SEARCH_OUTCOMES = (RESULTS, NO_RESULTS, SEARCH_ERROR, UNSUPPORTED_LAYOUT, NOT_SENT_BUDGET,
-                   NOT_SENT_LIMIT)
+                   NOT_SENT_LIMIT, NOT_SENT_REPLAY_ONLY, NOT_SENT_QUERY_LIMIT)
 
 
 class SearchLayoutError(ValueError):
@@ -354,27 +356,62 @@ class SearchQuery:
 
 TIER_MODEL_CODE = "1_FULL_MODEL_CODE"
 TIER_PART_NUMBER = "2_VERIFIED_PART_NUMBER"
-TIER_FAMILY = "3_BRAND_FAMILY"
+TIER_MODEL_SPECS = "3_MODEL_CODE_WITH_SPECS"
+TIER_FAMILY = "4_BRAND_FAMILY"
+TIER_FAMILY_SPECS = "5_FAMILY_WITH_SPECS"
+FALLBACK_TIERS = frozenset({TIER_PART_NUMBER, TIER_MODEL_SPECS, TIER_FAMILY, TIER_FAMILY_SPECS})
+
+
+def _capacity_words(ram: str, storage: str) -> str:
+    """``16GB 512GB`` / ``16GB 1TB`` search words from catalog GB values (search text only)."""
+    words = []
+    if ram.strip().isdigit():
+        words.append(f"{int(ram)}GB")
+    if storage.strip().isdigit():
+        amount = int(storage)
+        words.append(f"{amount // 1000}TB" if amount >= 1000 and amount % 1000 == 0
+                     else f"{amount}GB")
+    return " ".join(words)
 
 
 def search_queries(
-    target_id: str, retailer_id: str, *, model: str, part_number: str, brand: str, series: str
+    target_id: str, retailer_id: str, *, model: str, part_number: str, brand: str, series: str,
+    core: Mapping[str, str] | None = None,
 ) -> list[SearchQuery]:
-    """Ordered queries: full model code, verified part number, then the broader family.
+    """Ordered queries: the complete model code first, then fallbacks.
 
-    The part number is used only when TARGET_MASTER records it (owner-verified). Retailer SKUs
-    and unverified identifiers are never search terms here. The family query runs only when the
-    earlier tiers found no result showing the model code (decided by the caller).
+    1. The complete model code from TARGET_MASTER, with no specification filter.
+    2. The verified part number, when TARGET_MASTER records it (owner-verified). Retailer SKUs
+       and unverified identifiers are never search terms here.
+    3. The model code with the configuration's RAM and storage (2026-10-19), to narrow a code
+       search whose results were truncated or showed only other configurations.
+    4. The broader brand and series; 5. the family with CPU, RAM, and storage.
+
+    Every query after the first runs only while no plausible candidate has been found (decided
+    by the caller). Search words are discovery hints; a result is only a candidate, and the
+    configuration's values never fill an offer's missing specification.
     """
-    queries = [SearchQuery(target_id, retailer_id, TIER_MODEL_CODE, model.strip(), True,
+    core = core or {}
+    model = model.strip()
+    capacities = _capacity_words(core.get("ram_capacity_gb", ""),
+                                 core.get("storage_capacity_gb", ""))
+    queries = [SearchQuery(target_id, retailer_id, TIER_MODEL_CODE, model, True,
                            "complete model code from TARGET_MASTER")]
     if part_number.strip():
         queries.append(SearchQuery(target_id, retailer_id, TIER_PART_NUMBER, part_number.strip(),
                                    True, "manufacturer_part_number in TARGET_MASTER"))
+    if capacities:
+        queries.append(SearchQuery(target_id, retailer_id, TIER_MODEL_SPECS,
+                                   clean_text(f"{model} {capacities}"), False,
+                                   "model code plus RAM and storage (fallback)"))
     family = clean_text(f"{brand} {series}")
-    if family and family.casefold() != model.strip().casefold():
+    if family and family.casefold() != model.casefold():
         queries.append(SearchQuery(target_id, retailer_id, TIER_FAMILY, family, False,
-                                   "brand and series (broader; runs only if needed)"))
+                                   "brand and series (broader fallback)"))
+        detailed = clean_text(f"{family} {core.get('cpu_series', '')} {capacities}")
+        if detailed.casefold() != family.casefold():
+            queries.append(SearchQuery(target_id, retailer_id, TIER_FAMILY_SPECS, detailed,
+                                       False, "family plus CPU, RAM, and storage (fallback)"))
     return queries
 
 
@@ -398,12 +435,18 @@ class SearchRecord:
     next_url: str = ""
     message: str = ""
     hit_items: list[SearchHit] = field(default_factory=list, repr=False)
+    # Where the response came from when no request was sent: "SAME_RUN" (an identical search
+    # earlier in this run) or "SAVED:<folder>" (a saved response replayed from an earlier run).
+    cache: str = ""
+    # Why this query ran (or was skipped), e.g. which earlier results left no plausible candidate.
+    run_reason: str = ""
 
 
 SEARCH_RECORD_COLUMNS: tuple[str, ...] = (
     "target_id", "retailer_id", "tier", "query", "verified_identifier", "page_number", "url",
     "outcome", "http_status", "final_url", "retrieved_at", "attempts", "content_sha256",
     "evidence_file", "hits", "filtered_links", "possibly_truncated", "next_url", "message",
+    "cache", "run_reason",
 )
 
 
@@ -429,6 +472,8 @@ def search_record_row(record: SearchRecord) -> dict[str, str]:
         "possibly_truncated": "TRUE" if record.possibly_truncated else "FALSE",
         "next_url": record.next_url,
         "message": record.message,
+        "cache": record.cache,
+        "run_reason": record.run_reason,
     }
 
 

@@ -52,6 +52,8 @@ MATCH_EVIDENCE_COLUMNS: tuple[str, ...] = (
     "target_value",
     "source_label",
     "source_text",
+    # What the evidence applies to (2026-10-19), e.g. SELECTED_VARIANT or MAXIMUM_SUPPORTED.
+    "evidence_scope",
 )
 
 
@@ -157,6 +159,7 @@ def evidence_records(item: NumberedObservation, result: MatchResult) -> list[dic
             "target_value": "",
             "source_label": entry.source_label,
             "source_text": entry.source_text,
+            "evidence_scope": entry.scope,
         }
         for entry in result.extraction_evidence
     ]
@@ -171,6 +174,7 @@ def evidence_records(item: NumberedObservation, result: MatchResult) -> list[dic
             "target_value": entry.target_value,
             "source_label": "",
             "source_text": "",
+            "evidence_scope": "",
         }
         for entry in result.evidence
     ]

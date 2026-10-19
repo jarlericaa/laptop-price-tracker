@@ -491,3 +491,46 @@ FA506NC` conflicts with `FA506NCQ-HN012W`), Octagon TUF original record (flatten
 `oct-3` fixes new collections), PC Central Nitro (title/spec `R2UH`, URL `r2auh`). No earlier
 `EXACT` result changed target or status. Re-parsed `oct-3`/`pcc-4` records keep their observation
 identity with new content, so the throwaway-store import was refused (76/76) as designed.
+
+## Scoped evidence, URL slugs, and model-name suffixes (2026-10-19)
+
+Rules version `five-field-exact/scoped-evidence/2026-10-19`. The five required fields, exact
+comparison, CPU-family matching, title-model corroboration, the complete-matrix condition for
+shared fields, and the listing-scoped owner approvals are unchanged.
+
+**Evidence scope.** Every extraction evidence item carries `scope`: `SELECTED_VARIANT`,
+`PRODUCT_SPECIFICATION`, `SHARED_PRODUCT`, `PRODUCT_DESCRIPTION`, `TITLE`, `OWNER_APPROVED`
+(these can supply values under the existing rules), and `MODEL_FAMILY_CAPABILITY`,
+`MAXIMUM_SUPPORTED`, `OPTIONAL_OR_ALTERNATIVE`, `URL`, `IDENTIFIER`, `OTHER_VARIANT` (supporting
+only). Applicability is resolved before comparison, with raw wording and locator kept:
+
+- A CPU clause or parenthesis that opens with capability wording (`up to`, `configurable to`,
+  `options up to`, `available with`, `optional`) is a family capability:
+  `Intel Core i5-1335U (up to Core i7)` is `Core i5`. Alternatives without such wording
+  (`i5-13420H / i7-13620H`, `i5 or i7`) stay `AMBIGUOUS`. Title capability clauses are not title
+  conflicts.
+- Memory and storage clauses or parentheses that open with maximum wording (`up to`, `max`,
+  `expandable/upgradable/configurable (up) to`) or optional wording (`optional`, `option upgrade`,
+  `available with`, `alternatively`) and state their own amount are kept as `ram_maximum_gb`,
+  `ram_optional_gb`, `storage_maximum_gb`, `storage_optional_gb`, never installed capacity:
+  `16GB DDR5 (upgradable up to 32GB)` → 16; `8GB, expandable to 32GB` → 8 (previously
+  `AMBIGUOUS`); `512GB SSD | Up to 2TB` → 512. `512GB SSD + 1TB HDD (optional)`,
+  `512GB SSD + optional 1TB HDD`, and `16GB (8GB + 8GB up to 32GB)` stay `AMBIGUOUS`.
+- Confirmed selected RAM/storage still supersedes shared default wording with the discrepancy
+  retained; equivalent repeated rows remain one fact (never summed, never two confirmations).
+
+**URL slugs.** When the page's own evidence has established a consistent model (a trusted model
+row, a shared model proven by the complete matrix, or a corroborated title code), a URL path
+naming the same stem with another final segment (`anv15-42-r2auh` for `ANV15-42-R2UH`) is the
+warning `MODEL_URL_DIFFERS`, no longer the block `MODEL_URL_CONFLICT`. The URL wording and the
+page model are both kept (`scope = URL`); no alias is created and the URL never supplies a model.
+Page model claims that disagree (`Model: FA506NC` vs `FA506NCQ-HN012W`), unexplained suffixes,
+title/specification conflicts, and unconfirmed variant bindings still block.
+
+**Model-name suffixes.** A model-name row (Laptop Factory `Model Name`) with an unexplained
+designation right after its one code (`Acer Aspire AI 14 A14-11M-X3BP OPI`) is now `UNRESOLVED`,
+as for code-rule rows and titles; it was previously reduced to the code. Ordinary words (colours,
+`OLED`, `Gaming`, ...) and parenthesized text are unaffected.
+
+Saved results keep their context; these rules create a new matching context. Synthetic
+before/after replay results are in PROGRESS_LOG.md; a replay of the real saved pilot is pending.

@@ -30,6 +30,7 @@ from laptop_tracker.offers import (
     Availability,
     OfferDetails,
     OfferObservation,
+    PriceType,
     RetrievalMetadata,
 )
 from laptop_tracker.scraping import FetchConfig, Fetcher, ScrapeRequest, TransportResponse, scrape
@@ -55,6 +56,8 @@ def offer(
     scoped: tuple[tuple[str, str, str], ...] = (),
     url: str = "https://shop.example.test/products/synthetic",
     bundle: bool | None = None,
+    bundle_evidence: tuple[str, ...] = ("Synthetic backpack bundle",),
+    price_type: PriceType | None = None,
 ) -> OfferObservation:
     joined = " | ".join(f"{label}: {value}" if value else label for label, value in specs)
     return OfferObservation(
@@ -82,7 +85,8 @@ def offer(
             raw_specifications=specs,
             scoped_evidence=scoped,
             bundle_flag=bundle,
-            bundle_evidence=("Synthetic backpack bundle",) if bundle else (),
+            bundle_evidence=bundle_evidence if bundle else (),
+            price_type=price_type,
         ),
     )
 

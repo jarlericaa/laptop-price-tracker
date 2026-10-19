@@ -12,9 +12,13 @@ Policy (starting rules, 2026-10-12):
   Vouchers and shipping are not part of it; they are not observed and stay unknown.
 - A price is comparable only for an ``EXACT`` match to a selected target that is ``IN_STOCK``
   or ``OUT_OF_STOCK``, with its actual availability retained,
-  in PHP, with a known price type and checked bundle status. Confirmed bundles participate
-  at their displayed package price and carry a BUNDLE_OFFER note (owner policy, 2026-10-15).
-  Everything else is kept in history with its status and reasons.
+  in PHP, with a known price type and acceptable purchase terms. Under the purchase-terms
+  policy (2026-10-19, ``offer_terms.py``) an ordinary offer with stated inclusions (Office,
+  warranty, backpack) is comparable with an INCLUDED_ITEMS_OFFER note; a paid package, a price
+  that requires another purchase, a restricted (financing, card, trade-in, member) price, and
+  bundle wording without evidence of the terms are excluded with their reason. The earlier
+  bundle-flag policy (2026-10-15: every checked bundle comparable with a BUNDLE_OFFER note) can
+  still be selected. Everything else is kept in history with its status and reasons.
 - Each offer is represented in a week by its latest observation in that week. For one target and
   retailer, the lowest comparable price is selected; ties go to the latest retrieval, then the
   offer URL, offer index, and observation ID. All underlying observations stay in history.
@@ -41,13 +45,31 @@ from types import ModuleType
 from zoneinfo import ZoneInfo
 
 from . import conventions, evidence_approvals, extraction, matching, normalization
-from .matching import ExactMatcher, MatchStatus, is_warning_code, match_basis_from_codes
+from .matching import (
+    SAME_MODEL_DIFFERENT_CONFIGURATION,
+    ExactMatcher,
+    MatchStatus,
+    core_differences,
+    describe_differences,
+    is_warning_code,
+    match_basis_from_codes,
+    offer_outcome,
+    review_codes,
+)
 from .normalization import CORE_MATCH_COLUMNS, core_key
 from .observation_store import (
     MatchingContext,
     ObservationStore,
     StoredMatch,
     StoredObservation,
+)
+from .offer_terms import (
+    BUNDLE_FLAG_POLICY,
+    DEFAULT_OFFER_TERMS_POLICY,
+    OFFER_TERMS_POLICIES,
+    OfferTerms,
+    classify_offer_terms,
+    terms_price_effect,
 )
 from .offers import Availability, PriceType
 from .supporting_tables import TableResult
@@ -61,7 +83,7 @@ from .verified_top import CONTRIBUTING, money
 
 REPORTING_TIMEZONE = "Asia/Singapore"
 REPORTING_CURRENCY = "PHP"
-MATCHING_RULES_VERSION = "five-field-exact/balanced-evidence/2026-10-15"
+MATCHING_RULES_VERSION = "five-field-exact/scoped-evidence/2026-10-19"
 # Modules whose code defines matching outcomes; their bytes fingerprint the rule version.
 RULE_MODULES: tuple[ModuleType, ...] = (
     normalization, conventions, evidence_approvals, extraction, matching
@@ -134,6 +156,9 @@ LEGACY_COMPARISON_COLUMNS: tuple[str, ...] = (
 # was supported, nonblocking warnings, and why a price is blank (2026-10-15).
 RETAILER_DETAIL_SUFFIXES: tuple[str, ...] = (
     "Stock", "Observed_At", "Match_Basis", "Warnings", "Reason",
+    # An offer found for this configuration that is not a confirmed match (2026-10-19): its
+    # link, outcome, and the differing values. Its price is never shown in the comparison.
+    "Candidate_URL", "Candidate_Status", "Candidate_Detail",
 )
 COMPARISON_COLUMNS: tuple[str, ...] = (
     *LEGACY_COMPARISON_COLUMNS[: LEGACY_COMPARISON_COLUMNS.index("Comparable_Retailer_Count")],
@@ -206,6 +231,10 @@ SELECTION_COLUMNS: tuple[str, ...] = (
     "latest_exact_offer_url",
     "latest_exact_availability",
     "latest_exact_retrieved_at_utc",
+    "candidate_offer_url",
+    "candidate_status",
+    "candidate_detail",
+    "candidate_observation_id",
 )
 
 HISTORY_COLUMNS: tuple[str, ...] = (
@@ -248,6 +277,10 @@ HISTORY_COLUMNS: tuple[str, ...] = (
     "matching_context_id",
     "target_master_sha256",
     "matching_rules_version",
+    "offer_terms_category",
+    "offer_terms_evidence",
+    "price_notes",
+    "search_context_target_ids",
 )
 
 SERIES_COLUMNS: tuple[str, ...] = (
@@ -290,6 +323,9 @@ REVIEW_COLUMNS: tuple[str, ...] = (
     "comparability_status",
     "comparability_reasons",
     "matching_context_id",
+    "offer_terms_category",
+    "offer_terms_evidence",
+    "search_context_target_ids",
 )
 
 SOURCE_LEDGER_COLUMNS: tuple[str, ...] = (
@@ -323,6 +359,9 @@ SELECTED = "SELECTED"
 NO_OBSERVATION_IN_WEEK = "NO_OBSERVATION_IN_WEEK"
 NO_COMPARABLE_OFFER = "NO_COMPARABLE_OFFER"
 REVIEW_REQUIRED_ONLY = "REVIEW_REQUIRED_ONLY"
+# Offers were found for the configuration (search context or near-match candidates) but none is
+# a confirmed match: an unresolved model, missing specifications, or another configuration.
+CANDIDATE_NOT_CONFIRMED = "CANDIDATE_NOT_CONFIRMED"
 
 CLOSED_HISTORICAL = "CLOSED_HISTORICAL"
 IN_PROGRESS = "IN_PROGRESS"
@@ -683,6 +722,11 @@ class ObservationView:
     status: str
     reasons: tuple[str, ...]
     retailer_code: str
+    # Commercial terms and nonblocking price notes (INCLUDED_ITEMS_OFFER, BUNDLE_OFFER).
+    terms: OfferTerms | None = None
+    notes: tuple[str, ...] = ()
+    # Targets this offer was searched or collected for: context only, never an assignment.
+    search_targets: tuple[str, ...] = ()
 
     @property
     def target_id(self) -> str:
@@ -693,12 +737,25 @@ class ObservationView:
         return self.match.match_status == MatchStatus.EXACT.value
 
 
-def comparability(stored: StoredObservation, match: StoredMatch) -> tuple[str, tuple[str, ...]]:
+def stored_offer_terms(stored: StoredObservation) -> OfferTerms:
+    """The purchase terms of a stored observation, from its own saved wording."""
+    return classify_offer_terms(stored.observation())
+
+
+def comparability(
+    stored: StoredObservation,
+    match: StoredMatch,
+    *,
+    terms: OfferTerms | None = None,
+    policy: str = DEFAULT_OFFER_TERMS_POLICY,
+) -> tuple[str, tuple[str, ...]]:
     """Whether an observation's price can stand for its matched target, and why not."""
     if match.match_status == MatchStatus.REVIEW_REQUIRED.value:
         return REVIEW_REQUIRED, ("MATCH_REVIEW_REQUIRED",)
     if match.match_status != MatchStatus.EXACT.value or not match.target_id:
         return NOT_MATCHED, (f"MATCH_{match.match_status}",)
+    if terms is None and policy != BUNDLE_FLAG_POLICY:
+        terms = stored_offer_terms(stored)
     reasons = price_rule_reasons(
         retailer_id=stored.retailer_id,
         currency=stored.currency,
@@ -706,6 +763,8 @@ def comparability(stored: StoredObservation, match: StoredMatch) -> tuple[str, t
         bundle_flag=stored.bundle_flag,
         price_type=stored.price_type,
         price=stored.price,
+        terms=terms,
+        policy=policy,
     )
     return (COMPARABLE, ()) if not reasons else (NOT_COMPARABLE, reasons)
 
@@ -718,8 +777,14 @@ def price_rule_reasons(
     bundle_flag: str,
     price_type: str,
     price: Decimal,
+    terms: OfferTerms | None = None,
+    policy: str = DEFAULT_OFFER_TERMS_POLICY,
 ) -> tuple[str, ...]:
-    """Why an exactly matched offer's price is not comparable; empty when it is."""
+    """Why an exactly matched offer's price is not comparable; empty when it is.
+
+    Without ``terms`` the purchase terms fall back to the checked bundle flag (the 2026-10-15
+    rule), whatever the policy.
+    """
     reasons = []
     if retailer_id not in RETAILER_CODE_BY_ID:
         reasons.append("RETAILER_NOT_IN_COMPARISON")
@@ -727,8 +792,7 @@ def price_rule_reasons(
         reasons.append("CURRENCY_NOT_PHP")
     if availability not in {Availability.IN_STOCK.value, Availability.OUT_OF_STOCK.value}:
         reasons.append(f"AVAILABILITY_{availability}")
-    if bundle_flag not in {"TRUE", "FALSE"}:
-        reasons.append("BUNDLE_STATUS_UNKNOWN")
+    reasons += terms_price_effect(terms, bundle_flag, policy)[0]
     if price_type not in {PriceType.REGULAR.value, PriceType.SALE.value}:
         reasons.append("PRICE_TYPE_UNKNOWN")
     if not price.is_finite() or price <= 0:
@@ -736,9 +800,11 @@ def price_rule_reasons(
     return tuple(reasons)
 
 
-def price_note_codes(bundle_flag: str) -> tuple[str, ...]:
+def price_note_codes(
+    bundle_flag: str, terms: OfferTerms | None = None, policy: str = BUNDLE_FLAG_POLICY
+) -> tuple[str, ...]:
     """Nonblocking price notes, kept separate from identity and exclusion reasons."""
-    return ("BUNDLE_OFFER",) if bundle_flag == "TRUE" else ()
+    return terms_price_effect(terms, bundle_flag, policy)[1]
 
 
 def _selection_key(view: ObservationView) -> tuple[object, ...]:
@@ -773,6 +839,11 @@ class Selection:
     observed: ObservationView | None = None
     # Lowest comparable offer recorded IN_STOCK (same set and tie-break as ``chosen``).
     chosen_in_stock: ObservationView | None = None
+    # The most informative unconfirmed offer found for this cell, why it is not a match, and the
+    # differing values. Never priced, never part of a minimum.
+    candidate: ObservationView | None = None
+    candidate_status: str = ""
+    candidate_detail: str = ""
 
 
 def select_week(
@@ -800,6 +871,12 @@ def select_week(
         if view.status == REVIEW_REQUIRED
         for candidate in view.match.candidate_target_ids
     )
+    # Search context and near-match hints link unconfirmed offers to a cell; they never assign.
+    related: dict[tuple[str, str], list[ObservationView]] = defaultdict(list)
+    for view in latest:
+        for target_id in dict.fromkeys((*view.search_targets, *view.match.candidate_target_ids)):
+            if not (view.is_exact and view.target_id == target_id) and view.retailer_code:
+                related[(target_id, view.retailer_code)].append(view)
     earlier: dict[tuple[str, str], ObservationView] = {}
     for view in views:
         if view.week_start < week.start and view.status == COMPARABLE:
@@ -814,6 +891,9 @@ def select_week(
             offers = exact_latest.get(key, [])
             comparable = sorted((v for v in offers if v.status == COMPARABLE), key=_selection_key)
             reasons = Counter(reason for v in offers for reason in v.reasons)
+            candidate, candidate_status, candidate_detail = _best_candidate(
+                item, related.get(key, []), selected
+            )
             if comparable:
                 status, chosen = SELECTED, comparable[0]
                 tied = sum(1 for v in comparable if v.stored.price == chosen.stored.price)
@@ -823,6 +903,8 @@ def select_week(
                     status = NO_COMPARABLE_OFFER
                 elif review[key]:
                     status = REVIEW_REQUIRED_ONLY
+                elif candidate is not None:
+                    status = CANDIDATE_NOT_CONFIRMED
                 else:
                     status = NO_OBSERVATION_IN_WEEK
             selections[key] = Selection(
@@ -844,8 +926,65 @@ def select_week(
                     (v for v in comparable if v.stored.availability == Availability.IN_STOCK.value),
                     None,
                 ),
+                candidate=candidate,
+                candidate_status=candidate_status,
+                candidate_detail=candidate_detail,
             )
     return selections
+
+
+# Candidate outcomes for a blank cell, most informative first.
+_CANDIDATE_ORDER = (
+    "AMBIGUOUS_TARGET", "IDENTITY_CONFLICT", "MODEL_UNVERIFIED", "EXTRACTION_INCOMPLETE",
+    SAME_MODEL_DIFFERENT_CONFIGURATION, "MATCHED_OTHER_CONFIGURATION",
+    "DIFFERENT_CONFIGURATION", "INACTIVE_TARGET",
+)
+
+
+def candidate_outcome(
+    view: ObservationView, target_row: Mapping[str, object], selected: SelectedList
+) -> tuple[str, str]:
+    """Why an offer related to a configuration is not its confirmed match, with the differing
+    values where the offer's verified fields show them."""
+    match = view.match
+    differences = core_differences(match.offer_attributes, target_row)
+    detail = describe_differences(differences)
+    same_model = differences and all(field != "model" for field, _, _ in differences) and (
+        "model" in match.offer_attributes
+    )
+    if view.is_exact:
+        scope = "in the selected list" if match.target_id in selected.by_target else (
+            "outside the selected list"
+        )
+        status = SAME_MODEL_DIFFERENT_CONFIGURATION if same_model else (
+            "MATCHED_OTHER_CONFIGURATION"
+        )
+        return status, "; ".join(filter(None, (
+            f"confirmed as {match.target_id} ({scope})", detail,
+        )))
+    outcome = offer_outcome(match.match_status, match.reason_codes)
+    if outcome == "DIFFERENT_CONFIGURATION" and same_model:
+        outcome = SAME_MODEL_DIFFERENT_CONFIGURATION
+    if outcome in {"DIFFERENT_CONFIGURATION", SAME_MODEL_DIFFERENT_CONFIGURATION}:
+        return outcome, detail
+    return outcome, "; ".join(filter(None, (";".join(review_codes(match.reason_codes)), detail)))
+
+
+def _best_candidate(
+    item: SelectedConfiguration, views: Sequence[ObservationView], selected: SelectedList
+) -> tuple[ObservationView | None, str, str]:
+    if not views:
+        return None, "", ""
+    ranked = sorted(
+        ((candidate_outcome(view, item.target, selected), view) for view in views),
+        key=lambda pair: (
+            _CANDIDATE_ORDER.index(pair[0][0]) if pair[0][0] in _CANDIDATE_ORDER else 99,
+            -pair[1].stored.retrieved_at.timestamp(),
+            pair[1].stored.offer_url,
+        ),
+    )
+    (status, detail), view = ranked[0]
+    return view, status, detail
 
 
 def _selection_reason(selection: Selection) -> str:
@@ -870,6 +1009,7 @@ class PriceTrackingResult:
     series: list[dict[str, str]]
     review: list[dict[str, str]]
     counts: dict[str, int] = field(default_factory=dict)
+    terms_effect: dict[str, object] = field(default_factory=dict)
 
 
 def build_views(
@@ -878,6 +1018,8 @@ def build_views(
     *,
     as_of: datetime,
     last_week: ReportWeek,
+    offer_terms_policy: str = DEFAULT_OFFER_TERMS_POLICY,
+    search_context: Mapping[str, Sequence[str]] | None = None,
 ) -> tuple[list[ObservationView], int]:
     """Classify observations retrieved no later than ``as_of`` and before ``last_week`` ends.
 
@@ -894,7 +1036,8 @@ def build_views(
             raise PriceTrackingInputError(
                 "A stored observation has no result under the current matching context."
             )
-        status, reasons = comparability(stored, match)
+        terms = stored_offer_terms(stored)
+        status, reasons = comparability(stored, match, terms=terms, policy=offer_terms_policy)
         views.append(
             ObservationView(
                 stored,
@@ -903,9 +1046,57 @@ def build_views(
                 status,
                 reasons,
                 RETAILER_CODE_BY_ID.get(stored.retailer_id, ""),
+                terms=terms,
+                notes=price_note_codes(stored.bundle_flag, terms, offer_terms_policy),
+                search_targets=tuple(dict.fromkeys(
+                    (search_context or {}).get(stored.observation_id, ())
+                )),
             )
         )
     return views, excluded
+
+
+def offer_terms_effect(
+    views: Sequence[ObservationView], week: ReportWeek, policy: str
+) -> dict[str, object]:
+    """Price eligibility of this week's exact matches under each offer-terms policy.
+
+    Identity is held fixed (the same stored matches), so the difference is the effect of the
+    commercial-terms policy alone.
+    """
+    exact = [view for view in views if view.week_start == week.start and view.is_exact]
+    by_policy: dict[str, dict[str, str]] = {}
+    for name in OFFER_TERMS_POLICIES:
+        by_policy[name] = {
+            view.stored.observation_id: comparability(
+                view.stored, view.match, terms=view.terms, policy=name
+            )[0]
+            for view in exact
+        }
+    changes = [
+        {
+            "observation_id": view.stored.observation_id,
+            "offer_url": view.stored.offer_url,
+            "target_id": view.target_id,
+            "offer_terms_category": view.terms.category if view.terms else "",
+            "offer_terms_evidence": list(view.terms.evidence) if view.terms else [],
+            **{name: by_policy[name][view.stored.observation_id] for name in by_policy},
+        }
+        for view in exact
+        if len({by_policy[name][view.stored.observation_id] for name in by_policy}) > 1
+    ]
+    return {
+        "active_policy": policy,
+        "week_exact_observations": len(exact),
+        "comparable_by_policy": {
+            name: sum(1 for status in result.values() if status == COMPARABLE)
+            for name, result in by_policy.items()
+        },
+        "terms_categories": dict(sorted(Counter(
+            view.terms.category for view in exact if view.terms
+        ).items())),
+        "observations_whose_eligibility_depends_on_the_policy": changes,
+    }
 
 
 def build_price_tracking(
@@ -917,10 +1108,17 @@ def build_price_tracking(
     week: ReportWeek,
     as_of: datetime,
     history_start: date | None = None,
+    offer_terms_policy: str = DEFAULT_OFFER_TERMS_POLICY,
+    search_context: Mapping[str, Sequence[str]] | None = None,
 ) -> PriceTrackingResult:
     if as_of < week.start_utc:
         raise PriceTrackingInputError("--as-of is before the report week starts.")
-    views, excluded = build_views(observations, matches, as_of=as_of, last_week=week)
+    if offer_terms_policy not in OFFER_TERMS_POLICIES:
+        raise PriceTrackingInputError(f"Unknown offer terms policy: {offer_terms_policy}")
+    views, excluded = build_views(
+        observations, matches, as_of=as_of, last_week=week,
+        offer_terms_policy=offer_terms_policy, search_context=search_context,
+    )
     first_week = ReportWeek(
         history_start
         if history_start is not None
@@ -996,9 +1194,13 @@ def build_price_tracking(
             for row in selections
             if row["retailer_code"] == code and row["price_status"] == SELECTED
         )
-    for status in (SELECTED, NO_COMPARABLE_OFFER, REVIEW_REQUIRED_ONLY, NO_OBSERVATION_IN_WEEK):
+    for status in (SELECTED, NO_COMPARABLE_OFFER, REVIEW_REQUIRED_ONLY, CANDIDATE_NOT_CONFIRMED,
+                   NO_OBSERVATION_IN_WEEK):
         counts[f"cells_{status}"] = sum(1 for row in selections if row["price_status"] == status)
-    return PriceTrackingResult(comparison, selections, history, series, review, counts)
+    return PriceTrackingResult(
+        comparison, selections, history, series, review, counts,
+        offer_terms_effect(views, week, offer_terms_policy),
+    )
 
 
 def _comparison_row(
@@ -1045,10 +1247,13 @@ def _comparison_row(
             if linked_offer else "",
             f"{code}_Warnings": ";".join(filter(None, (
                 _warnings(linked_offer),
-                ";".join(price_note_codes(linked_offer.stored.bundle_flag))
-                if linked_offer else "",
+                ";".join(linked_offer.notes) if linked_offer else "",
             ))),
             f"{code}_Reason": cell_reason(selection),
+            f"{code}_Candidate_URL": selection.candidate.stored.offer_url
+            if selection.candidate and not chosen else "",
+            f"{code}_Candidate_Status": selection.candidate_status if not chosen else "",
+            f"{code}_Candidate_Detail": selection.candidate_detail if not chosen else "",
         }
         if chosen:
             observed[code] = chosen
@@ -1082,8 +1287,7 @@ def _minimum(
             local_text(view.stored.retrieved_at) for _, view in tied
         ),
         f"{prefix}_Notes": ";".join(
-            f"{code}:{note}" for code, view in tied
-            for note in price_note_codes(view.stored.bundle_flag)
+            f"{code}:{note}" for code, view in tied for note in view.notes
         ),
     }
     if stock:
@@ -1107,7 +1311,18 @@ def cell_reason(selection: Selection) -> str:
     if selection.status == NO_COMPARABLE_OFFER:
         return "EXACT_PRICE_EXCLUDED: " + selection.not_comparable_reasons
     if selection.status == REVIEW_REQUIRED_ONLY:
-        return f"MATCH_REVIEW_REQUIRED: {selection.review_required} observation(s)"
+        return f"MATCH_REVIEW_REQUIRED: {selection.review_required} observation(s)" + (
+            f"; {selection.candidate_status}: {selection.candidate_detail}"
+            if selection.candidate is not None else ""
+        )
+    if selection.status == CANDIDATE_NOT_CONFIRMED:
+        candidate = selection.candidate
+        assert candidate is not None
+        return (
+            f"CANDIDATE_NOT_CONFIRMED: {selection.candidate_status}"
+            + (f" ({selection.candidate_detail})" if selection.candidate_detail else "")
+            + f"; observed {local_text(candidate.stored.retrieved_at)}"
+        )
     if selection.stale is not None:
         stale = selection.stale.stored
         return (
@@ -1166,16 +1381,22 @@ def _selection_row(
         "match_basis": match_basis_from_codes(selection.chosen.match.reason_codes)
         if selection.chosen else "",
         "match_warnings": _warnings(selection.chosen),
-        "price_notes": ";".join(price_note_codes(chosen.bundle_flag)) if chosen else "",
+        "price_notes": ";".join(selection.chosen.notes) if selection.chosen else "",
         "in_stock_price": in_stock.price_text if in_stock else "",
         "in_stock_offer_url": in_stock.offer_url if in_stock else "",
         "in_stock_retrieved_at_utc": utc_text(in_stock.retrieved_at) if in_stock else "",
         "in_stock_observation_id": in_stock.observation_id if in_stock else "",
-        "in_stock_price_notes": ";".join(price_note_codes(in_stock.bundle_flag))
-        if in_stock else "",
+        "in_stock_price_notes": ";".join(selection.chosen_in_stock.notes)
+        if selection.chosen_in_stock else "",
         "latest_exact_offer_url": latest.offer_url if latest else "",
         "latest_exact_availability": latest.availability if latest else "",
         "latest_exact_retrieved_at_utc": utc_text(latest.retrieved_at) if latest else "",
+        "candidate_offer_url": selection.candidate.stored.offer_url
+        if selection.candidate and not chosen else "",
+        "candidate_status": selection.candidate_status if not chosen else "",
+        "candidate_detail": selection.candidate_detail if not chosen else "",
+        "candidate_observation_id": selection.candidate.stored.observation_id
+        if selection.candidate and not chosen else "",
     }
     return {column: row[column] for column in SELECTION_COLUMNS}
 
@@ -1247,6 +1468,10 @@ def _history_rows(
                 "matching_context_id": context.context_id,
                 "target_master_sha256": context.target_master_sha256,
                 "matching_rules_version": context.matching_rules_version,
+                "offer_terms_category": view.terms.category if view.terms else "",
+                "offer_terms_evidence": " | ".join(view.terms.evidence) if view.terms else "",
+                "price_notes": ";".join(view.notes),
+                "search_context_target_ids": ";".join(view.search_targets),
             }
         )
         if view.status == COMPARABLE:
@@ -1340,6 +1565,9 @@ def _review_row(
         "comparability_status": view.status,
         "comparability_reasons": ";".join(view.reasons),
         "matching_context_id": context.context_id,
+        "offer_terms_category": view.terms.category if view.terms else "",
+        "offer_terms_evidence": " | ".join(view.terms.evidence) if view.terms else "",
+        "search_context_target_ids": ";".join(view.search_targets),
     }
     return {column: row[column] for column in REVIEW_COLUMNS}
 

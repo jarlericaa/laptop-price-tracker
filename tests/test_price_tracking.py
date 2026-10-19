@@ -18,6 +18,7 @@ from test_verified_top import load_script
 
 from laptop_tracker.match_run import matcher_from_validated
 from laptop_tracker.observation_store import ObservationStore, observation_id
+from laptop_tracker.offer_terms import BUNDLE_FLAG_POLICY, DEFAULT_OFFER_TERMS_POLICY
 from laptop_tracker.offers import (
     OBSERVATION_COLUMNS,
     OFFER_DETAIL_COLUMNS,
@@ -164,6 +165,8 @@ def run(
     history_start=None,
     forced: dict[str, str] | None = None,
     store_name="store.sqlite3",
+    policy=DEFAULT_OFFER_TERMS_POLICY,
+    search_context=None,
 ):
     tm = validate_target_master(target_values(*targets))
     assert tm.is_valid
@@ -186,7 +189,8 @@ def run(
             reason_codes=(),
         )
     return build_price_tracking(
-        stored, matches, selected, context, week=week, as_of=as_of, history_start=history_start
+        stored, matches, selected, context, week=week, as_of=as_of, history_start=history_start,
+        offer_terms_policy=policy, search_context=search_context,
     )
 
 
@@ -332,12 +336,13 @@ def test_price_rules_keep_offers_in_history_with_their_status(tmp_path, changes,
     result = run(tmp_path, [excluded])
 
     if not reason:
+        # The synthetic bundle states a free bag: an ordinary inclusion (2026-10-19 policy).
         comparison = row(result, "TGT-000001")
         assert comparison["LF_Price"] == "10.00"
-        assert comparison["LF_Warnings"] == "BUNDLE_OFFER"
-        assert comparison["Lowest_Price_Notes"] == "LF:BUNDLE_OFFER"
-        assert comparison["Lowest_In_Stock_Notes"] == "LF:BUNDLE_OFFER"
-        assert selection(result, "TGT-000001")["price_notes"] == "BUNDLE_OFFER"
+        assert comparison["LF_Warnings"] == "INCLUDED_ITEMS_OFFER"
+        assert comparison["Lowest_Price_Notes"] == "LF:INCLUDED_ITEMS_OFFER"
+        assert comparison["Lowest_In_Stock_Notes"] == "LF:INCLUDED_ITEMS_OFFER"
+        assert selection(result, "TGT-000001")["price_notes"] == "INCLUDED_ITEMS_OFFER"
         kept = history(result, excluded)
         assert (kept["comparability_status"], kept["comparability_reasons"]) == ("COMPARABLE", "")
         assert kept["bundle_flag"] == "TRUE"
@@ -845,8 +850,9 @@ def test_no_in_stock_offer_leaves_the_in_stock_minimum_blank(tmp_path) -> None:
 
 
 def test_out_of_stock_bundle_is_comparable_with_a_note(tmp_path) -> None:
+    # The earlier bundle-flag policy stays selectable and keeps its BUNDLE_OFFER note.
     bundled = offer(price="10.00", availability=Availability.OUT_OF_STOCK, bundle=True)
-    result = run(tmp_path, [bundled])
+    result = run(tmp_path, [bundled], policy=BUNDLE_FLAG_POLICY)
     assert history(result, bundled)["comparability_reasons"] == ""
     assert history(result, bundled)["comparability_status"] == "COMPARABLE"
     comparison = row(result, "TGT-000001")
@@ -854,3 +860,58 @@ def test_out_of_stock_bundle_is_comparable_with_a_note(tmp_path) -> None:
     assert comparison["LF_Warnings"] == "BUNDLE_OFFER"
     assert comparison["Lowest_Price_Notes"] == "LF:BUNDLE_OFFER"
     assert comparison["Lowest_In_Stock_Price"] == ""
+
+
+# Blank cells name their unconfirmed candidate (2026-10-19)
+
+
+def _with_spec(model: str, label: str, value: str | None) -> tuple[tuple[str, str], ...]:
+    rows = [(name, value if name == label else current) for name, current in MODELS[model]]
+    return tuple(row for row in rows if row[1] is not None)
+
+
+def test_same_model_different_configuration_is_named_beside_a_blank_price(tmp_path) -> None:
+    eight = offer(slug="eb14-0001-8gb", specs=_with_spec("EB14-0001", "RAM", "8GB DDR5"),
+                  price="900.00")
+    result = run(tmp_path, [eight])
+    comparison = row(result, "TGT-000001")
+    assert comparison["LF_Price"] == "" and comparison["Lowest_Price"] == ""
+    assert comparison["LF_Price_Status"] == "CANDIDATE_NOT_CONFIRMED"
+    assert comparison["LF_Candidate_URL"] == eight.offer_url
+    assert comparison["LF_Candidate_Status"] == "SAME_MODEL_DIFFERENT_CONFIGURATION"
+    assert comparison["LF_Candidate_Detail"] == "ram_capacity_gb: offer 8 vs target 16"
+    assert comparison["LF_Reason"].startswith(
+        "CANDIDATE_NOT_CONFIRMED: SAME_MODEL_DIFFERENT_CONFIGURATION (ram_capacity_gb"
+    )
+    chosen = selection(result, "TGT-000001")
+    assert (chosen["price"], chosen["candidate_offer_url"]) == ("", eight.offer_url)
+    assert result.counts["cells_CANDIDATE_NOT_CONFIRMED"] == 1
+
+
+def test_unresolved_offer_with_search_context_is_not_reported_as_not_observed(tmp_path) -> None:
+    no_ram = offer(slug="eb14-no-ram", specs=_with_spec("EB14-0001", "RAM", None),
+                   price="400.00")
+    plain = run(tmp_path, [no_ram], store_name="plain.sqlite3")
+    assert row(plain, "TGT-000001")["LF_Price_Status"] == "NO_OBSERVATION_IN_WEEK"
+    linked = run(tmp_path, [no_ram], store_name="linked.sqlite3",
+                 search_context={observation_id(no_ram): ["TGT-000001"]})
+    comparison = row(linked, "TGT-000001")
+    assert comparison["LF_Price_Status"] == "CANDIDATE_NOT_CONFIRMED"
+    assert comparison["LF_Candidate_Status"] == "EXTRACTION_INCOMPLETE"
+    assert "MISSING_RAM_CAPACITY_GB" in comparison["LF_Candidate_Detail"]
+    # The unconfirmed price never becomes a comparison value or a minimum.
+    assert (comparison["LF_Price"], comparison["Lowest_Price"]) == ("", "")
+    kept = history(linked, no_ram)
+    assert (kept["target_id"], kept["search_context_target_ids"]) == ("", "TGT-000001")
+
+
+def test_offer_terms_effect_is_reported_separately_from_matching(tmp_path) -> None:
+    bundled = offer(price="10.00", bundle=True)
+    result = run(tmp_path, [bundled])
+    effect = result.terms_effect
+    assert effect["active_policy"] == DEFAULT_OFFER_TERMS_POLICY
+    assert effect["terms_categories"] == {"INCLUDED_ITEMS": 1}
+    assert effect["comparable_by_policy"] == {
+        DEFAULT_OFFER_TERMS_POLICY: 1, BUNDLE_FLAG_POLICY: 1,
+    }
+    assert effect["observations_whose_eligibility_depends_on_the_policy"] == []
