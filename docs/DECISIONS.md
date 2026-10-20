@@ -206,3 +206,280 @@ Requested revision, implemented locally; owner acceptance after a real-data repl
 - Unchanged: five required fields, no fuzzy/four-of-five matching, no suffix removal, exact screen
   sizes, explicit capacity units, catalog/mappings/approvals untouched, stock eligibility and the
   two minimums.
+
+## Pilot acceptance fixes: lineage, continuation, supplied URLs, DataBlitz (2026-10-19)
+
+Requested in the pilot acceptance review; implemented locally and replayed on the reviewed run's
+saved evidence. Owner acceptance is pending.
+
+- **Coverage lineage.** An offer explains a configuration/retailer pair only through recorded
+  lineage: matched to it, collected by a manifest request made for it, selected for collection as
+  its search candidate (a page evaluated for two configurations keeps both relations), or a
+  matcher near-match of the same model. A search result rejected for the configuration
+  (`DIFFERENT_MODEL_CODE`, `UNRELATED`, `FAMILY_ONLY`) stays in `coverage_offers.csv` as
+  `REJECTED_SEARCH_RESULT` for audit and never explains the cell, even when the same page was
+  collected for another configuration. Requested (`expected_target_id`) and confirmed
+  (`assigned_target_id`) targets stay in separate columns; offer rows carry the `request_id`.
+- **"Same model, different configuration"** is reserved for RAM/storage options of one
+  manufacturer model code (or any field of a family-name model such as `MacBook Air`). The same
+  code stating another screen size or processor family is an `IDENTITY_CONFLICT` (an unresolved
+  specification discrepancy; no tolerance, no catalog change). Another model collected for the
+  configuration is `DIFFERENT_MODEL`. Searches that returned only other models are
+  `NO_RELEVANT_CANDIDATE`; searches that returned nothing stay `NO_CANDIDATE_FOUND`.
+- **Blank cells.** With `track_prices.py --discovery-dir` (a discovery of the report week only),
+  a cell with no related offer takes the week's recorded search outcome (`NO_RELEVANT_CANDIDATE`,
+  `NO_CANDIDATE_FOUND`, `SEARCH_FAILED`, `FETCH_FAILED`, `CANDIDATE_NOT_FETCHED`,
+  `DISCOVERY_NOT_ATTEMPTED`) with its explanation, using the same rule as `coverage.csv`; offer
+  outcomes keep `CANDIDATE_NOT_CONFIRMED` (identity conflict, extraction failure, other
+  configuration) and `NO_COMPARABLE_OFFER` (excluded price). Unconfirmed amounts never become a
+  price or a minimum. Publication accepts these statuses.
+- **Discovery stopping policy.** A plausible title stops the fallback searches only until
+  collection decides. If no collected candidate of the job is an exact match for the job's own
+  configuration, the job resumes its remaining query tiers in the next round (at most
+  `--max-discovery-rounds`, default 3), skipping pages already evaluated, within the same
+  request limits. The job ends `SUITABLE_OFFER_FOUND` (identity only: the price may still be
+  excluded), `QUERY_PLAN_EXHAUSTED`, `BUDGET_EXHAUSTED` (request, query or round limit),
+  `PROVIDER_FAILURE`, or `SEARCH_INCOMPLETE_REPLAY_ONLY`. A match to another configuration remains
+  valid for that configuration and never completes the initiating search.
+- **Supplied URLs.** Known pages go in `config/supplied_candidate_urls.csv`. They are discovery
+  seeds, never approvals, matches, aliases or target assignments: normalized without tracking
+  parameters (variant kept), accepted unchanged by the adapter, assigned to a scoped job by an
+  explicit search hint or by the complete model code in the URL handle, and checked directly
+  (bounded) when native search misses them, which is recorded as incomplete search coverage. A
+  `--seed-urls` file must now state `match_status`; a file without it no longer seeds every row
+  as a historical exact match.
+- **DataBlitz.** A maximum stated inside one flattened row after the installed amount
+  (`DDR4-3200 8GB RAM Max up to 64GB 2 Slots`) is split off as `ram_maximum_gb`; the installed
+  amount is kept. Limits inside a breakdown, lone limits and two installed amounts are unchanged
+  (inseparable, not installed, ambiguous). Reviewed labels `Standard Memory`,
+  `Storage Capability` and `Storage Capacity` map to memory/storage. A code written after an
+  accessory noun in a bundle-item segment that does not name a laptop (`+ Acer Entry Run Rate
+  Backpack E-1620-P`) is an `accessory_identifier`, never a laptop model code; two laptop codes
+  still need review, and title models still need the four independent fields.
+- Unchanged: five required fields, exact screen sizes, no fuzzy or four-of-five matching, no
+  suffix stripping, catalog/mappings/approvals untouched, stock eligibility, bundle notes, the two
+  minimums, Asia/Singapore Monday weeks, and no carry-forward of earlier-week prices.
+
+## Catalog identity, title evidence and recheck links (second review, 2026-10-19)
+
+Requested after the top-100 run `top100_supervised_20261019T052548Z` (30 price cells, 16
+configurations priced). Matching stays five-field exact; nothing below weakens it.
+
+- **Identity kinds.** A catalog `model` is a manufacturer model code, a reviewed marketed product
+  name (`config/product_name_registry.csv`, e.g. `MacBook Neo`, `MacBook Air`, `MacBook Pro`) or a
+  broad family name (`IdeaPad`, `Aspire`, `Aspire Lite`, `Victus`, `Vivobook`). An unreviewed name
+  counts as a family name. Each registry row states its evidence and review date; the registry is
+  part of the matching-rules hash. A family name cannot identify one product (several coded
+  products share its five fields), so no offer is ever confirmed for a family-name target: such a
+  cell is `CATALOG_IDENTITY_UNRESOLVED` and points at the catalog reconciliation.
+- **Product-name presentation.** For a registered product name only, a leading repeated brand and
+  a registered colour in parentheses are presentation (`Apple Macbook Neo (Citrus)` →
+  `MacBook Neo`, recorded as `MODEL_NAME_PRESENTATION_NORMALIZED` with the original text kept).
+  Nothing else is removed: no suffix stripping, prefix matching, joining or fuzzy comparison, and a
+  value containing a code keeps the code rules. `MacBook Neo 13-inch`, `MacBook Neo Pro`,
+  `MacBook` and `MacBookNeo` are not `MacBook Neo`. The CPU-family policy is unchanged; Apple chip
+  modifiers are identity (`A18` ≠ `A18 Pro`).
+- **Title evidence (supersedes the 2026-10-15 rule that a title could only corroborate).** A
+  product title's explicit statements are matching evidence for screen, CPU, RAM and storage,
+  including the joined RAM+storage form (`8GB+256GB`, `16GB / 1TB`: at most 128GB, then at least
+  128GB or a TB amount; two memory or two storage amounts do not qualify). A clear title statement
+  supplies a field the specifications do not state (`TITLE_SUPPLIED_<FIELD>`, scope `TITLE`, the
+  raw title kept as the evidence). A title statement that contradicts the specifications makes
+  the field `AMBIGUOUS` (`TITLE_SPEC_CONFLICT_<FIELD>`), routed to review. The title of a page
+  whose specifications are shared by several variants describes the parent product and never
+  supplies or overrides the selected variant. A title model (a code, or a registered product name:
+  `TITLE_PRODUCT_NAME_CORROBORATED`) still needs the four other fields established; they may now
+  come from the title. URL wording never establishes a field, and nothing is ever filled from the
+  initiating target.
+- **Catalog reconciliation (`reconcile_catalog.py`).** For each selected target whose model is a
+  name, the target's own contributing source listings decide. One consistent manufacturer code, no
+  contrary specification and no other target with that code → `SUPPORTED_CORRECTION`, applied
+  only in a local DIAGNOSTIC snapshot and selected list (target ID and mappings kept; the former
+  name moves to `series` and `notes`). Otherwise `DUPLICATE_OF_EXISTING_TARGET`,
+  `MULTIPLE_PRODUCTS`, `CONFLICTING_SOURCE_SPECS` or `INSUFFICIENT_EVIDENCE`, each with an owner
+  action. Retailer offers with the same specifications are listed only as leads, never as
+  evidence; refurbished seller descriptors (`X280-i5`, `L570-i5-7th-8G`) are not manufacturer
+  codes; one code supported for two targets is never applied. No alias is created and the Sheet is
+  never written: the owner applies corrections in `TARGET_MASTER`.
+- **Discovery relevance.** Code targets search codes first; product-name targets search the name
+  and the name with specifications; family-name targets search only the name and name+specs to
+  gather review leads (`FAMILY_NAME_LEAD_CATALOG_UNRESOLVED`, never collected). Code-spelling
+  rules apply only to code targets. Accessories are rejected from the listing before any
+  inspection (`REJECTED_ACCESSORY`). Identical query texts (any case) are sent once and the
+  response cache spans all rounds, so the search limit is cumulative and a resumed search never
+  resends a page. `SEARCHES_EXHAUSTED` is renamed `QUERY_PLAN_EXHAUSTED`; `BUDGET_EXHAUSTED` now
+  means only a request, query or round limit. A result page is flagged `RESULT_CAP_REACHED`
+  (Shopify predictive search returns at most 10 results and has no pagination) or
+  `MORE_PAGES_NOT_READ`. A single named-variant Shopify page is collected at its `?variant=` URL;
+  DataBlitz `ProductGroup.hasVariant` JSON-LD is read.
+- **Recheck links.** A blank comparison cell lists the relevant pages that did not become a
+  confirmed comparable offer (fetched but unconfirmed, fetch failed, listed but not fetched, at
+  most three family-name leads), most useful first, each with a short reason ("Different
+  configuration — 256GB storage; target requires 512GB", "Not fetched — collection budget
+  reached", "Matches another target: TGT-…"). The exact variant URL is kept; stock and time are
+  shown only when observed. Accessories, unrelated results and other models are never listed. A
+  recheck amount is labelled unconfirmed and never fills a price cell, the comparable-retailer
+  count or a minimum. Files: `recheck_candidates.csv` (every link) and
+  `{code}_Recheck_Count`/`{code}_Recheck_Note` in the comparison. Sheets publisher
+  `pilot-sheets-3` adds "recheck link (unconfirmed)" and "recheck note" columns per retailer to
+  `PILOT_PRICE_COMPARISON` (filled only beside a blank price, with "+N more in
+  PILOT_PRICE_REVIEW") and "Recheck candidate (unconfirmed)" rows to `PILOT_PRICE_REVIEW`.
+- **Extraction repairs.** `LPDDR5X 16GB` no longer reads as 80GB (a capacity must not follow a
+  letter or digit); curly-quote inch marks are read; DataBlitz `Chip`, `CPU and chipset`,
+  `Panel Size`, `Panel Details`, `Display Size`, `Internal Storage`; Octagon `Display Size`,
+  `Panel Size`, `Internal Storage` and the `Expansion Slots` heading; PC Express `Processors`. PC
+  Express and PC Central compare percent-escaped handles decoded (`pcx-3`, `pcc-5`).
+- Unchanged: five required fields, exact screen sizes, MSI 8GB/16GB kept separate, the actual
+  target independent of the searched-for target, PCX TUF and Octagon Swift conflicts kept, the URL
+  slug warning, bundle and out-of-stock labels, the in-stock minimum, no carry-forward of history,
+  Asia/Singapore Monday weeks.
+
+## Independent review fixes (2026-10-19)
+
+Review: `data/output/independent_review_2026-10-19/REVIEW.md`. Validation:
+`data/output/review_fixes_2026-10-19/REVIEW_FIXES_REPORT.md`. This section tightens the second
+review's title-evidence rule above; nothing else in it changes.
+
+- **Title capacities keep their structure** (`extraction._title_capacities`). Every amount in a
+  title is read with its role before anything is deduplicated: RAM (RAM/memory/DDR words), storage
+  (SSD/HDD/eMMC/UFS/storage), or not installed (external/portable/USB drive, or free/bonus/extra/
+  optional wording before it). Maximum and optional clauses are removed first. A breakdown after
+  an amount (`16GB (2x8GB)`) is accepted only when it adds up. `+`-joined components of one role
+  are summed under the established component rule (`512GB SSD + 512GB SSD` = 1024;
+  `16GB RAM + 16GB RAM` = 32), never collapsed. Several separate amounts of one role
+  (`512GB SSD / 1TB SSD`, a repeated `16GB RAM`), an inconsistent breakdown, or an unlabeled
+  amount joined to a labeled one (`8GB/16GB RAM`) make the field `AMBIGUOUS` (review, no target).
+  The joined `8GB+256GB` form is kept only for an unlabeled amount up to 128GB joined to an
+  installed one of at least 128GB, and not as part of a longer list. External and extra amounts
+  are kept as supporting evidence (`TITLE_NOT_INSTALLED_<FIELD>`).
+- **Secondary claims in accepted titles.** An unshared page title's explicit GPU model (RTX/GTX/
+  MX numbers, Radeon RX), panel type (IPS, IPS-Level, OLED) and resolution (numeric, or the
+  precise VESA names WUXGA and WQXGA) are supplied like core title statements, so the matcher's
+  existing blocking conflict policy sees them. They are never mandatory: an unstated value stays
+  unknown, and a target without the value is not compared. A title contradicting the page's own
+  rows makes the field `AMBIGUOUS` (`TITLE_SPEC_CONFLICT_<FIELD>`); IPS-Level in one place and IPS
+  in the other is not a contradiction. Several different title values stay supporting only. A
+  shared parent title supplies nothing. GPU models are compared in a canonical form
+  (`RTX4050` = `RTX 4050` = `GeForce RTX 4050 Laptop GPU`).
+- **Resolution names.** Only WUXGA (1920x1200) and WQXGA (2560x1600) establish a resolution from a
+  name. FHD, Full HD, FHD+ and QHD are used loosely by retailers (PC Express writes
+  `Full-HD WUXGA`), so they are kept as supporting `resolution_name` evidence with their nominal
+  size. HD, 2K, 3K and UHD are not read.
+- **Offers that disagree.** When the offers chosen for one configuration state different
+  resolutions, panel types or GPUs, every one of those cells gets the warning
+  `OFFERS_DISAGREE_<FIELD>` and the review queue gets one row per offer listing each retailer's
+  statement (a loose name shown as nominal). Nothing decides which source is right; prices,
+  counts and minima are unchanged. This surfaces the PC Express `14" Full-HD IPS` wording for
+  AL14-45P-R10U against DataBlitz/Laptop Factory WUXGA 1920x1200 (the catalog records no
+  resolution for TGT-000182), and Laptop Factory's `WUXGA (1920x1200) OLED` for SF14-51-553D
+  against DataBlitz/Octagon 2880x1800.
+- **URL paths** (`url_paths.normalized_path`; `pcx-4`, `pcc-6`). Paths compare in RFC 3986 normal
+  form: escape hex digits in upper case, escaped unreserved characters decoded, literal non-ASCII
+  encoded. An escaped `/` (`%2F`) is never a separator, `%25` is never decoded twice, path case is
+  kept, and queries (variant IDs) are not part of the comparison. `pcx-3`/`pcc-5` decoded every
+  escape and could merge distinct products.
+- **Reconciliation duplicates.** A duplicate needs the same complete identity (code, screen, CPU
+  family, RAM, storage) and no material secondary difference (the matcher's blocking fields); the
+  same identity with such a difference is `SAME_CORE_SECONDARY_CONFLICT`. The same code with
+  another RAM/storage configuration is a different configuration, flagged for information only.
+  Proposals are grouped the same way. Duplicate actions say owner review: nothing is merged.
+  `INSUFFICIENT_EVIDENCE` means unresolved under the current evidence and parser, not
+  permanently unpriceable.
+- **Family-name leads** are ranked by evidence: a title naming the target's own recorded
+  manufacturer code or part number first (a catalog field, never a confirmed match), then more
+  agreeing title clues. A bare number in screen-size range without a unit that differs from the
+  target's screen is shown as unverified ("title has '16' without a unit (target screen 14";
+  not a verified screen size)") and ranks the lead lower; it is never read as inches.
+- Unchanged: five required core fields, title statements may supply missing core fields, A18 and
+  A18 Pro distinct, LPDDR5X not a module count, installed vs maximum capacity, DataBlitz Neo 256GB
+  to TGT-000003 only, MSI 8GB not on the 16GB target, PCX TUF and Octagon Swift conflicts,
+  approved bundles comparable and labelled, out-of-stock never the in-stock minimum,
+  Asia/Singapore weeks.
+
+## Listed-spec comparison for broad-family targets (2026-10-20)
+
+Intentional policy change: a missing manufacturer model code in Shopee no longer prevents a
+useful price comparison. Code: `src/laptop_tracker/listed_spec.py`.
+
+- **Three outcomes.** *Exact product match*: a specific identity is established and the required
+  specifications match (unchanged rules; model codes and reviewed product names such as MacBook
+  Neo). *Listed-spec match*: the target's catalog model is a broad family name (`IdeaPad`,
+  `Aspire Lite`, `Victus`, any unreviewed name), so no specific identity is available, but the
+  brand, family and required listed specifications match. *Review / different configuration*:
+  required evidence is missing, conflicting or different. A listed-spec match is never labelled
+  an exact product match.
+- **Requirements**, all from the offer's own evidence (nothing is filled from the target):
+  - The target records a brand. The page's brand field, or the brand as a whole word in the
+    title, matches it. A brand field naming another brand without the target brand in the title
+    is a mismatch.
+  - The family name appears in the title. Case, spacing and punctuation are presentation, and a
+    joined spelling (`Idea Pad`/`IdeaPad`) is the same name. There is no prefix or fuzzy
+    matching.
+  - Screen size, CPU series (the approved family forms; `Core i5`, `Core 5` and `Core Ultra 5`
+    stay distinct; Apple chip modifiers are kept), installed RAM and installed storage are all
+    extracted and equal.
+  - No contradictory identity evidence: conflicting model claims, several model codes, or an
+    ambiguous model.
+  - A manufacturer code the target records (`manufacturer_model_code`) is an identity
+    requirement. Another code in the title, or another designation as the page's model, excludes
+    the offer; the fallback never bypasses it.
+  - No material secondary specification the target records (the matcher's blocking fields: GPU,
+    panel, resolution, part number, ...) is contradicted or made ambiguous. A field the target
+    does not record stays unknown and never blocks.
+- **Different processor numbers within the accepted family** stay eligible. The actual numbers
+  are reported and a difference from the target's recorded `cpu_model` is the warning
+  `CPU_NUMBER_DIFFERS_FROM_TARGET_RECORD`.
+- **Ambiguity rule.** Targets with a verified secondary conflict are excluded first. The most
+  specific family name stated in the title wins (`IdeaPad Slim 5` over `IdeaPad`), and the
+  broader targets are recorded. If several equally specific targets remain, the offer is
+  `LISTED_SPEC_AMBIGUOUS`: it prices none of them and every association goes to review. The
+  target a search was made for is never preferred.
+- **Associations, not assignments.** The stored match (and any exact assignment to a code target)
+  is never rewritten. The listed-spec association is reported beside it: the history columns
+  `listed_spec_status`, `listed_spec_target_ids`, `listed_spec_ambiguous_target_ids`,
+  `listed_spec_comparability` and `listed_spec_comparability_reasons`. One offer can be an exact
+  match for a code target and a listed-spec match for a family target at the same time.
+- **Prices.** A listed-spec match prices the retailer cell under the same price rules (stock,
+  purchase terms, PHP, price type), only when that retailer has no comparable exact offer for
+  the target. Each retailer counts once, and both minimums include it. The cell's match basis is
+  `LISTED_SPEC` and its warnings start with `SPECIFIC_IDENTITY_UNRESOLVED`. `Offer_Details` keeps
+  the offer's actual model, processor, GPU, panel and resolution. Minimums that include
+  listed-spec prices are labelled "Lowest price matching listed specs" and "Lowest in-stock price
+  matching listed specs", with the winning offer's basis (`EXACT_PRODUCT`, `LISTED_SPEC`, `MIXED`).
+  Cross-retailer secondary differences (`OFFERS_DISAGREE_<FIELD>`) apply unchanged.
+- **Discovery.**
+  - Family targets search brand, family and specifications as before.
+  - A listing stating the brand and family (`FAMILY_LISTED_SPEC_CANDIDATE`) is ranked and
+    collected within the per-retailer limit; incomplete titles are still collected.
+  - A listing stating the target's own recorded code ranks first. One stating another code is
+    not collected for it.
+  - A listing whose title states another configuration is not fetched, and does not end the
+    search.
+  - Non-laptops (desktops, all-in-ones, mini PCs, handhelds, tablets, routers, monitors,
+    printers, components) are rejected before any request (`REJECTED_PRODUCT_TYPE`), as are
+    accessories.
+  - A collected listed-spec match is a suitable offer for the job. A listing without the brand
+    stays a review lead.
+  - Result caps, pagination and budgets are reported as before.
+- **GPU rows.** A labelled graphics row ("Graphics", "GPU", "Graphics Card", ...) now supplies
+  the discrete GPU model for every retailer (canonical form), so a target's recorded GPU can be
+  checked. Integrated graphics are not read and stay unknown.
+- **Shared parent titles.** Their secondary hardware (GPU, panel, resolution) applies to the
+  selected variant only when the variants are proven to differ in RAM and storage alone. Shared
+  titles never supply RAM or storage.
+- **Coverage.** `LISTED_SPEC_PRICE_AVAILABLE` ("Listed-spec price available; specific identity
+  unresolved") and `LISTED_SPEC_PRICE_EXCLUDED` sit beside `PRICE_AVAILABLE` ("Exact-product
+  price available"), with a `price_basis` column. Family cells without a qualifying offer give
+  the specific reason (different configuration, required specifications missing, conflicting
+  evidence, another family). `CATALOG_IDENTITY_UNRESOLVED` is used only when listings name the
+  family without the brand.
+- **Sheets (`pilot-sheets-4`).**
+  - A listed-spec status reads "Comparable price; listed-spec match — brand, family, screen, CPU
+    series, installed RAM and storage agree; specific Shopee model unknown", followed by the
+    offer's own details.
+  - New columns: "Lowest observed price basis", "Lowest in-stock price basis" and "Comparison
+    basis". The pilot-sheets-3 header is still recognised.
+  - Validation accepts a listed-spec price only from a comparable listed-spec association of
+    that observation.
+- **Catalog reconciliation** stays useful (specific identities make exact matches), but it is no
+  longer a prerequisite for a broad-family comparison. Catalog corrections are not applied.

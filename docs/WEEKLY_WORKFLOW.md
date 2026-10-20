@@ -1,6 +1,6 @@
 # Weekly workflow: from Google Sheets to retailer prices
 
-Updated: **2026-10-15**. This guide describes the commands that exist today.
+Updated: **2026-10-19**. This guide describes the commands that exist today.
 
 ## Quick navigation
 
@@ -119,7 +119,7 @@ Validated copies may add `source_row_number` to trace problems back to Sheets. T
 | `collection/request_report.csv`, `collection/request_failures.csv` | Collection success/failure details. |
 | `collection/collection_run_summary.json` | Counts, fingerprints, store changes and matching context. |
 
-Search can use titles and URLs to find candidates. A similar title does not fill missing trusted specifications. The collector reads the page and the matcher checks the five fields, including any explicitly recorded owner approvals.
+Search can use titles and URLs to find candidates. The collector reads the page and the matcher checks the five fields, including any explicitly recorded owner approvals. Since 2026-10-19 (second review) the page's own product title counts as evidence: an explicit title statement (`13"`, `A18 Pro Chip`, `8GB+256GB`) fills a field the specification rows omit, and a title statement contradicting the rows sends the offer to review. A shared parent title on a multi-variant page never overrides the selected variant, and URL wording never fills a field.
 
 ### Price reports and persistent history
 
@@ -132,6 +132,7 @@ Search can use titles and URLs to find candidates. A similar title does not fill
 | `price_history.csv` | Dated observations under the current matching context. |
 | `price_review_queue.csv` | Matching problems and excluded prices in report history. |
 | `configuration_source_ledger.csv` | Marketplace links, historical GMV and available Shopee snapshot prices. |
+| `recheck_candidates.csv` | Every relevant unconfirmed page for each blank cell (with `--discovery-dir`): stage, short reason, exact URL, stock/time when observed, any amount labelled unconfirmed. Never a price. |
 | `price_tracking_run_summary.json` | Week, cutoff, policy, sales snapshot label, counts and fingerprints. |
 | `publications/*/publication_report.json` | Preview/write outcome, local backups, destination links and readback issues. |
 
@@ -235,6 +236,19 @@ python check_target_tables.py --from-sheets \
 
 **Outputs:** three `*_validated.csv` snapshots plus validation reports. Continue when all three pass. No Sheet changes occur.
 
+**Optional - reconcile name-identified targets (local).** Many targets record a family name (`IdeaPad`, `Aspire`, `Victus`) as `model`; no retailer page can confirm those until the catalog names the product. After Step 3, run:
+
+```bash
+python reconcile_catalog.py \
+  --target-master "$weekly_run/inputs/target_master_validated.csv" \
+  --selected-list "$weekly_run/verified_top_100/top_100_verified_configurations.csv" \
+  --contributions "$weekly_run/verified_top_100/verified_configuration_contributions.csv" \
+  --match-results "$weekly_run/discovery/collection/match_results.csv" \
+  --output-dir "$weekly_run/catalog_reconciliation"
+```
+
+It writes `catalog_reconciliation.csv` (one row per selected target: original value, proposed code, source listings, evidence, retailer corroboration, conflicts, status and owner action), `owner_migration_report.md`, and DIAGNOSTIC copies of the catalog and selected list with only the `SUPPORTED_CORRECTION` rows changed. Apply supported corrections in `TARGET_MASTER` yourself (same target ID), then export again. Retailer offers with matching specifications are listed as leads only. A duplicate proposal needs the same complete configuration and no material secondary difference; the same code with another RAM/storage configuration is not a duplicate, and nothing is merged automatically. `INSUFFICIENT_EVIDENCE` means unresolved under the current evidence and parser, not permanently unpriceable: review those targets one by one. Nothing is written to Sheets. `--match-results` is optional.
+
 ### Step 3 - Rebuild and audit the verified Top 100
 
 ```bash
@@ -330,7 +344,13 @@ The collector backs up history before import. Observations accumulate across wee
 
 Finding a result does not guarantee a match. Since 2026-10-15 a page without a model row can still match when its title shows exactly one full model code and the other four fields come from the page's own specifications (`TITLE_MODEL_CORROBORATED`). Conflicting model rows or URLs, unexplained suffixes such as `OPI`, and ambiguous specifications stay in review.
 
-**Known search gap:** Laptop Factory appeared to omit sold-out pages in the October 13 search pilot. Since 2026-10-19, add `--seed-store data/history/price_history.sqlite3` (or `--seed-urls <earlier collection>/match_results.csv`) to `pilot_args` so offer URLs that matched a scope configuration `EXACT` before are re-checked as `HISTORICAL_VERIFIED_URL` candidates; they are re-fetched and re-matched, never carried forward. Searches now continue past results that show only another RAM/storage configuration or an unresolved code (`search_jobs.csv` records the tiers run and why each job stopped). To replay a saved discovery offline, rerun it with `--live --replay-only --search-cache <saved discovery folder>` into a new output folder (no request is sent; no collection). Otherwise retain reviewed known URLs for recollection with `collect_and_match.py` when needed. `--baseline-manifest` only measures discovery coverage; it does not automatically fetch missing old URLs. Earlier-week prices are never carried into a new week as current prices.
+**Known search gap:** Laptop Factory appeared to omit sold-out pages in the October 13 search pilot. Since 2026-10-19, add `--seed-store data/history/price_history.sqlite3` (or `--seed-urls <earlier collection>/match_results.csv`) to `pilot_args` so offer URLs that matched a scope configuration `EXACT` before are re-checked as `HISTORICAL_VERIFIED_URL` candidates; they are re-fetched and re-matched, never carried forward. A `--seed-urls` file must have a `match_status` column; only its `EXACT` rows seed. Searches continue past results that show only another RAM/storage configuration or an unresolved code (`search_jobs.csv` records the tiers run and why each job stopped). `--baseline-manifest` only measures discovery coverage; it does not automatically fetch missing old URLs. Earlier-week prices are never carried into a new week as current prices.
+
+**Known pages the search misses (supplied URLs, 2026-10-19).** List them in `config/supplied_candidate_urls.csv` (`supplied_id, retailer_id, url, search_target_id, supplied_by, supplied_on, notes`). Discovery reads that file automatically (`--supplied-urls <file>` to use another, `--no-supplied-urls` to skip it). Each URL is normalized (tracking parameters such as `srsltid`/`utm_*` and the fragment removed; the path and `?variant=` kept) and must be accepted unchanged by the retailer's adapter. It seeds the scoped configuration named in `search_target_id` (a search hint, never an assignment), otherwise every scoped configuration whose complete model code appears in its URL handle; anything else is reported `UNASSIGNED_NO_CODE_IN_URL` and not fetched. When the native search does not return the page, it is checked directly as a bounded fallback (`SUPPLIED_URL` candidate; at most `--max-supplied-urls-per-target-retailer`, within the product-fetch budget) and the job's `search_coverage` says `NATIVE_SEARCH_MISSED_SUPPLIED_URL`. A supplied URL is never a match, alias or approval: the page's own evidence and the matcher decide. `discovery/supplied_urls.csv` records what happened to each one.
+
+**Continuation after collection (2026-10-19).** A plausible title is not suitability. Discovery now runs in rounds (`--max-discovery-rounds`, default 3): search, rank, collect and match; then a job that stopped at `PLAUSIBLE_CANDIDATE_FOUND` whose collected candidates did not confirm *its own* configuration (another configuration, unresolved, unmatched or a failed fetch) resumes its remaining query tiers in the next round. Pages already evaluated are skipped (never fetched twice), every round shares the same request limits, and the original candidate keeps its actual outcome; a match to another configuration stays valid for that configuration. `search_jobs.csv` records `initial_stop_reason`, `resumed`, `resume_reason`, `tiers_after_resume` (tier:outcome), pages and requests used after resuming, `candidate_outcomes`, and `discovery_outcome`: `SUITABLE_OFFER_FOUND` (an exact identity match; its price may still be excluded, see reports), `QUERY_PLAN_EXHAUSTED`, `BUDGET_EXHAUSTED` (request, query or round limit), `PROVIDER_FAILURE`, or `SEARCH_INCOMPLETE_REPLAY_ONLY`. `search_coverage` flags `POSSIBLY_TRUNCATED` result caps, unsent pages and provider failures. Collection rounds are kept in `discovery/collection_rounds/` and merged into `discovery/collection/`.
+
+**Offline replay.** To replay a saved discovery, rerun it with `--live --replay-only --search-cache <saved discovery folder>` into a new output folder; no request is sent. Add `--collect --replay-collection <saved discovery>/collection` to replay collection too: URLs that collection already fetched reuse their saved observation records unchanged (current rules match them again), pages saved by a `--search-cache` inspection are parsed, and anything else is `NOT_SENT_REPLAY_ONLY`. Nothing is stored; import the replayed `observations.csv` only into a scratch copy of a store. Otherwise retain reviewed known URLs for recollection with `collect_and_match.py` when needed.
 
 ### Step 7 - Generate weekly reports from local history
 
@@ -362,9 +382,12 @@ python track_prices.py \
   --sales-ranking "$weekly_run/inputs/eligible_model_ranking.csv" \
   --week-start "$week_start" \
   --as-of "$as_of" \
+  --discovery-dir "$weekly_run/discovery" \
   --output-dir "$weekly_run/reports" \
   | tee "$weekly_run/price_report.log"
 ```
+
+`--discovery-dir` (2026-10-19) must be this week's discovery: a folder whose discovery started outside the report week is refused. It links collected offers to the configurations they were requested or selected for, and gives every blank cell without a related offer the week's recorded search outcome instead of a generic `NO_OBSERVATION_IN_WEEK`: `NO_RELEVANT_CANDIDATE` (searches returned only other models or unrelated items, kept in `candidates.csv` for audit), `NO_CANDIDATE_FOUND` (no results), `SEARCH_FAILED`, `FETCH_FAILED`, `CANDIDATE_NOT_FETCHED` or `DISCOVERY_NOT_ATTEMPTED`, with the explanation in `<code>_Reason`. These are the same rules and words as `coverage.csv`. Earlier weeks in the series never take them.
 
 **Does:** uses cumulative local history and this run's catalog/list to create six price/history/ledger CSVs plus a summary. No retailer or Google Sheets request occurs.
 
@@ -373,6 +396,12 @@ No `--observations` argument is needed: Step 6 imported the collection already. 
 **Current policy:** valid displayed PHP prices from exactly matched IN_STOCK **and OUT_OF_STOCK** offers are eligible. A selected sold-out price is labeled OUT OF STOCK. Since 2026-10-19 purchase terms decide bundles: an ordinary offer with stated inclusions (Office, warranty, backpack) is comparable and labeled `INCLUDED_ITEMS_OFFER`; a paid package, a price requiring another purchase, a restricted (financing, card, trade-in, member) price, or bundle wording without evidence of the terms is excluded with that reason. Add `--offer-terms-policy bundle-flag/2026-10-15` to reproduce the earlier rule; `price_tracking_run_summary.json` → `offer_terms_effect` lists every exact match whose eligibility differs between the two rules (identity held fixed). Unknown bundle status, preorder/unknown availability, unknown price type and unresolved matches stay excluded. No accessory value is deducted; no missing price becomes zero; vouchers/shipping are not inferred.
 
 Add `--search-context "$weekly_run/discovery/collection/match_results.csv"` to the command above so a blank price can name the offer found for that configuration that is not a confirmed match (`<code>_Candidate_URL`, `_Candidate_Status`, `_Candidate_Detail`, cell status `CANDIDATE_NOT_CONFIRMED`). Its price is never shown or used in a minimum.
+
+**Recheck links (2026-10-19, second review).** With `--discovery-dir`, every blank cell lists the relevant pages that did not become a confirmed comparable offer: pages fetched but not confirmed (e.g. "Different configuration — 256GB storage; target requires 512GB", "Extraction incomplete — CPU not established", "Conflicting model statements", "Matches another target: TGT-…"), failed fetches, and relevant search results that were not fetched ("Not fetched — collection budget reached"). Family-name targets show up to three listings under the family name ("Catalog identity unresolved"), best supported first: a title naming the target's own recorded code, then more agreeing clues; a unitless number that differs from the target's screen is shown as unverified (2026-10-19, independent review). The first link and its reason go in `<code>_Candidate_URL` / `<code>_Recheck_Note`, the number of links in `<code>_Recheck_Count`, and all of them in `recheck_candidates.csv`. Accessories, unrelated results and other models are never listed, and a recheck amount never becomes a price, a counted retailer or a minimum. A family-name target's blank cell is `CATALOG_IDENTITY_UNRESOLVED`; fix it through the catalog reconciliation (Step 2), not the matcher.
+
+**Listed-spec prices (2026-10-20).** A broad-family target (catalog model such as `IdeaPad` or `Aspire Lite`) is now priced by offers whose own page states the same brand, family, screen, CPU series, installed RAM and installed storage, with no contradicted recorded code or secondary specification. Such cells show match basis `LISTED_SPEC`, the warning `SPECIFIC_IDENTITY_UNRESOLVED` and the offer's own details (`<code>_Offer_Details`); their minimums are labelled "matching listed specs". They are not exact product matches: check `Offer_Details` and the review queue's `LISTED_SPEC_MATCH` rows, and expect retailers to carry different specific models under one family. An offer that fits several family targets equally prices none of them (`LISTED_SPEC_AMBIGUOUS` in review). Discovery now collects listings that state the brand and family; the catalog reconciliation is still worth doing, but is no longer required for a comparison.
+
+**Offers that disagree (2026-10-19, independent review).** When the offers priced for one configuration state different resolutions, panel types or GPUs, each of those cells carries the warning `OFFERS_DISAGREE_<FIELD>` (shown in Sheets as "retailers state different ... (see review)") and the review queue lists each retailer's statement. Prices, counts and minima do not change; check the pages and the catalog record.
 
 Check week, cutoff, sales label, selections, lowest prices and review. The **lowest observed** price (`Lowest_Price`) can be sold out; the **lowest in-stock** price (`Lowest_In_Stock_Price`, 2026-10-15) uses only in-stock eligible offers and is blank when there is none. Each retailer cell now has its stock, observation time, match basis, warnings and a reason for any blank. Review contains historical observations too, so its count is not the number of fresh failures.
 
@@ -391,7 +420,7 @@ python coverage_report.py \
   --output-dir "$weekly_run/coverage"
 ```
 
-`coverage.csv` gives one status per pair: `PRICE_AVAILABLE` (comparable offer), `EXACT_PRICE_EXCLUDED`, `AMBIGUOUS_TARGET`, `IDENTITY_CONFLICT`, `MODEL_UNVERIFIED`, `EXTRACTION_INCOMPLETE` (specifications missing or extraction failed), `SAME_MODEL_DIFFERENT_CONFIGURATION`, `DIFFERENT_CONFIGURATION`, `FETCH_FAILED` (candidate found, fetching failed), `CANDIDATE_NOT_FETCHED`, `NO_CANDIDATE_FOUND`, `SEARCH_FAILED`, `DISCOVERY_NOT_ATTEMPTED` (including searches never sent because of a limit), or `UNKNOWN_COVERAGE` (no search record). Rows for configurations outside the scope appear only when an offer was confirmed for them (`CONFIRMED_OUTSIDE_SCOPE`). Each row has a `current_reason` sentence, `candidate_url`, `differing_fields`, `confirmed_price` and a separate `unconfirmed_candidate_price`, and the discovery `search_stop_reason`. Repeat `--observations`/`--match-results` for earlier collections: the latest observation of each offer decides, older ones stay as history. `coverage_offers.csv` keeps every offer behind it with its relation (`MATCHED` vs search context). "Not found" never means out of stock.
+`coverage.csv` gives one status per pair: `PRICE_AVAILABLE` (comparable offer), `EXACT_PRICE_EXCLUDED`, `AMBIGUOUS_TARGET`, `IDENTITY_CONFLICT` (including the same model code stating another screen or processor: an unresolved discrepancy, never another configuration), `MODEL_UNVERIFIED`, `EXTRACTION_INCOMPLETE` (specifications missing or extraction failed), `SAME_MODEL_DIFFERENT_CONFIGURATION` (only RAM/storage options of the same model code), `DIFFERENT_CONFIGURATION`, `DIFFERENT_MODEL` (a page collected for the configuration turned out to be another model), `FETCH_FAILED` (candidate found, fetching failed), `CANDIDATE_NOT_FETCHED`, `NO_RELEVANT_CANDIDATE` (results were only other models or unrelated), `NO_CANDIDATE_FOUND` (no results), `SEARCH_FAILED`, `DISCOVERY_NOT_ATTEMPTED` (including searches never sent because of a limit), or `UNKNOWN_COVERAGE` (no search record). Since 2026-10-19 an offer explains a pair only through recorded lineage: matched to it, collected by a manifest request made for it, selected for collection as its search candidate (one page evaluated for two configurations keeps both), or a matcher near-match of the same model. A search result rejected for the configuration is kept in `coverage_offers.csv` as `REJECTED_SEARCH_RESULT` (audit only), even when the same page was collected for another configuration. New columns: `relevant_candidates`, `rejected_search_results`, `discovery_outcome`; offer rows carry the `request_id`. Rows for configurations outside the scope appear only when an offer was confirmed for them (`CONFIRMED_OUTSIDE_SCOPE`). Each row has a `current_reason` sentence, `candidate_url`, `differing_fields`, `confirmed_price` and a separate `unconfirmed_candidate_price`, and the discovery `search_stop_reason`. Repeat `--observations`/`--match-results` for earlier collections: the latest observation of each offer decides, older ones stay as history. `coverage_offers.csv` keeps every offer behind it with its relation (`MATCHED` vs search context). "Not found" never means out of stock.
 
 ### Step 8 - Preview the tracker update
 
@@ -405,6 +434,8 @@ python publish_prices.py --preview \
 ```
 
 **Does:** validates reports and reads the four pilot destination tabs to check existing content/headers. No Sheet changes occur. Check counts, week, cutoff and sales-period label.
+
+Since publisher `pilot-sheets-3` (2026-10-19), `PILOT_PRICE_COMPARISON` has two extra columns per retailer after its observed time: `<Retailer> recheck link (unconfirmed)` (clickable exact URL) and `<Retailer> recheck note` (short reason, plus "+N more in PILOT_PRICE_REVIEW"). They are filled only where that retailer's price is blank. `PILOT_PRICE_REVIEW` lists every recheck page as a "Recheck candidate (unconfirmed)" row with its link, stage, stock/time when known and "not priced". The publisher refuses a recheck row beside a comparable price. The earlier comparison header is still recognised as the publisher's own, so the first write replaces it.
 
 ### Step 9 - Publish the reviewed reports
 
@@ -429,6 +460,7 @@ Finish with `Publication SUCCESS` and zero readback issues. Keep the run folder.
 | `check_target_tables.py --from-sheets` | Three catalog/review tabs | No | Validated CSVs/diagnostics | No |
 | `build_verified_top_100.py` with local inputs | No | No | Rankings, ledger, review priorities | No |
 | `audit_verified_top_100.py` with local inputs | No | No | Console audit result | No |
+| `reconcile_catalog.py` | No | No | Reconciliation CSV, owner report, DIAGNOSTIC catalog/list copies | No |
 | `discover_products.py --preview` | No | No | Query plan | No |
 | `discover_products.py --live --collect` | No | Yes | Evidence, observations, matches, store backup | No |
 | `track_prices.py` | No | No | Reports and pending versioned matches in the store | No |
@@ -488,7 +520,7 @@ It does **not** publish `P1_TOP_100_CONFIGURATIONS` or retailer-price tabs. See 
 - If search misses a known page, recollect its reviewed URL through `collect_and_match.py` with fresh inputs and a new output directory. Expected IDs must belong to the current verified list. Review a supplemental collection's own reports too.
 - Incomplete catalog candidates need evidence, reviewed promotion and mapping. Weekly commands do not manufacture specifications or create target IDs.
 - Good search results can still need model/specification review. PC Express model evidence and some new DataBlitz/Octagon/PCC layouts remain gaps from the October 13 pilot.
-- Shopify predictive search returns at most 10 results without pagination; broad queries can miss products. Empty results do not prove a store never sells a model.
+- Shopify predictive search returns at most 10 results without pagination; broad queries can miss products. Such pages are flagged `RESULT_CAP_REACHED` (and Laptop Factory pages with an unread next page `MORE_PAGES_NOT_READ`) in `search_requests.csv`: the query plan ran, but the retailer's catalog was not exhaustively searched. Empty results do not prove a store never sells a model.
 - No scheduled job is installed. Refresh, search, reporting and publication happen when the commands run.
 
 ## 8. When something stops

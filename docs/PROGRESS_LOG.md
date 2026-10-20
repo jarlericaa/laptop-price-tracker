@@ -284,3 +284,104 @@ with identical inputs against the previous commit and the revised tree:
 Tests: full suite passes (previously two bundle tests failed because their synthetic offers had no
 price type). No retailer requests, store imports, Sheets writes, catalog/mapping/approval edits or
 commits.
+
+## Pilot acceptance fixes and replay of the 2026-10-19 pilot (2026-10-19)
+
+Fixes for the acceptance review of `data/output/pilot_2026-10-19_20261019T023407Z`, replayed into
+`data/output/pilot_2026-10-19_acceptance_fixes_20261019T033529Z` (see DECISIONS.md for the rules).
+
+- **Coverage lineage.** Nine rows had borrowed offers collected for other targets through rejected
+  search results (e.g. PC Central TUF → the MSI Thin 15 page). They, and four former
+  `NO_CANDIDATE_FOUND` rows, are now `NO_RELEVANT_CANDIDATE` with the rejected results counted for
+  audit. PCX MSI keeps its genuine 8GB-vs-16GB explanation; the Octagon Swift 14.5" row is an
+  unresolved `IDENTITY_CONFLICT`, not another configuration.
+- **Blank cells.** `track_prices.py --discovery-dir` gives the 12 remaining unpriced,
+  offer-less pilot cells the week's search outcome (previously 13 generic
+  `NO_OBSERVATION_IN_WEEK`); coverage, review and comparison agree cell by cell.
+- **DataBlitz.** MSI `DDR4-3200 8GB RAM Max up to 64GB 2 Slots` → 8 GB installed, 64 GB maximum,
+  2 slots; `Storage Capability` → 512 GB; title model corroborated → EXACT `TGT-000219` (8GB,
+  outside the scope). Swift: `Standard Memory`/`Storage Capacity` labels, backpack `E-1620-P`
+  recorded as an accessory identifier → EXACT `TGT-000034` (67,995, bundle note).
+- **Continuation.** PCX TUF (identity conflict), Octagon Swift (screen conflict) and PCX MSI (8GB)
+  resumed their remaining tiers; the replay has no saved responses for them, so they end
+  `SEARCH_INCOMPLETE_REPLAY_ONLY` (no request sent). A live run is needed to finish them.
+- **Supplied URL.** `config/supplied_candidate_urls.csv` seeds the known PC Express Nitro page
+  (PCX predictive search returns nothing for `ANV15-42-R2UH`). One read-only GET of that URL was
+  made (HTTP 200, 2026-10-19T03:35:32Z) and saved as a fixture; it matched `TGT-000059` exactly by
+  its own evidence (title corroborated; 78,999, out of stock).
+
+Replay results: 23 observations (22 original records reused unchanged, matched under the new
+context; 1 new): EXACT 18 → 21, REVIEW 3 → 1, UNMATCHED 1 → 1; comparable pilot cells 17 → 19;
+expected-target differences only the two MSI 8GB pages. Previously exact assignments are
+unchanged. Reports used a scratch copy of the pre-pilot store; the history and pilot stores, the
+catalog, mappings, approvals and Sheets were not touched. Independent CSV checks: 26/26 pass on
+the replay (the original run fails 5). Tests: 1,594 pass.
+
+## Catalog identity, title evidence and recheck links (2026-10-19, second review)
+
+Policy: [DECISIONS.md](DECISIONS.md#catalog-identity-title-evidence-and-recheck-links-second-review-2026-10-19).
+Full sample report: `data/output/sample_validation_2026-10-19/SAMPLE_VALIDATION_REPORT.md`.
+
+- **Missed extraction (DataBlitz MacBook Neo).** The page has a `Chip` row (not a known CPU
+  label) and no model row; its title states every field in a joined `8GB+256GB` form that the
+  title parser did not read, and title statements could only corroborate. Now `Chip` is a
+  DataBlitz CPU label, the registered product name in the title is the model, title statements
+  fill missing fields (and contradicting ones go to review), and the joined form is read.
+- **Catalog reconciliation** (`reconcile_catalog.py`, output
+  `data/output/catalog_reconciliation_2026-10-19/`): of the 100 selected targets, 22 already have
+  a code and 21 a reviewed product name. Of the rest, 8 are `SUPPORTED_CORRECTION`
+  (TGT-000014/015/016 HP, 023 TUF A16, 040/182 Aspire Lite, 041 Vivobook S14, 066 ThinkBook
+  14s-IWL), 1 is `DUPLICATE_OF_EXISTING_TARGET` (TGT-000013 = TGT-000233, 14-ep0445TU), 1 is
+  `MULTIPLE_PRODUCTS` (TGT-000026) and 47 are `INSUFFICIENT_EVIDENCE` (including TGT-000005,
+  007 and 012). Applied only in a local DIAGNOSTIC snapshot; no Sheet edit.
+- **Saved observations replayed (157, offline):** EXACT 35 → 46 (52 with the corrections applied
+  locally), none lost or reassigned, each new match audited field by field.
+- **Fresh bounded sample (16 targets, 235 + 60 read-only requests):**
+  - Priced cells went from 13 to 17 (the four MacBook Neo cells), with no losses.
+  - With the corrections, Aspire Lite AL14-45P-R10U gained 3 cells and Vivobook S14 2.
+  - The DBZ 256GB Neo is exact for TGT-000003 only. For the 512GB target it is "Different
+    configuration — 256GB storage".
+  - Discovery had spent a candidate slot on it and skipped three 512GB colours. Fixed (joined
+    clue read in discovery) and verified offline.
+- **Sheets:** preview only (no write). The comparison tab gains recheck link/note columns per
+  retailer (23 links on blank cells), and the review tab gains 45 recheck rows.
+- Tests: 1,632 pass; ruff clean.
+
+## Independent review fixes (2026-10-19)
+
+Policy: [DECISIONS.md](DECISIONS.md#independent-review-fixes-2026-10-19). Report:
+`data/output/review_fixes_2026-10-19/REVIEW_FIXES_REPORT.md`.
+
+- Fixed: title capacity structure (the three false exact reproductions now go to review or no
+  match), title secondary claims (RTX 3050 vs RTX 4050 and IPS vs OLED now block), URL escape
+  normalization (`pcx-4`, `pcc-6`), full-identity duplicate proposals in the reconciliation, and
+  evidence-ranked family leads with unitless-number warnings. Added cross-offer display/GPU
+  disagreement warnings (no price effect) and fixed a shadowed parameter in
+  `track_prices.read_discovery` found during validation.
+- 157 saved observations: assignments identical before and after the fixes on both catalogs
+  (46 and 52 exact). Sample reports regenerated offline on store copies: no price, count or
+  minimum changed; 2 configurations gain disagreement warnings (TGT-000034, and TGT-000182 under
+  the DIAGNOSTIC catalog); family-lead links and notes improved.
+- Reconciliation: same 8 supported corrections, TGT-000013 duplicate retained under the
+  full-identity rule, TGT-000026 multi-product; 47 unresolved under current evidence.
+- No live request, Sheets access, store import, catalog or approval edit.
+
+## Listed-spec comparison for broad-family targets (2026-10-20)
+
+Policy: [DECISIONS.md](DECISIONS.md#listed-spec-comparison-for-broad-family-targets-2026-10-20).
+Report: `data/output/listed_spec_2026-10-20/LISTED_SPEC_REPORT.md`.
+
+- Implemented through discovery, matching outcomes, price eligibility, coverage, reports and the
+  Sheets publisher (`pilot-sheets-4`). Exact matching is unchanged; listed-spec associations are
+  reported beside stored matches, never written over them.
+- The audit found two HP Victus offers stating RTX 5050 against a target recording RTX 4050
+  that the GPU check could not see: a PC Central parent title (now read when its variants are
+  proven to differ in RAM/storage only) and a Laptop Factory "Graphics" row (labelled GPU rows
+  are now extracted for every retailer). Both are excluded by the GPU conflict.
+- 157 saved top-100 observations: exact assignments unchanged (46 unchanged catalog, 52
+  DIAGNOSTIC); 16 (10) listed-spec associations, each audited field by field.
+- Top-100 weekly report from saved observations (unchanged catalog): 50 priced cells, 39
+  exact-product and 11 listed-spec; 28 configurations priced (20 exact-only, 8 listed-spec-only).
+- Bounded fresh sample (21 targets, 290 read-only requests, scratch store): 16 exact-product and
+  10 listed-spec cells; 14 of 21 configurations priced; protected exact-code cases unchanged;
+  publisher preview (read-only) accepted the report.
