@@ -170,6 +170,12 @@ def synthetic_offer(
     )
 
 
+def supporting_values(name: str, field: str) -> list[str]:
+    """SUPPORTING evidence values for one field of a fixture."""
+    return [item.value for item in extract_offer_attributes(fixture_offer(name)).evidence
+            if item.field == field and item.status is ExtractionStatus.SUPPORTING]
+
+
 def statuses(name_or_offer: str | OfferObservation) -> dict[str, tuple[str, str]]:
     """Primary evidence per field; SUPPORTING items are checked separately."""
     offer = fixture_offer(name_or_offer) if isinstance(name_or_offer, str) else name_or_offer
@@ -212,14 +218,23 @@ def test_laptop_factory_unrecognized_cpu_and_missing_rows_stay_missing() -> None
         "ram_capacity_gb": (E, "8"),
         "storage_capacity_gb": (E, "256"),
     }
+    # "15.6″ FHD" is a loosely used marketing name: supporting only (2026-10-19).
+    assert supporting_values("lf_regular", "resolution_name") == ["Full HD (nominal 1920x1080)"]
     bundle = statuses("lf_bundle")
     assert bundle["cpu_series"] == (M, "")
     assert bundle["storage_capacity_gb"] == (M, "")
 
 
 def title_model_source(name: str) -> str:
+    return title_source(name, "model")
+
+
+def title_source(name: str, field: str) -> str:
     extracted = extract_offer_attributes(fixture_offer(name))
-    return next(item.source_label for item in extracted.evidence if item.field == "model")
+    return next(item.source_label for item in extracted.evidence if item.field == field)
+
+
+CORE = ("model", "screen_size_in", "cpu_series", "ram_capacity_gb", "storage_capacity_gb")
 
 
 def test_datablitz_extracts_labeled_rows_and_a_corroborated_title_model() -> None:
@@ -238,21 +253,25 @@ def test_datablitz_extracts_labeled_rows_and_a_corroborated_title_model() -> Non
     }
     regular = statuses("dbz_regular")
     assert regular["cpu_series"] == (U, "")
-    assert regular["ram_capacity_gb"] == (M, "")
+    # Policy 2026-10-19 (second review): the title's explicit RAM statement supplies the field
+    # the page's specification rows do not state.
+    assert regular["ram_capacity_gb"][0] == E
+    assert title_source("dbz_regular", "ram_capacity_gb").startswith("title [TITLE_STATEMENT")
 
 
-def test_datablitz_title_specs_are_never_used() -> None:
-    # The bundle fixture's title states RAM and storage, but it has no labeled rows.
+def test_datablitz_title_statements_supply_missing_fields() -> None:
+    # Policy 2026-10-19 (second review): the bundle fixture has no labeled rows; its title's
+    # explicit RAM and storage statements supply those fields, with the title as the source.
+    # Fields the title does not state stay missing; nothing comes from a catalog target.
     extracted = extract_offer_attributes(fixture_offer("dbz_bundle"))
     assert "16GB" in fixture_offer("dbz_bundle").raw_title
-    assert extracted.values == {"brand": "ExampleBrand"}
-    assert set(extracted.reason_codes) == {
-        "MISSING_MODEL",
-        "MISSING_SCREEN_SIZE_IN",
-        "MISSING_CPU_SERIES",
-        "MISSING_RAM_CAPACITY_GB",
-        "MISSING_STORAGE_CAPACITY_GB",
-    }
+    # The title's GPU is a secondary claim the matcher checks (2026-10-19, independent review).
+    assert extracted.values == {"brand": "ExampleBrand", "ram_capacity_gb": "16",
+                                "storage_capacity_gb": "1000", "gpu_model": "RTX 5060"}
+    assert {"TITLE_SUPPLIED_RAM_CAPACITY_GB", "TITLE_SUPPLIED_STORAGE_CAPACITY_GB"} <= set(
+        extracted.notes)
+    assert {"MISSING_MODEL", "MISSING_SCREEN_SIZE_IN", "MISSING_CPU_SERIES"} <= set(
+        extracted.reason_codes)
 
 
 def test_octagon_single_variant_uses_tech_specification_rows() -> None:
@@ -269,7 +288,12 @@ def test_octagon_single_variant_uses_tech_specification_rows() -> None:
 
 
 def test_octagon_unlabeled_bullets_are_not_evidence() -> None:
-    assert {status for status, _ in statuses("oct_sale").values()} == {M}
+    # Unlabeled bullets supply nothing; any extracted value comes from an explicit title
+    # statement (policy 2026-10-19, second review).
+    extracted = extract_offer_attributes(fixture_offer("oct_sale"))
+    for item in extracted.evidence:
+        if item.status.value == E and item.field in CORE:
+            assert item.source_label.startswith("title [TITLE_STATEMENT")
 
 
 def test_octagon_multi_variant_shared_description_is_not_trusted() -> None:
@@ -296,6 +320,8 @@ def test_pc_central_single_variant_extracts_model_and_secondary_details() -> Non
         "brand": "ExampleBrand",
         "display_type": "IPS",
         "refresh_rate_hz": "165",
+        # "RTX 5050" in the title is a secondary claim (2026-10-19, independent review).
+        "gpu_model": "RTX 5050",
     }
 
 
@@ -475,7 +501,12 @@ def test_unlisted_labels_and_titles_are_ignored() -> None:
         (("Model Number", "EB14"), ("Memory", "16GB")),  # Not LF labels in reviewed pages.
         raw_title="ExampleBook 14 | 14\" | Core i5 | 16GB | 512GB SSD",
     )
-    assert {status for status, _ in statuses(offer).values()} == {M}
+    found = statuses(offer)
+    # Unlisted labels supply nothing; the title's explicit statements do (2026-10-19). A bare
+    # "16GB" without a RAM word is not a RAM statement, and no model is taken from a name.
+    assert (found["model"], found["ram_capacity_gb"]) == ((M, ""), (M, ""))
+    assert (found["screen_size_in"], found["cpu_series"], found["storage_capacity_gb"]) == (
+        (E, "14"), (E, "Core i5"), (E, "512"))
 
 
 def test_unknown_retailer_has_no_extractor() -> None:

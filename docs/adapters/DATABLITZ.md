@@ -96,6 +96,21 @@ Aspire page's table says `Steel Gray` while its title says `Steam Blue` (`COLOR_
 and its `Model` row is `A14-11M-X3BP OPI`, which the owner explicitly keeps unresolved pending trusted documentation explaining
 `OPI`. No model suffix is stripped or aliased. CineCrystal wording is not read as OLED or IPS.
 
+## Reviewed 2026-10-19 layouts (extraction only; adapter `dbz-3` unchanged)
+
+- **MSI (`table-configurations`, `<th scope="row">` labels).** Cells use `<br>` lines that the
+  adapter flattens (`clean_text`), e.g. `Memory` = `DDR4-3200 8GB RAM Max up to 64GB 2 Slots`. The
+  extractor now splits the inline maximum (installed 8 GB; maximum 64 GB; 2 slots).
+  `Storage Capability` (`1x M.2 SSD slot (NVMe PCIe Gen4) 512GB SSD 1x 2.5" SATA HDD ...`) is a
+  storage label; the empty HDD bay states no capacity. No `Model` row: the title code is accepted
+  only with the existing corroboration.
+- **Acer (`<td><strong>` labels, `<th colspan="2">` section rows).** `Standard Memory` (`32 GB`)
+  and `Storage Capacity` (`1 TB NVMe SSD`) are memory/storage labels; section rows have no value
+  and are ignored. Bundle titles name the included backpack's code (`E-1620-P`), which is recorded
+  as an `accessory_identifier`, not a model code.
+- The Acer Swift SF14-51-553D page states 14" (as Laptop Factory); Octagon states 14.5". The
+  discrepancy is kept: the Octagon offer is an unresolved identity conflict, not a match.
+
 ## Versioning and maintenance
 
 - Bump `adapter_version` (`dbz-1` → `dbz-2` and so on) whenever parsing rules or assumptions change. Every observation records the version in `source.adapter_version`.
@@ -113,3 +128,15 @@ and its `Model` row is `A14-11M-X3BP OPI`, which the owner explicitly keeps unre
 - Bundle detection is keyword based and can over-flag, for example a title that mentions a monitor size, or under-flag freebies named with other words.
 - Brand comes from JSON-LD or the vendor link; MPN is blank on the reviewed pages. Phase 8 must use the raw title, specs, and categories as evidence without treating them as verified identity.
 - The adapter parses product pages only. Search is handled separately by `discover_products.py` (bounded, manual runs; see [SETUP_AND_OPERATIONS.md](../SETUP_AND_OPERATIONS.md#automatic-product-discovery-phase-10-manual-runs)); collection and category pages are not crawled.
+
+## Second review (2026-10-19)
+
+- Labels added: CPU `Chip`, `CPU and chipset`; display `Panel Size`, `Panel Details`,
+  `Display Size`; storage `Internal Storage`. Apple pages (`Chip: Apple A18 Pro chip ...`) and
+  ASUS pages (`Panel Size`, `Total System Memory`) now yield all four specification fields.
+- DataBlitz MacBook titles carry no code; the registered product name in the title
+  (`Apple MacBook Neo 13" 8GB+256GB A18 Pro Chip ... (Indigo) (MHFF4PP/A)`) is the model once the
+  four other fields are established (`TITLE_PRODUCT_NAME_CORROBORATED`). The colour and the Apple
+  part number are not part of the model.
+- Multi-variant discovery pages publish `ProductGroup.hasVariant` JSON-LD; discovery reads it.
+- `LPDDR5X` memory types no longer produce an 80GB capacity (Vivobook Flip TP3407SA reads 16GB).

@@ -82,7 +82,11 @@ def test_is_model_code(value: str, expected: bool) -> None:
         ("Intel Celeron N4020", {"Celeron N4020"}),
         ("Intel Celeron n4500", {"Celeron N4500"}),
         # Not supported: no brand on an Apple chip, no processor number, bare model numbers.
-        ("M5 chip", set()),
+        # A bare chip name counts only with the word "chip" (2026-10-19); the modifier stays.
+        ("M5 chip", {"Apple M5"}),
+        ("A18 Pro Chip", {"Apple A18 Pro"}),
+        ("A18 chip", {"Apple A18"}),
+        ("M5", set()),
         ("A18 Pro", set()),
         ("Intel Celeron processor", set()),
         ("Intel Pentium Silver N5030", set()),

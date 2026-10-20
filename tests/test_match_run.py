@@ -175,7 +175,10 @@ def test_cli_matches_observations_and_writes_traceable_reports(tmp_path: Path, c
     conflict = by_row["3"]
     assert conflict["target_id"] == ""
     assert conflict["candidate_target_ids"] == "TGT-000002"
-    assert conflict["reason_codes"] == "SECONDARY_CONFLICT;SECONDARY_CONFLICT_REFRESH_RATE_HZ"
+    # The page title states RTX 5050; the catalog row records integrated graphics (2026-10-19,
+    # independent review: title secondary claims reach the matcher's conflict check).
+    assert conflict["reason_codes"] == (
+        "SECONDARY_CONFLICT;SECONDARY_CONFLICT_REFRESH_RATE_HZ;SECONDARY_CONFLICT_GPU_MODEL")
 
     # The LF regular fixture's CPU row is not a recognized series, so it never reaches the
     # inactive TGT-000003 or any other target.

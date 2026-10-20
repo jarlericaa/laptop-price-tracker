@@ -154,7 +154,24 @@ def _secondary_key(field: str, value: object) -> str | tuple[int, int] | int | N
         if width <= 0 or height <= 0:
             raise ValueError
         return width, height
+    if field == "gpu_model":
+        # "RTX4050", "RTX 4050" and "GeForce RTX 4050 Laptop GPU" are one GPU (2026-10-19).
+        from .conventions import canonical_gpu_models
+
+        forms = canonical_gpu_models(str(value))
+        if len(forms) == 1:
+            return forms.pop().casefold()
     return text_key(value)
+
+
+def verified_secondary_difference(field: str, left: object, right: object) -> bool:
+    """True when both values are stated, parseable and different under the matcher's own
+    comparison (``_secondary_key``); a blank or unparseable value is never a difference here."""
+    try:
+        left_key, right_key = _secondary_key(field, left), _secondary_key(field, right)
+    except ValueError:
+        return False
+    return left_key is not None and right_key is not None and left_key != right_key
 
 
 def _display_value(value: object) -> str:
@@ -505,6 +522,19 @@ INACTIVE_TARGET = "INACTIVE_TARGET"
 
 
 SAME_MODEL_DIFFERENT_CONFIGURATION = "SAME_MODEL_DIFFERENT_CONFIGURATION"
+# An offer for another model altogether (2026-10-19 acceptance fixes). Only an offer that was
+# collected for the configuration, or confirmed for it, can carry this outcome for it.
+DIFFERENT_MODEL = "DIFFERENT_MODEL"
+# The target's catalog model is a broad family name (product_names.py): no offer can confirm it
+# until the catalog is reconciled; the offer's own model is kept in the explanation.
+CATALOG_IDENTITY_UNRESOLVED = "CATALOG_IDENTITY_UNRESOLVED"
+# The offer matches the listed specifications of a broad-family target (listed_spec.py,
+# 2026-10-20): comparable under that limited basis, never an exact product match.
+LISTED_SPEC_MATCH = "LISTED_SPEC_MATCH"
+# Core fields that vary between configurations of one manufacturer model code (memory and drive
+# options). A model code fixes the screen and processor family, so a difference there is an
+# unresolved specification conflict, never another configuration of the same model.
+CONFIGURATION_OPTION_FIELDS: tuple[str, ...] = ("ram_capacity_gb", "storage_capacity_gb")
 
 
 def core_differences(
@@ -536,6 +566,126 @@ def describe_differences(differences: Iterable[tuple[str, str, str]]) -> str:
                      for field, offer, target in differences)
 
 
+def is_model_code(model: object) -> bool:
+    """True when the catalog model is one manufacturer model code (``B13UC-3474PH``), not a
+    family name (``MacBook Air``) whose configurations also differ in screen or processor."""
+    from .conventions import model_codes
+
+    text = "" if is_blank(model) else str(model).strip()
+    return bool(text) and [code.casefold() for code in model_codes(text)] == [text.casefold()]
+
+
+def listed_spec_outcome(
+    reason_codes: Iterable[str],
+    offer_attributes: Mapping[str, object],
+    target_row: Mapping[str, object],
+    title: str,
+) -> tuple[str, str] | None:
+    """The outcome of an offer for a broad-family target under the listed-spec policy
+    (``listed_spec.py``, 2026-10-20), or None when the target is not a family target.
+
+    ``LISTED_SPEC_MATCH`` when the listed specifications match (never ``MATCHED_CONFIGURATION``:
+    the product identity stays unresolved). Otherwise the specific reason: another brand or
+    family is ``DIFFERENT_MODEL``; a required field the page does not establish is
+    ``EXTRACTION_INCOMPLETE``; a listed field with another value is ``DIFFERENT_CONFIGURATION``;
+    contradictory identity evidence, a contradicted recorded code or secondary specification is
+    ``IDENTITY_CONFLICT``.
+    """
+    from . import listed_spec as spec
+
+    check = spec.check_target(target_row, offer_attributes, title, reason_codes)
+    mapping = {
+        spec.QUALIFIES: LISTED_SPEC_MATCH,
+        spec.BRAND_DIFFERS: DIFFERENT_MODEL,
+        spec.FAMILY_NOT_STATED: DIFFERENT_MODEL,
+        spec.BRAND_NOT_STATED: EXTRACTION_INCOMPLETE,
+        spec.REQUIRED_SPECS_MISSING: EXTRACTION_INCOMPLETE,
+        spec.LISTED_SPECS_DIFFER: DIFFERENT_CONFIGURATION,
+        spec.IDENTITY_EVIDENCE_CONFLICT: IDENTITY_CONFLICT,
+        spec.RECORDED_CODE_CONFLICT: IDENTITY_CONFLICT,
+        spec.SECONDARY_CONFLICT: IDENTITY_CONFLICT,
+        spec.TARGET_BRAND_MISSING: CATALOG_IDENTITY_UNRESOLVED,
+    }
+    if check.outcome == spec.NOT_FAMILY_TARGET:
+        return None
+    detail = check.detail
+    if check.qualifies and check.offer_details:
+        detail = f"{detail} {check.offer_details}"
+    return mapping[check.outcome], detail
+
+
+def configuration_outcome(
+    match_status: str,
+    assigned_target_id: str,
+    reason_codes: Iterable[str],
+    offer_attributes: Mapping[str, object],
+    target_id: str,
+    target_row: Mapping[str, object] | None,
+    *,
+    title: str | None = None,
+) -> tuple[str, str]:
+    """``(outcome, detail)`` of one matched offer for one configuration.
+
+    ``MATCHED_CONFIGURATION`` only when the offer was confirmed for ``target_id``. A confirmed
+    or complete offer for anything else is ``SAME_MODEL_DIFFERENT_CONFIGURATION`` only when the
+    model agrees and every differing field is a configuration option (RAM or storage for a model
+    code; any field for a family name). The same model code with another screen or processor is
+    an ``IDENTITY_CONFLICT`` (unresolved specification discrepancy, no tolerance applied), and
+    another model is ``DIFFERENT_MODEL``. Unresolved results keep their review outcome. Used to
+    explain a blank cell; never to assign a target.
+
+    With the offer's ``title`` (2026-10-20), a broad-family target is judged by the listed-spec
+    policy instead (``listed_spec_outcome``): ``LISTED_SPEC_MATCH`` or the specific reason it is
+    not one. Without a title the earlier family rule (``CATALOG_IDENTITY_UNRESOLVED``) applies.
+    """
+    codes = tuple(reason_codes)
+    if match_status == MatchStatus.EXACT and assigned_target_id == target_id:
+        return MATCHED_CONFIGURATION, ""
+    if title is not None and target_row:
+        listed = listed_spec_outcome(codes, offer_attributes, target_row, title)
+        if listed is not None:
+            confirmed = f"confirmed as {assigned_target_id}" if (
+                match_status == MatchStatus.EXACT and assigned_target_id) else ""
+            return listed[0], "; ".join(filter(None, (listed[1], confirmed)))
+    outcome = offer_outcome(match_status, codes)
+    differences = core_differences(offer_attributes, target_row or {})
+    detail = describe_differences(differences)
+    confirmed = f"confirmed as {assigned_target_id}" if (
+        match_status == MatchStatus.EXACT and assigned_target_id
+    ) else ""
+    if outcome not in {MATCHED_CONFIGURATION, DIFFERENT_CONFIGURATION}:
+        blocking = ";".join(review_codes(codes))
+        return outcome, "; ".join(filter(None, (blocking, detail)))
+    if is_blank(offer_attributes.get("model")) or any(
+        field == "model" for field, _, _ in differences
+    ):
+        from .product_names import FAMILY_NAME, default_registry
+
+        row = target_row or {}
+        if not is_blank(offer_attributes.get("model")) and default_registry().kind(
+            str(row.get("brand", "") or ""), str(row.get("model", "") or "")
+        ) == FAMILY_NAME:
+            return CATALOG_IDENTITY_UNRESOLVED, "; ".join(filter(None, (
+                confirmed,
+                f"catalog model '{row.get('model')}' is a broad family name; the offer states "
+                f"'{offer_attributes.get('model')}' (see the catalog reconciliation)",
+                describe_differences(d for d in differences if d[0] != "model"),
+            )))
+        return DIFFERENT_MODEL, "; ".join(filter(None, (confirmed, detail)))
+    if not differences:
+        # The five core values agree; only a secondary field told the targets apart.
+        return DIFFERENT_CONFIGURATION, "; ".join(filter(None, (
+            confirmed, "same core fields; secondary fields differ")))
+    options = (
+        CONFIGURATION_OPTION_FIELDS if is_model_code((target_row or {}).get("model"))
+        else tuple(name for name in CORE_MATCH_COLUMNS if name != "model")
+    )
+    if all(field in options for field, _, _ in differences):
+        return SAME_MODEL_DIFFERENT_CONFIGURATION, "; ".join(filter(None, (confirmed, detail)))
+    return IDENTITY_CONFLICT, "; ".join(filter(None, (
+        confirmed, f"same model code, conflicting specification: {detail} (unresolved)")))
+
+
 def offer_outcome(status: str, reason_codes: Iterable[str]) -> str:
     """One outcome per match result. ``DIFFERENT_CONFIGURATION`` needs a complete, verified core
     that no target has; it never names a target. A missing or unresolved model with the other
@@ -561,6 +711,10 @@ def match_basis_from_codes(reason_codes: Iterable[str]) -> str:
     tags = []
     if "TITLE_MODEL_CORROBORATED" in codes:
         tags.append("TITLE_MODEL_CORROBORATED")
+    if "TITLE_PRODUCT_NAME_CORROBORATED" in codes:
+        tags.append("TITLE_PRODUCT_NAME_CORROBORATED")
+    if "MODEL_NAME_PRESENTATION_NORMALIZED" in codes:
+        tags.append("MODEL_NAME_PRESENTATION_NORMALIZED")
     if any(code.startswith("OWNER_APPROVED_") for code in codes):
         tags.append("OWNER_APPROVED_INTERPRETATION")
     if "SHARED_CPU_DISPLAY_RAM_STORAGE_ONLY" in codes:
@@ -573,6 +727,7 @@ _BOOKKEEPING_CODES = frozenset({
     "MISSING_CORE_FIELDS", "INCOMPLETE_OR_INVALID_CORE_FIELDS",
     "MULTI_VARIANT_SHARED_DESCRIPTION", "SHARED_CPU_DISPLAY_RAM_STORAGE_ONLY",
     "EQUIVALENT_REPEATED_FACTS_DEDUPLICATED", "TITLE_MODEL_CORROBORATED",
+    "TITLE_PRODUCT_NAME_CORROBORATED", "MODEL_NAME_PRESENTATION_NORMALIZED",
 })
 
 

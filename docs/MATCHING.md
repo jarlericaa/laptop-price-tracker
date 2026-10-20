@@ -534,3 +534,79 @@ as for code-rule rows and titles; it was previously reduced to the code. Ordinar
 
 Saved results keep their context; these rules create a new matching context. Synthetic
 before/after replay results are in PROGRESS_LOG.md; a replay of the real saved pilot is pending.
+
+## Configuration outcomes, flattened maximums, and accessory codes (2026-10-19)
+
+Rules version `five-field-exact/configuration-lineage/2026-10-19` (a new matching context).
+
+**One rule for "why not this configuration".** `matching.configuration_outcome` explains an offer
+for one configuration, and both `coverage.csv` and the weekly comparison use it:
+`SAME_MODEL_DIFFERENT_CONFIGURATION` only when the model agrees and every differing field is a
+configuration option (RAM or storage for a manufacturer model code; any field for a family name
+such as `MacBook Air`); the same code with another screen size or processor family is an
+`IDENTITY_CONFLICT` ("same model code, conflicting specification ... (unresolved)"); another
+model is `DIFFERENT_MODEL`; unresolved results keep their review outcome. A matcher near-match
+hint (`candidate_target_ids`) relates an offer to a configuration only for the same model.
+
+**Flattened maximum clauses.** Inside one memory or storage clause, a maximum phrase with its own
+amount after an installed amount (`8GB RAM Max up to 64GB 2 Slots`, a DataBlitz cell whose line
+breaks were flattened) is split off: installed 8, `ram_maximum_gb` 64, `ram_slots` 2. Only
+outside parentheses, only when the phrase states a GB/TB amount (`up to 5600MHz` is not a
+capacity), and only when the wording before it states an amount.
+
+**Identifier kinds in titles.** `conventions.title_identifiers` separates laptop model codes,
+documented part numbers and included-accessory codes. A code written after an accessory noun
+(backpack, bag, sleeve, mouse, headset, keyboard, monitor, dock, ...) in a bundle-item segment
+(`+` or `|` separated) that does not name a laptop is an `accessory_identifier` supporting item,
+never a model code (`E-1620-P`). Context decides, never the catalog: a laptop-like code after
+"Backpack" is still not chosen, and two laptop codes still give `TITLE_MULTIPLE_MODEL_CODES`.
+Retailer SKUs stay with the adapters' identifier evidence.
+
+## Identity kinds, title evidence and product names (2026-10-19, second review)
+
+Decision record: [DECISIONS.md](DECISIONS.md#catalog-identity-title-evidence-and-recheck-links-second-review-2026-10-19).
+
+- **What the catalog model is** (`product_names.py`, `config/product_name_registry.csv`): one
+  manufacturer code (`MODEL_CODE`), a reviewed product name (`PRODUCT_NAME`: MacBook Neo/Air/Pro)
+  or a broad family name (`FAMILY_NAME`; also every unreviewed name). A model difference against a
+  family-name target is `CATALOG_IDENTITY_UNRESOLVED`, never another configuration and never a
+  match; `reconcile_catalog.py` proposes source-backed codes for those targets.
+- **Product-name presentation** (`conventions.normalize_product_name`): for registered names
+  only, a repeated leading brand and a registered colour in parentheses are removed
+  (`MODEL_NAME_PRESENTATION_NORMALIZED`, original kept). No suffix, prefix, joining or fuzzy rule.
+- **Title statements** (`extraction._apply_title_fields`): screen, CPU (Apple chip modifiers kept),
+  RAM, storage and the joined `8GB+256GB` form stated in the title fill a missing field
+  (`TITLE_SUPPLIED_<FIELD>`, scope `TITLE`) or make a contradicted field `AMBIGUOUS`
+  (`TITLE_SPEC_CONFLICT_<FIELD>`). Skipped on shared multi-variant descriptions; URLs never read.
+  A title model (code or registered product name, `TITLE_PRODUCT_NAME_CORROBORATED`) still needs
+  the four other fields established, which may now come from the title.
+- **Extraction repairs:** `LPDDR5X 16GB` reads 16 (not 80); curly inch marks; new DataBlitz,
+  Octagon and PC Express labels (see the adapter notes).
+- Replay of the 157 saved top-100 observations under these rules: EXACT 35 → 46 with no exact
+  match lost or reassigned (52 with the eight supported catalog corrections applied locally);
+  every new exact match was audited field by field
+  (`data/output/sample_validation_2026-10-19/new_exact_audit_saved_observations.csv`).
+
+## Title component structure and secondary claims (2026-10-19, independent review)
+
+Decision record: [DECISIONS.md](DECISIONS.md#independent-review-fixes-2026-10-19).
+
+- Title capacities are parsed mention by mention with their role and scope
+  (`_title_mentions`, `_title_capacities`) before any total is formed; repeated components are
+  summed, external/extra/maximum amounts never count, and unclear structure is `AMBIGUOUS`.
+- Title GPU, panel type and resolution claims reach the matcher's blocking secondary check;
+  `conventions.canonical_gpu_models` gives one form for equivalent GPU spellings.
+- Display rows: WUXGA/WQXGA establish a resolution; FHD/Full HD/FHD+/QHD are supporting
+  `resolution_name` evidence only.
+- Replay of the 157 saved top-100 observations with these rules: EXACT 46 (unchanged catalog) and
+  52 (DIAGNOSTIC catalog), the same observations assigned to the same targets as before the fix;
+  73 observations gained supporting or secondary evidence only
+  (`data/output/review_fixes_2026-10-19/replay_157/`).
+
+## Listed-spec comparison (2026-10-20)
+
+Decision record: [DECISIONS.md](DECISIONS.md#listed-spec-comparison-for-broad-family-targets-2026-10-20). `listed_spec.check_target` decides one offer against
+one broad-family target; `ListedSpecMatcher.associate` applies it across the catalog with the
+ambiguity rule. `matching.configuration_outcome(..., title=...)` returns `LISTED_SPEC_MATCH` or the
+specific reason for a family target, and is shared by the weekly report, coverage, rechecks and
+discovery. The exact matcher (`ExactMatcher`) is unchanged.

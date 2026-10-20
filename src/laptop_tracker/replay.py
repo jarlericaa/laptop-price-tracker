@@ -117,6 +117,14 @@ def price_comparability(
     """The weekly-comparison price rule applied to one offer, as a status plus reasons."""
     if result.status is not MatchStatus.EXACT:
         return f"NOT_PRICED: MATCH_{result.status.value}"
+    return offer_price_eligibility(observation, policy)
+
+
+def offer_price_eligibility(
+    observation: OfferObservation, policy: str = DEFAULT_OFFER_TERMS_POLICY
+) -> str:
+    """The weekly-comparison price rules alone (identity decided elsewhere, e.g. a listed-spec
+    association): ``COMPARABLE`` or ``NOT_COMPARABLE: <reasons>``."""
     details = observation.details
     reasons = price_rule_reasons(
         terms=classify_offer_terms(observation),

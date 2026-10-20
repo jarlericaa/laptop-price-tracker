@@ -36,6 +36,7 @@ from laptop_tracker.matching import (
     match_basis_from_codes,
     offer_outcome,
 )
+from laptop_tracker.normalization import CORE_MATCH_COLUMNS
 from laptop_tracker.observation_store import observation_id
 from laptop_tracker.offer_terms import BUNDLE_FLAG_POLICY
 from laptop_tracker.offers import IDENTIFIER, Availability, PriceType
@@ -111,13 +112,16 @@ def test_one_full_title_code_with_four_labeled_fields_matches_with_provenance() 
     assert supporting(page)["part_number_candidate"] == ["90NB1672-M00DD0"]
 
 
-def test_all_five_values_only_in_the_title_go_to_review() -> None:
+def test_all_five_values_stated_in_the_title_are_valid_evidence() -> None:
+    # Policy 2026-10-19 (second review) supersedes the 2026-10-15 rule that sent title-only
+    # evidence to review: explicit title statements are evidence, with the title as the source.
     page = pcx("ASUS Vivobook S16 S3607VA-RP181WSM | 16\" | Core 5 | 16GB RAM | 512GB SSD",
                specs=())
     result = match(page)
-    assert result.status is MatchStatus.REVIEW_REQUIRED
-    assert result.target_id is None
-    assert primary(page)["model"] == (M, "")
+    assert result.status is MatchStatus.EXACT
+    assert all(item.source_label.startswith("title [")
+               for item in extract_offer_attributes(page).evidence
+               if item.field in CORE_MATCH_COLUMNS and item.status.value == "EXTRACTED")
 
 
 @pytest.mark.parametrize(

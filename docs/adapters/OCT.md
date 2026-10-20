@@ -188,3 +188,10 @@ collections use `oct-3`. Since 2026-10-15 the extractor also maps Octagon `Model
 - Bundle detection is keyword based and can over-flag or under-flag.
 - robots.txt and Shopify's platform comments point agents to UCP/MCP catalog endpoints. No adapter for those exists. Using them would need its own review and would still be subject to Octagon's terms.
 - The adapter parses product pages only. Search is handled separately by `discover_products.py` (bounded, manual runs; see [SETUP_AND_OPERATIONS.md](../SETUP_AND_OPERATIONS.md#automatic-product-discovery-phase-10-manual-runs)); collection and category pages are not crawled.
+
+## Second review (2026-10-19)
+
+Labels added: display `Display Size`, `Panel Size`; storage `Internal Storage`; `Expansion
+Slots` ends the previous specification group. Octagon titles written as
+`MODEL/ CPU/ 16GB/ 1TB SSD/ 15.6"` now supply missing fields as title statements
+(`TITLE_SUPPLIED_<FIELD>`); a title that contradicts a specification row goes to review.

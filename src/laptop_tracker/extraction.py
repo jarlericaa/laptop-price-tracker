@@ -26,11 +26,14 @@ from enum import StrEnum
 from urllib.parse import urlsplit
 
 from .conventions import (
+    canonical_gpu_models,
     cpu_series_forms,
+    is_part_number_shape,
     labeled_cpu_series_forms,
     model_codes,
     normalize_hyphens,
     parse_text,
+    title_identifiers,
     title_model_codes,
 )
 from .evidence_approvals import read_approvals
@@ -44,6 +47,7 @@ from .offers import (
     OfferObservation,
     clean_text,
 )
+from .product_names import default_registry
 
 
 class ExtractionStatus(StrEnum):
@@ -177,14 +181,19 @@ def _labels(*names: str) -> frozenset[str]:
 RETAILER_LABELS: dict[str, RetailerLabels] = {
     "datablitz": RetailerLabels(
         model=_labels(),
-        cpu=_labels("CPU", "Processor"),
-        # "Size" and "Display Panel/ Resolution" rows on reviewed 2026-10-13 pages. A screen
+        # "Chip" (Apple) and "CPU and chipset" (Acer) rows on reviewed 2026-10-19 pages.
+        cpu=_labels("CPU", "Processor", "Chip", "CPU and chipset"),
+        # "Size" and "Display Panel/ Resolution" rows on reviewed 2026-10-13 pages; ASUS "Panel
+        # Size"/"Panel Details" and "Display Size" rows on reviewed 2026-10-19 pages. A screen
         # size still needs an inch marker (or the narrow size-label rule); "Size: 14.0" alone
         # stays UNPARSEABLE. "Dimensions" is not a display label.
-        display=_labels("Display", "Size", "Display Panel/ Resolution"),
-        # "Total System Memory" rows on reviewed 2026-10-15 ASUS pages.
-        memory=_labels("Memory", "Total System Memory"),
-        storage=_labels("Storage"),
+        display=_labels("Display", "Size", "Display Panel/ Resolution", "Panel Size",
+                        "Panel Details", "Display Size"),
+        # "Total System Memory" rows on reviewed 2026-10-15 ASUS pages; "Standard Memory" (Acer)
+        # and "Storage Capability" (MSI) / "Storage Capacity" (Acer) rows on reviewed 2026-10-19
+        # pages, in a <td><strong> label layout with <th colspan> section rows.
+        memory=_labels("Memory", "Total System Memory", "Standard Memory"),
+        storage=_labels("Storage", "Storage Capability", "Storage Capacity", "Internal Storage"),
         model_code=_labels("Model"),
         color=_labels("Color"),
         part_number=_labels("Part Number"),
@@ -200,9 +209,11 @@ RETAILER_LABELS: dict[str, RetailerLabels] = {
         model=_labels(),
         # "CPU" / "RAM" rows and an ASUS-style "Model" row seen on reviewed 2026-10-15 pages.
         cpu=_labels("Processor", "CPU and chipset", "CPU"),
-        display=_labels("Display"),
+        # "Display Size" / "Panel Size" and HP "Internal Storage" rows on reviewed 2026-10-19
+        # pages; "Expansion Slots" ends the previous group.
+        display=_labels("Display", "Display Size", "Panel Size"),
         memory=_labels("Memory", "RAM"),
-        storage=_labels("Storage"),
+        storage=_labels("Storage", "Internal Storage"),
         model_code=_labels("Model"),
         shared_variant_description=True,
         paragraph_layout=True,
@@ -212,6 +223,7 @@ RETAILER_LABELS: dict[str, RetailerLabels] = {
             "Specification", "Operating system", "Graphics", "Audio", "Webcam",
             "Wireless and networking", "Security", "Dimensions and weight",
             "Power adapter and battery", "Input and control", "Windows Desktop Apps",
+            "Expansion Slots",
         ),
     ),
     "pcc": RetailerLabels(
@@ -233,7 +245,8 @@ RETAILER_LABELS: dict[str, RetailerLabels] = {
     ),
     "pcx": RetailerLabels(
         model=_labels(),
-        cpu=_labels("Processor"),
+        # "Processors" rows on reviewed 2026-10-19 pages.
+        cpu=_labels("Processor", "Processors"),
         display=_labels("Display"),
         memory=_labels("Memory"),
         storage=_labels("Storage"),
@@ -251,6 +264,10 @@ MODEL_CLAIM_LABELS = _labels("Model", "Model Name", "Model Number", "Model No", 
 # Match basis tags (balanced policy, 2026-10-15). EXACT keeps its meaning; the basis records how
 # the five fields were supported.
 TITLE_MODEL_CORROBORATED = "TITLE_MODEL_CORROBORATED"
+# Product-name identities (2026-10-19, second review; see product_names.py).
+TITLE_PRODUCT_NAME_CORROBORATED = "TITLE_PRODUCT_NAME_CORROBORATED"
+TITLE_STATEMENT = "TITLE_STATEMENT"
+MODEL_NAME_NORMALIZED = "MODEL_NAME_PRESENTATION_NORMALIZED"
 DEDUPLICATED_ROWS = "[equivalent repeated facts deduplicated]"
 
 EXTRACTED_SECONDARY_FIELDS: tuple[str, ...] = (
@@ -269,7 +286,9 @@ _MARKS = re.compile("[®™℠]")
 # ordinary English and is not a unit.
 _SCREEN_SIZE = re.compile(
     r"(?<![0-9.])([0-9]{1,2}(?:\.[0-9]{1,2})?)"
-    r"(?:\s*(?:\"|″|”|''|-?\s*inch(?:es)?\b)|in\b)",
+    # Curly single quotes are also used as inch marks (``15.6’’``, ``14’``; PC Express rows,
+    # 2026-10-19, second review).
+    r"(?:\s*(?:\"|″|”|''|’’|′′|’|′|-?\s*inch(?:es)?\b)|in\b)",
     re.I,
 )
 # A display label that states its own unit ("Screen Size (inches)", "Display Size (in)").
@@ -279,12 +298,19 @@ _RESOLUTION = re.compile(r"(?<![0-9])([1-9][0-9]{2,4})\s*[x×]\s*([1-9][0-9]{2,4
 _REFRESH_RATE = re.compile(r"(?<![0-9.])([1-9][0-9]{1,2})\s*Hz\b", re.I)
 _DISPLAY_TYPE = re.compile(r"\b(IPS-Level|IPS|OLED)\b", re.I)
 _DISPLAY_TYPE_FORMS = {"ips-level": "IPS-Level", "ips": "IPS", "oled": "OLED"}
+# Specification-row labels that state the graphics processor (all retailers, 2026-10-20).
+_GPU_LABELS = frozenset({
+    "graphics", "gpu", "graphics card", "graphic card", "graphics processor", "video graphics",
+    "video card", "discrete graphics", "dedicated graphics", "vga", "graphics & display",
+})
 
 # Capacity layouts such as "2x 8GB", "1 x 8 GB", or "16GB*1" state count and per-module size.
 # A unit followed by "/s" or "ps" is a transfer rate ("16 Gb/s", "40Gbps"), never a capacity.
 _NOT_RATE = r"(?!/s|ps)"
+# The count must stand alone: in ``LPDDR5X 16GB`` the ``5X`` is the memory type, not 5 modules
+# (2026-10-19, second review: a DataBlitz ASUS row read as 80 GB).
 _COUNT_BY_SIZE = re.compile(
-    rf"(?<![0-9.])([1-9])\s*[x×*]\s*([0-9]+(?:\.[0-9]+)?)\s*(GB|TB)\b{_NOT_RATE}", re.I
+    rf"(?<![0-9.A-Za-z])([1-9])\s*[x×*]\s*([0-9]+(?:\.[0-9]+)?)\s*(GB|TB)\b{_NOT_RATE}", re.I
 )
 _SIZE_BY_COUNT = re.compile(
     rf"(?<![0-9.])([0-9]+(?:\.[0-9]+)?)\s*(GB|TB)\b{_NOT_RATE}\s*[x×*]\s*([1-9])(?![0-9.])",
@@ -307,6 +333,16 @@ _OPTIONAL_OPENER = (
 )
 _MAXIMUM_CLAUSE = re.compile(rf"\s*(?:{_MAXIMUM_OPENER})", re.I)
 _OPTIONAL_CLAUSE = re.compile(rf"\s*(?:{_OPTIONAL_OPENER})", re.I)
+# A maximum stated inside one flattened row after the installed amount (2026-10-19): DataBlitz
+# cells lose their line breaks, so "DDR4-3200<br>8GB RAM<br>Max up to 64GB<br>2 Slots" arrives as
+# "DDR4-3200 8GB RAM Max up to 64GB 2 Slots". The phrase must state its own amount ("Max up to
+# 64GB"); it is split off only when the wording before it states an amount too, so the installed
+# amount is kept and a lone limit is never read as installed capacity.
+_INLINE_MAXIMUM = re.compile(
+    rf"(?<=\S)\s+((?:max(?:imum)?\s+)?(?:{_MAXIMUM_OPENER})\s*(?:of\s+|capacity\s*:?\s*)?"
+    rf"[0-9]+(?:\.[0-9]+)?\s*(?:GB|TB)\b{_NOT_RATE})",
+    re.I,
+)
 _SCOPED_GROUP = re.compile(rf"\(\s*(?:{_MAXIMUM_OPENER}|{_OPTIONAL_OPENER})[^()]*\)", re.I)
 # A processor clause that describes the product line's options rather than this processor:
 # "(up to Core i7)", "/ configurable to Core i7", ", options up to Ryzen 7".
@@ -379,13 +415,28 @@ class _Unresolved(ValueError):
 _parse_text = parse_text
 
 
+def _without_part_numbers(text: str) -> str:
+    """A model value without documented manufacturer part-number tokens (2026-10-19, second
+    review): ``X1504VA / 90NB13Y1-M026R0`` is the model ``X1504VA`` beside a part number, not
+    a value with an unexplained remainder. The full wording stays in the evidence."""
+    value = clean_text(_MARKS.sub("", text))
+    parts = [code for code in model_codes(value) if is_part_number_shape(code)]
+    if not parts:
+        return value
+    for part in parts:
+        value = value.replace(part, " ")
+    # Only the separators left around the removed part number go; brackets stay paired.
+    value = re.sub(r"\(\s*\)|\[\s*\]", " ", value)
+    return clean_text(re.sub(r"^[\s/|,;:-]+|[\s/|,;:-]+$", "", value))
+
+
 def _model(text: str) -> set[str]:
     """The labeled value's one model code, or its stated name when it contains no code.
 
     ``Acer Nitro V 15 ANV15-42-R2UH`` gives ``ANV15-42-R2UH``; the full wording stays in the
     evidence. Two different codes in one value are ambiguous and go to review.
     """
-    value = clean_text(_MARKS.sub("", text))
+    value = _without_part_numbers(text)
     if not value:
         return set()
     codes = model_codes(value)
@@ -406,7 +457,7 @@ def _model_code(text: str) -> set[str]:
     wording: never stripped to the code, and never matched. Two codes are ambiguous; a value
     with no code keeps its stated name, as for model-name labels.
     """
-    value = clean_text(_MARKS.sub("", text))
+    value = _without_part_numbers(text)
     if not value:
         return set()
     codes = model_codes(value)
@@ -647,6 +698,9 @@ def _capacity_scopes(text: str) -> _CapacityScopes:
     installed text, and ``Up to 32GB`` alone gives none. A parenthesized group is split off only
     when it states its own amount, so ``512GB SSD + 1TB HDD (optional)`` stays whole and
     ambiguous. A limit inside a breakdown (``16GB (8GB + 8GB up to 32GB)``) is not split off.
+    Within one flattened clause, a maximum phrase with its own amount after an installed amount
+    is split off too: ``8GB RAM Max up to 64GB 2 Slots`` gives ``8GB RAM ; 2 Slots`` installed
+    and the maximum ``Max up to 64GB``.
     """
     maximums: list[str] = []
     optional: list[str] = []
@@ -667,6 +721,15 @@ def _capacity_scopes(text: str) -> _CapacityScopes:
         elif _OPTIONAL_CLAUSE.match(clause) and _CAPACITY.search(_parse_text(clause)):
             optional.append(clean_text(clause))
         else:
+            # Outside parentheses only: a limit inside a breakdown is not separable.
+            inline = [
+                found for found in _INLINE_MAXIMUM.finditer(clause)
+                if clause[: found.start()].count("(") == clause[: found.start()].count(")")
+            ]
+            if inline and _CAPACITY.search(_parse_text(clause[: inline[0].start()])):
+                maximums += [clean_text(found[1]) for found in inline]
+                for found in reversed(inline):
+                    clause = f"{clause[: found.start()]} ; {clause[found.end():]}"
             kept.append(clause)
     if not maximums and not optional:
         return _CapacityScopes(text, (), ())
@@ -1196,16 +1259,176 @@ _TITLE_WORDS_NOT_SUFFIX = frozenset(
      "PINK", "BEIGE", "NAVY", "ROSE", "MATTE", "STEAM", "STEEL", "COOL", "DARK", "LIGHT"}
 )
 _TITLE_SEGMENT_BREAK = re.compile(r"[|/,()\[\]]")
-_TITLE_RAM = re.compile(
-    rf"(?<![0-9.])([0-9]{{1,3}})\s*GB\b{_NOT_RATE}\s*(?:(?:LP)?DDR[0-9]X?\s*)?(?:RAM|memory)\b"
-    rf"|(?<![0-9.])([0-9]{{1,3}})\s*GB\b{_NOT_RATE}\s*(?:LP)?DDR[0-9]",
+# Title capacity roles (2026-10-19, independent review): the words right after an amount say
+# what it is. An optional parenthesized breakdown may sit between the amount and its role words
+# ("16GB (2x8GB) DDR5 RAM").
+_TITLE_RAM_ROLE = re.compile(
+    r"\s*(?:\([^()]*\)\s*)?(?:(?:LP)?DDR[0-9]X?\b(?:\s*-?\s*[0-9]{4}\s*(?:MHz|MT/s)?)?\s*)?"
+    r"(?:unified\s+)?(?:RAM|memory)\b"
+    r"|\s*(?:\([^()]*\)\s*)?(?:LP)?DDR[0-9]X?\b",
     re.I,
 )
-_TITLE_STORAGE = re.compile(
-    rf"(?<![0-9.])([0-9]+(?:\.[0-9]+)?)\s*(GB|TB)\b{_NOT_RATE}"
-    r"\s*(?:(?:PCIe|NVMe|M\.2|Gen\s*[0-9])\s*)*(?:SSD|HDD|eMMC|UFS)\b",
+_TITLE_STORAGE_ROLE = re.compile(
+    r"\s*(?:\([^()]*\)\s*)?(?:(?:PCIe|NVMe|M\.2|Gen\s*[0-9])\s*)*"
+    r"(?:SSD|SDD|HDD|eMMC|UFS|storage)\b",
     re.I,
 )
+# A drive that is not installed in the laptop: "256GB external SSD", "1TB portable HDD".
+_TITLE_EXTERNAL_ROLE = re.compile(
+    r"\s*(?:external|portable|removable|USB)\s+(?:(?:PCIe|NVMe|M\.2)\s*)*"
+    r"(?:SSD|HDD|drive|hard\s+(?:disk|drive)|storage|flash\s+drive)\b",
+    re.I,
+)
+# Wording directly before an amount that makes it an accessory or extra, not installed:
+# "FREE 256GB SSD", "+ extra 8GB RAM", "bonus 1TB HDD".
+_TITLE_NOT_INSTALLED_BEFORE = re.compile(
+    r"\b(?:free|freebie|bonus|external|portable|optional|extra|additional|spare)\s*[:\-]?\s*$",
+    re.I,
+)
+_TITLE_JOIN = re.compile(r"\s*[+/]\s*")
+_TITLE_PLUS = re.compile(r"\s*\+\s*")
+_RAM, _STORAGE, _UNKNOWN = "RAM", "STORAGE", "UNKNOWN"
+
+
+@dataclass
+class _TitleMention:
+    """One capacity amount in a title, before any deduplication."""
+
+    start: int
+    amount_end: int
+    gigabytes: int
+    role: str = _UNKNOWN
+    words_end: int = 0
+    installed: bool = True
+    unclear: bool = False
+
+
+@dataclass(frozen=True)
+class TitleCapacity:
+    """What a title states about one capacity field.
+
+    ``value`` is the one installed total (a single mention, or one ``+``-joined component list
+    summed under the established component rule); ``ambiguous`` is set when the title states
+    several separate amounts, a breakdown that does not add up, or an amount joined to an
+    unexplained one. ``mentions`` keeps every installed mention as written (repeated equal
+    components included); ``not_installed`` keeps external, extra or free amounts.
+    """
+
+    value: str
+    values: frozenset[str]
+    ambiguous: bool
+    mentions: tuple[str, ...]
+    not_installed: tuple[str, ...]
+
+
+def _title_mentions(text: str) -> list[_TitleMention]:
+    """Every capacity amount in ``text`` (layouts as count x size), with its role and scope."""
+    found: list[_TitleMention] = []
+    blanked = text
+    for pattern, count_group, amount_group, unit_group in (
+        (_COUNT_BY_SIZE, 1, 2, 3),
+        (_SIZE_BY_COUNT, 3, 1, 2),
+    ):
+        for match in pattern.finditer(blanked):
+            try:
+                size = _gigabytes(match[amount_group], match[unit_group], allow_tb=True)
+            except _Unparseable:
+                continue
+            found.append(_TitleMention(match.start(), match.end(), int(match[count_group]) * size))
+        blanked = pattern.sub(lambda match: " " * len(match[0]), blanked)
+    for match in _CAPACITY.finditer(blanked):
+        try:
+            size = _gigabytes(match[1], match[2], allow_tb=True)
+        except _Unparseable:
+            continue
+        found.append(_TitleMention(match.start(), match.end(), size))
+    found.sort(key=lambda mention: mention.start)
+
+    # A parenthesized breakdown right after an amount ("16GB (2x8GB)", "16GB (8GB + 8GB)") is
+    # that amount's components: consumed when they add up, otherwise the amount is unclear.
+    consumed: set[int] = set()
+    for group in _BREAKDOWN.finditer(text):
+        inner = [m for m in found if group.start() < m.start and m.amount_end <= group.end()]
+        before = [m for m in found if m.amount_end <= group.start()
+                  and not text[m.amount_end:group.start()].strip()]
+        if not inner or not before:
+            continue
+        consumed.update(id(m) for m in inner)
+        if sum(m.gigabytes for m in inner) != before[-1].gigabytes:
+            before[-1].unclear = True
+    mentions = [m for m in found if id(m) not in consumed]
+
+    for mention in mentions:
+        mention.words_end = mention.amount_end
+        for role, pattern, installed in (
+            (_STORAGE, _TITLE_EXTERNAL_ROLE, False),
+            (_RAM, _TITLE_RAM_ROLE, True),
+            (_STORAGE, _TITLE_STORAGE_ROLE, True),
+        ):
+            words = pattern.match(text, mention.amount_end)
+            if words:
+                mention.role, mention.installed, mention.words_end = role, installed, words.end()
+                break
+        if _TITLE_NOT_INSTALLED_BEFORE.search(text[max(0, mention.start - 30):mention.start]):
+            mention.installed = False
+
+    def joined(left: _TitleMention, right: _TitleMention, join: re.Pattern[str]) -> bool:
+        return bool(join.fullmatch(text[left.words_end:right.start]))
+
+    # The joined RAM+storage form ("8GB+256GB", "16GB/ 1TB SSD"): an unlabeled memory-sized
+    # amount (at most 128GB) joined to an installed storage-sized one (at least 128GB), and not
+    # part of a longer list ("8GB/16GB/32GB", "8GB+256GB/512GB").
+    for index in range(len(mentions) - 1):
+        first, second = mentions[index], mentions[index + 1]
+        if (
+            first.role != _UNKNOWN or not first.installed or not second.installed
+            or second.role not in {_UNKNOWN, _STORAGE}
+            or not joined(first, second, _TITLE_JOIN)
+            or (index and joined(mentions[index - 1], first, _TITLE_JOIN))
+            or (index + 2 < len(mentions) and joined(second, mentions[index + 2], _TITLE_JOIN))
+        ):
+            continue
+        if 0 < first.gigabytes <= 128 <= second.gigabytes:
+            first.role, second.role = _RAM, _STORAGE
+    # An unexplained amount joined to a labeled one ("8GB + 8GB RAM", "8GB/16GB RAM") leaves
+    # that labeled field's structure unclear.
+    for left, right in zip(mentions, mentions[1:], strict=False):
+        if joined(left, right, _TITLE_JOIN) and {left.role, right.role} - {_UNKNOWN} and (
+            _UNKNOWN in {left.role, right.role}
+        ):
+            for mention in (left, right):
+                mention.unclear = mention.unclear or mention.role != _UNKNOWN
+    return mentions
+
+
+def _title_capacities(text: str) -> dict[str, TitleCapacity]:
+    """RAM and storage as a title states them (``TitleCapacity``), from installed wording only:
+    maximum and optional clauses are removed first (``_capacity_scopes``)."""
+    installed_text = _capacity_scopes(text).installed
+    mentions = _title_mentions(installed_text)
+    result: dict[str, TitleCapacity] = {}
+    for field, role in (("ram_capacity_gb", _RAM), ("storage_capacity_gb", _STORAGE)):
+        own = [m for m in mentions if m.role == role]
+        installed = [m for m in own if m.installed]
+        chains: list[list[_TitleMention]] = []
+        for mention in installed:
+            between = installed_text[chains[-1][-1].words_end:mention.start] if chains else ""
+            if chains and _TITLE_PLUS.fullmatch(between):
+                chains[-1].append(mention)  # "+"-joined installed components
+            else:
+                chains.append([mention])
+        totals = [str(sum(m.gigabytes for m in chain)) for chain in chains]
+        ambiguous = len(chains) > 1 or any(m.unclear for m in installed)
+        result[field] = TitleCapacity(
+            value=totals[0] if len(chains) == 1 and not ambiguous else "",
+            values=frozenset(totals),
+            ambiguous=ambiguous,
+            mentions=tuple(clean_text(installed_text[m.start:m.words_end]) for m in installed),
+            not_installed=tuple(
+                clean_text(installed_text[m.start:m.words_end]) for m in own if not m.installed
+            ),
+        )
+    return result
 # A designation token inside a model claim that has no full code: letters and digits, 5+ long.
 _DESIGNATION = re.compile(r"(?<![A-Za-z0-9])(?=[A-Za-z0-9]*[A-Za-z])(?=[A-Za-z0-9]*[0-9])"
                           r"[A-Za-z0-9]{5,}(?![A-Za-z0-9])")
@@ -1289,19 +1512,201 @@ def _url_slug_differs(
 
 
 def _title_core_claims(title: str) -> dict[str, set[str]]:
-    """Core values a title states explicitly; used only to detect conflicts."""
+    """Core values a title states explicitly. Capacities are every installed total the title
+    states (several when its structure is unclear), so any of them differing from the page's
+    specification is a conflict."""
     low, high = _LAPTOP_DIAGONAL_INCHES
     text = _parse_text(title)
-    installed = _capacity_scopes(text).installed
+    capacities = _title_capacities(text)
     return {
         "screen_size_in": {s for s in _screen_size(text) if low <= Decimal(s) <= high},
         "cpu_series": cpu_series_forms(_cpu_scopes(text)[0]),
-        "ram_capacity_gb": {m[1] or m[2] for m in _TITLE_RAM.finditer(installed)},
-        "storage_capacity_gb": {
-            str(_gigabytes(m[1], m[2], allow_tb=True))
-            for m in _TITLE_STORAGE.finditer(installed)
-        },
+        "ram_capacity_gb": set(capacities["ram_capacity_gb"].values),
+        "storage_capacity_gb": set(capacities["storage_capacity_gb"].values),
     }
+
+
+# Display resolution names (2026-10-19, independent review). Only the precise VESA names
+# establish a resolution. Marketing names are used loosely (PC Express writes "Full-HD WUXGA" for
+# 1920x1200 panels), so FHD/Full HD/FHD+/QHD are kept as supporting ``resolution_name``
+# evidence with their nominal size, never as an extracted resolution. "HD", "2K", "3K" and
+# "UHD" are not read at all ("UHD Graphics" is an Intel GPU).
+_PRECISE_RESOLUTIONS: tuple[tuple[re.Pattern[str], str, str], ...] = (
+    (re.compile(r"\bWUXGA\b", re.I), "WUXGA", "1920x1200"),
+    (re.compile(r"\bWQXGA\b", re.I), "WQXGA", "2560x1600"),
+)
+_LOOSE_RESOLUTIONS: tuple[tuple[re.Pattern[str], str, str], ...] = (
+    (re.compile(r"\b(?:FHD|Full[\s-]?HD)\+", re.I), "FHD+", "1920x1200"),
+    (re.compile(r"\b(?:FHD|Full[\s-]?HD)\b(?!\+)", re.I), "Full HD", "1920x1080"),
+    (re.compile(r"\bW?QHD\b(?!\+)", re.I), "QHD", "2560x1440"),
+)
+
+
+def named_resolutions(text: str, *, precise: bool = True) -> dict[str, str]:
+    """``{name: nominal WIDTHxHEIGHT}`` for resolution names stated in ``text``: the precise
+    VESA names (``precise=True``) or the loosely used marketing names (``precise=False``)."""
+    plain = _parse_text(text)
+    return {
+        name: value
+        for pattern, name, value in (_PRECISE_RESOLUTIONS if precise else _LOOSE_RESOLUTIONS)
+        if pattern.search(plain)
+    }
+
+
+def _title_secondary_claims(title: str) -> dict[str, set[str]]:
+    """Secondary hardware a title states explicitly: one discrete GPU model, the panel type,
+    and the resolution (numeric, or a standard name). Never mandatory; unstated stays unknown."""
+    text = _parse_text(title)
+    numeric = _resolution(text)
+    return {
+        "gpu_model": canonical_gpu_models(text),
+        "display_type": _display_type(text),
+        "resolution": numeric or set(named_resolutions(text).values()),
+    }
+
+
+def _same_secondary(field: str, left: str, right: str) -> bool:
+    """Whether a title value agrees with the same page's specification value. Panel types are
+    compared by technology ("IPS-Level" in one place and "IPS" in the other is not a
+    contradiction); the catalog comparison itself is the matcher's (matching.py)."""
+    if field == "gpu_model":
+        return canonical_gpu_models(left) == canonical_gpu_models(right) != set()
+    if field == "display_type":
+        return left.casefold().removesuffix("-level") == right.casefold().removesuffix("-level")
+    return clean_text(left).casefold() == clean_text(right).casefold()
+
+
+def _apply_title_fields(
+    offer: OfferObservation,
+    evidence: list[FieldExtraction],
+    supporting: list[FieldExtraction],
+    notes: list[str],
+    *,
+    shared: bool,
+    shared_scope_proven: bool = False,
+) -> None:
+    """Core and secondary values that the product title states explicitly (2026-10-19).
+
+    A clear title statement supplies a field the page's specifications do not state; a title
+    statement that contradicts the specifications keeps both values (``AMBIGUOUS``) with
+    ``TITLE_SPEC_CONFLICT_<FIELD>`` for review. Capacities keep their structure
+    (``_title_capacities``): repeated components are summed, never collapsed; external, extra
+    and maximum amounts are never installed capacity; an unclear structure makes the field
+    ``AMBIGUOUS`` (review, no target). Secondary claims (GPU model, panel type, resolution) are
+    supplied the same way so the matcher's conflict policy sees them; several different title
+    values are kept as supporting evidence only. The title of a page whose specifications are
+    shared by several variants describes the parent product, so it never supplies or overrides
+    the selected variant's configuration; only when its variants are proven to differ in RAM and
+    storage alone (``shared_scope_proven``) does it state secondary hardware common to all of
+    them (2026-10-20). URL wording is never read here.
+    """
+    if not offer.raw_title:
+        return
+    if shared:
+        if shared_scope_proven:
+            _apply_title_secondary(offer.raw_title, evidence, supporting, notes, shared=True)
+        return
+    title = offer.raw_title
+    text = _parse_text(title)
+    claims = _title_core_claims(title)
+    capacities = _title_capacities(text)
+    for name, capacity in capacities.items():
+        if capacity.not_installed:
+            notes.append(f"TITLE_NOT_INSTALLED_{name.upper()}")
+            supporting.append(FieldExtraction(
+                name, ExtractionStatus.SUPPORTING, "; ".join(capacity.not_installed),
+                "title [external, extra or free item; not installed capacity]", title,
+                SCOPE_OPTIONAL,
+            ))
+    for index, item in enumerate(evidence):
+        stated = claims.get(item.field)
+        capacity = capacities.get(item.field)
+        if not stated:
+            continue
+        if item.status is ExtractionStatus.MISSING:
+            if len(stated) > 1 or (capacity is not None and capacity.ambiguous):
+                shown = "; ".join(capacity.mentions) if capacity else "; ".join(sorted(stated))
+                evidence[index] = FieldExtraction(
+                    item.field, ExtractionStatus.AMBIGUOUS, shown,
+                    "title [several or unclear capacity statements; review]", title, SCOPE_TITLE,
+                )
+                notes.append(f"TITLE_MULTIPLE_{item.field.upper()}")
+                continue
+            evidence[index] = FieldExtraction(
+                item.field, ExtractionStatus.EXTRACTED, next(iter(stated)),
+                f"title [{TITLE_STATEMENT}: explicit statement in the product title]",
+                title, SCOPE_TITLE,
+            )
+            notes.append(f"TITLE_SUPPLIED_{item.field.upper()}")
+            if capacity is not None and len(capacity.mentions) > 1:
+                supporting.append(FieldExtraction(
+                    f"{item.field.removesuffix('_capacity_gb')}_components",
+                    ExtractionStatus.SUPPORTING, " + ".join(capacity.mentions),
+                    "title [installed components summed]", title, SCOPE_TITLE,
+                ))
+        elif item.status is ExtractionStatus.EXTRACTED and stated != {item.value}:
+            evidence[index] = FieldExtraction(
+                item.field, ExtractionStatus.AMBIGUOUS,
+                f"{item.value} | title: {'; '.join(sorted(stated))}",
+                f"{item.source_label}; title [conflicting statement]",
+                f"{item.source_text} | {title}", item.scope,
+            )
+            notes.append(f"TITLE_SPEC_CONFLICT_{item.field.upper()}")
+
+    _apply_title_secondary(title, evidence, supporting, notes, shared=False)
+
+
+def _apply_title_secondary(
+    title: str,
+    evidence: list[FieldExtraction],
+    supporting: list[FieldExtraction],
+    notes: list[str],
+    *,
+    shared: bool,
+) -> None:
+    """GPU model, panel type and resolution the title states (``_apply_title_fields``).
+
+    ``shared``: the title belongs to a multi-variant page whose variants differ only in RAM and
+    storage (a confirmed matrix, 2026-10-20). Such hardware is common to every variant, so the
+    parent title states it for the selected one too; it is labelled as shared product evidence.
+    """
+    where = "title [SHARED_PRODUCT; variants differ only in RAM/storage; " if shared else "title ["
+    for name, size in named_resolutions(title, precise=False).items():
+        supporting.append(FieldExtraction(
+            "resolution_name", ExtractionStatus.SUPPORTING, f"{name} (nominal {size})",
+            f"{where}marketing resolution name; not an extracted resolution]", title,
+            SCOPE_TITLE,
+        ))
+    present = {item.field: index for index, item in enumerate(evidence)}
+    for field, stated in _title_secondary_claims(title).items():
+        if not stated:
+            continue
+        if len(stated) > 1:
+            notes.append(f"TITLE_MULTIPLE_{field.upper()}")
+            supporting.append(FieldExtraction(
+                field, ExtractionStatus.SUPPORTING, "; ".join(sorted(stated)),
+                f"{where}several values; not used]", title, SCOPE_TITLE,
+            ))
+            continue
+        value = next(iter(stated))
+        if field not in present:
+            evidence.append(FieldExtraction(
+                field, ExtractionStatus.EXTRACTED, value,
+                f"{where}{TITLE_STATEMENT}: explicit statement in the product title]",
+                title, SCOPE_TITLE,
+            ))
+            notes.append(f"TITLE_SUPPLIED_{field.upper()}")
+            continue
+        item = evidence[present[field]]
+        if item.status is ExtractionStatus.EXTRACTED and not _same_secondary(
+            field, item.value, value
+        ):
+            evidence[present[field]] = FieldExtraction(
+                field, ExtractionStatus.AMBIGUOUS, f"{item.value} | title: {value}",
+                f"{item.source_label}; title [conflicting statement]",
+                f"{item.source_text} | {title}", item.scope,
+            )
+            notes.append(f"TITLE_SPEC_CONFLICT_{field.upper()}")
 
 
 def _apply_title_model(
@@ -1327,11 +1732,18 @@ def _apply_title_model(
     """
     primary = {item.field: item for item in evidence}
     model = primary["model"]
-    codes, parts = title_model_codes(offer.raw_title)
+    found = title_identifiers(offer.raw_title)
+    codes, parts = list(found.model_codes), list(found.part_numbers)
     for part in parts:
         supporting.append(FieldExtraction(
             "part_number_candidate", ExtractionStatus.SUPPORTING, part,
             "title [documented manufacturer part-number shape; not a model code]", part,
+        ))
+    for accessory in found.accessory_codes:
+        supporting.append(FieldExtraction(
+            "accessory_identifier", ExtractionStatus.SUPPORTING, accessory,
+            "title [included-accessory code after an accessory noun; not a laptop model code]",
+            offer.raw_title,
         ))
     if model.status is ExtractionStatus.EXTRACTED and model_codes(model.value) == [model.value]:
         # A trusted or approved code. Another full code in the title is a genuine conflict.
@@ -1381,12 +1793,10 @@ def _apply_title_model(
         notes.append("TITLE_MODEL_SCOPE_UNPROVEN")
         return
     others = [primary[field] for field in CORE_MATCH_COLUMNS if field != "model"]
-    if any(
-        item.status is not ExtractionStatus.EXTRACTED
-        or item.source_label.casefold().startswith("title")
-        for item in others
-    ):
-        return  # The four other fields must be independently supported; review as before.
+    # The four other fields must be established, by the page's specifications or by explicit
+    # title statements (2026-10-19, second review: valid title evidence is not discounted).
+    if any(item.status is not ExtractionStatus.EXTRACTED for item in others):
+        return
     title_claims = _title_core_claims(offer.raw_title)
     for item in others:
         stated = title_claims.get(item.field, set())
@@ -1417,6 +1827,78 @@ def _apply_title_model(
         offer.raw_title,
     )
     notes.append(TITLE_MODEL_CORROBORATED)
+
+
+def _normalize_model_name(
+    evidence: list[FieldExtraction], supporting: list[FieldExtraction], notes: list[str]
+) -> None:
+    """A model-name wording that is a registered product name plus a repeated brand and/or a
+    registered colour (``Apple Macbook Neo (Citrus)``) is that product name; the original
+    wording stays as supporting evidence. Codes and unregistered names are unchanged."""
+    index, model = next((i, e) for i, e in enumerate(evidence) if e.field == "model")
+    if model.status is not ExtractionStatus.EXTRACTED or model_codes(model.value):
+        return
+    normalized = default_registry().normalize_model_name(model.value)
+    if normalized is None or normalized.value == model.value:
+        return
+    evidence[index] = FieldExtraction(
+        "model", ExtractionStatus.EXTRACTED, normalized.value,
+        f"{model.source_label} [{MODEL_NAME_NORMALIZED}: registered product name; removed "
+        f"{', '.join(normalized.removed) or 'spacing/punctuation'}]",
+        model.source_text,
+    )
+    supporting.append(FieldExtraction(
+        "model", ExtractionStatus.SUPPORTING, model.value,
+        f"{model.source_label} [original wording, kept]", model.source_text,
+    ))
+    notes.append(MODEL_NAME_NORMALIZED)
+
+
+def _apply_title_product_name(
+    offer: OfferObservation,
+    evidence: list[FieldExtraction],
+    notes: list[str],
+    claims: list[tuple[str, str]],
+    *,
+    shared: bool,
+    binding: str,
+) -> None:
+    """Accept one registered product name stated in the title (``Apple MacBook Neo 13" ...``)
+    under the title-code rule: no model code in the title, no model claim on the page, exactly
+    one registered product name in the title, the four other core fields extracted from the
+    page's own non-title evidence, and no title statement contradicting them. The value is the
+    registered name; nothing is taken from a catalog target."""
+    primary = {item.field: item for item in evidence}
+    model = primary["model"]
+    if model.status is not ExtractionStatus.MISSING or claims or shared:
+        return
+    if binding.startswith("NOT_CONFIRMED") or title_identifiers(offer.raw_title).model_codes:
+        return
+    names = default_registry().title_product_names(offer.raw_title)
+    if not names:
+        return
+    if len(names) > 1:
+        notes.append("TITLE_MULTIPLE_PRODUCT_NAMES")
+        return
+    others = [primary[field] for field in CORE_MATCH_COLUMNS if field != "model"]
+    # The four other fields must be established, by the page's specifications or by explicit
+    # title statements (2026-10-19, second review: valid title evidence is not discounted).
+    if any(item.status is not ExtractionStatus.EXTRACTED for item in others):
+        return
+    title_claims = _title_core_claims(offer.raw_title)
+    for item in others:
+        stated = title_claims.get(item.field, set())
+        if stated and stated != {item.value}:
+            notes.append(f"TITLE_SPEC_CONFLICT_{item.field.upper()}")
+            return
+    corroboration = "; ".join(f"{item.field}: {item.source_label}" for item in others)
+    evidence[evidence.index(model)] = FieldExtraction(
+        "model", ExtractionStatus.EXTRACTED, names[0].name,
+        f"title [{TITLE_PRODUCT_NAME_CORROBORATED}; registered product name; corroborated by "
+        f"{corroboration}]",
+        offer.raw_title,
+    )
+    notes.append(TITLE_PRODUCT_NAME_CORROBORATED)
 
 
 def _model_identifier_conflicts(
@@ -1454,6 +1936,10 @@ def match_basis(evidence: tuple[FieldExtraction, ...] | list[FieldExtraction]) -
     tags = []
     if any(TITLE_MODEL_CORROBORATED in label for label in labels):
         tags.append(TITLE_MODEL_CORROBORATED)
+    if any(TITLE_PRODUCT_NAME_CORROBORATED in label for label in labels):
+        tags.append(TITLE_PRODUCT_NAME_CORROBORATED)
+    if any(MODEL_NAME_NORMALIZED in label for label in labels):
+        tags.append(MODEL_NAME_NORMALIZED)
     if any(label.startswith("OWNER_APPROVED") for label in labels):
         tags.append("OWNER_APPROVED_INTERPRETATION")
     if any("[selected variant" in label for label in labels):
@@ -1470,6 +1956,13 @@ def _processor_numbers(text: str) -> set[str]:
     return {
         match[1].upper() for pattern in _PROCESSOR_NUMBERS for match in pattern.finditer(parsed)
     }
+
+
+def label_name(label: str) -> str:
+    """A specification label as compared with the reviewed label lists: case-folded, without a
+    trailing colon (``MEMORY:`` is ``memory``; 2026-10-19, second review). The label text as
+    written stays in the evidence."""
+    return label.strip().rstrip(":").strip().casefold()
 
 
 def extract_offer_attributes(offer: OfferObservation) -> ExtractedAttributes:
@@ -1494,10 +1987,10 @@ def extract_offer_attributes(offer: OfferObservation) -> ExtractedAttributes:
         labeled = [(label, value) for label, value in specs if label and value]
 
     def rows(names: frozenset[str]) -> list[tuple[str, str]]:
-        return [(label, value) for label, value in labeled if label.casefold() in names]
+        return [(label, value) for label, value in labeled if label_name(label) in names]
 
     def model_value(label: str, value: str) -> set[str]:
-        return _model_code(value) if label.casefold() in labels.model_code else _model(value)
+        return _model_code(value) if label_name(label) in labels.model_code else _model(value)
 
     display_rows = rows(labels.display)
     # "Up to 13th Gen Intel Core i7" describes a product line's options, not this configuration.
@@ -1605,6 +2098,49 @@ def extract_offer_attributes(offer: OfferObservation) -> ExtractedAttributes:
             item = _extract_field(field, display_rows, parse, required=False)
             if item is not None:
                 evidence.append(item)
+        if not any(item.field == "resolution" for item in evidence):
+            # A standard resolution name in a display row ('14" Full-HD IPS') when the rows state
+            # no numeric resolution (2026-10-19, independent review).
+            named = sorted(
+                (size, name, label, value)
+                for label, value in display_rows
+                for name, size in named_resolutions(value).items()
+            )
+            sizes = {size for size, *_ in named}
+            if len(sizes) == 1:
+                size, name, label, value = named[0]
+                evidence.append(FieldExtraction(
+                    "resolution", ExtractionStatus.EXTRACTED, size,
+                    f"{label} [named standard: {name} = {size}]", value,
+                ))
+                notes.append("RESOLUTION_FROM_STANDARD_NAME")
+            elif len(sizes) > 1:
+                evidence.append(FieldExtraction(
+                    "resolution", ExtractionStatus.AMBIGUOUS, "; ".join(sorted(sizes)),
+                    "display rows [several standard resolution names]",
+                    " | ".join(value for _, value in display_rows),
+                ))
+        for label, value in display_rows:
+            for name, size in named_resolutions(value, precise=False).items():
+                support("resolution_name", f"{name} (nominal {size})",
+                        f"{label} [marketing resolution name; not an extracted resolution]",
+                        value)
+
+    # The discrete GPU a labelled graphics row states (2026-10-20): a secondary specification
+    # the matcher compares when the target records one. A shared description counts only when
+    # the variants are proven to differ in RAM/storage alone. Integrated graphics are not read.
+    gpu_rows = [(label, value) for label, value in labeled if label_name(label) in _GPU_LABELS]
+    if gpu_rows and (not shared or shared_locator):
+        gpus = sorted({gpu for _, value in gpu_rows for gpu in canonical_gpu_models(value)})
+        tag = f" [SHARED_PRODUCT; {shared_locator}]" if shared else ""
+        label = "; ".join(dict.fromkeys(label for label, _ in gpu_rows)) + tag
+        text = " | ".join(value for _, value in gpu_rows)
+        if len(gpus) == 1:
+            evidence.append(FieldExtraction("gpu_model", ExtractionStatus.EXTRACTED, gpus[0],
+                                            label, text))
+        elif len(gpus) > 1:
+            evidence.append(FieldExtraction("gpu_model", ExtractionStatus.AMBIGUOUS,
+                                            "; ".join(gpus), label, text))
 
     prose = _prose_screen_rows(scoped)
     if not shared or (
@@ -1776,11 +2312,16 @@ def extract_offer_attributes(offer: OfferObservation) -> ExtractedAttributes:
         notes.append("MPN_REPEATS_RETAILER_SKU")
 
     _apply_owner_approvals(offer, evidence, supporting, notes)
-    claims = [(label, value) for label, value in labeled if label.casefold() in MODEL_CLAIM_LABELS]
+    _apply_title_fields(offer, evidence, supporting, notes, shared=shared,
+                        shared_scope_proven=bool(shared_locator))
+    claims = [(label, value) for label, value in labeled if label_name(label) in MODEL_CLAIM_LABELS]
+    _normalize_model_name(evidence, supporting, notes)
     _apply_title_model(
         offer, evidence, supporting, notes, claims,
         shared=shared, shared_locator=shared_locator, binding=binding,
     )
+    _apply_title_product_name(offer, evidence, notes, claims,
+                              shared=shared, binding=binding)
     _model_identifier_conflicts(evidence, notes, identifiers, skus)
     if any(DEDUPLICATED_ROWS in item.source_label for item in evidence):
         notes.append("EQUIVALENT_REPEATED_FACTS_DEDUPLICATED")
