@@ -26,6 +26,7 @@ from laptop_tracker.price_tracking import (
     HISTORY_COLUMNS,
     REVIEW_COLUMNS,
     SELECTION_COLUMNS,
+    SOURCE_LEDGER_COLUMNS,
     build_price_tracking,
     match_stored_observations,
     matching_context,
@@ -47,6 +48,7 @@ from laptop_tracker.sheet_publication import (
     text,
     verify_tab,
 )
+from laptop_tracker.shopee_snapshot import select_shopee_prices
 from laptop_tracker.target_master import validate_target_master
 from laptop_tracker.verified_top import CONFIGURATION_COLUMNS, LEDGER_COLUMNS, money
 
@@ -92,8 +94,11 @@ class FakeSpreadsheet:
                     sheet["grid"][(r, c)] = {"userEnteredValue": {"stringValue": value}}
 
     def _new(self, title: str, rows: int, cols: int) -> dict:
-        sheet = {"title": title, "id": 1000 + len(self.sheets), "rows": rows, "cols": cols,
-                 "grid": {}, "frozen": 0, "filter": None}
+        # IDs are never reused, as in Sheets (a deleted tab does not free its ID).
+        next_id = max((s["id"] for s in self.sheets.values()), default=999) + 1
+        sheet = {"title": title, "id": next_id, "rows": rows, "cols": cols,
+                 "grid": {}, "frozen": 0, "frozen_columns": 0, "filter": None, "widths": {},
+                 "layout": {}}
         self.sheets[title] = sheet
         return sheet
 
@@ -123,10 +128,12 @@ class FakeSpreadsheet:
                 sheet["rows"] = grid.get("rowCount", sheet["rows"])
                 sheet["cols"] = grid.get("columnCount", sheet["cols"])
                 sheet["frozen"] = grid.get("frozenRowCount", sheet["frozen"])
+                sheet["frozen_columns"] = grid.get("frozenColumnCount", sheet["frozen_columns"])
             elif kind == "setBasicFilter":
                 rng = payload["filter"]["range"]
                 by_id[rng["sheetId"]]["filter"] = rng
             elif kind == "updateCells" and "range" in payload:
+                fields = payload["fields"]
                 for cell in by_id[payload["range"]["sheetId"]]["grid"].values():
                     cell.pop("userEnteredValue", None)
                     cell.pop("hyperlink", None)
@@ -134,8 +141,13 @@ class FakeSpreadsheet:
                     fmt.pop("numberFormat", None)
                     fmt.get("textFormat", {}).pop("link", None)
                     fmt.get("textFormat", {}).pop("bold", None)
+                    if "italic" in fields:
+                        fmt.get("textFormat", {}).pop("italic", None)
+                    if "note" in fields:
+                        cell.pop("note", None)
             elif kind == "updateCells":
                 start = payload["start"]
+                fields = payload["fields"]
                 grid = by_id[start["sheetId"]]["grid"]
                 for r, row in enumerate(payload["rows"]):
                     for c, value in enumerate(row["values"]):
@@ -150,6 +162,28 @@ class FakeSpreadsheet:
                         link = fmt.get("textFormat", {}).get("link", {}).get("uri")
                         if link:
                             cell["hyperlink"] = link
+                        # A note is set or cleared only when the field mask names it.
+                        if "note" in fields:
+                            cell.pop("note", None)
+                            if value.get("note"):
+                                cell["note"] = value["note"]
+                        elif "note" in value:
+                            raise AssertionError("a note outside the field mask")
+            elif kind == "repeatCell":
+                # Layout only (backgrounds, alignment, wrapping): kept apart from cell content.
+                rng = payload["range"]
+                layout = by_id[rng["sheetId"]]["layout"]
+                fmt = payload["cell"].get("userEnteredFormat", {})
+                if "startRowIndex" not in rng:
+                    layout.clear()
+                for r in range(rng.get("startRowIndex", 0), rng.get("endRowIndex", 0)):
+                    for c in range(rng.get("startColumnIndex", 0), rng.get("endColumnIndex", 0)):
+                        layout.setdefault((r, c), {}).update(copy.deepcopy(fmt))
+            elif kind == "updateDimensionProperties":
+                rng = payload["range"]
+                assert rng["dimension"] == "COLUMNS"
+                for c in range(rng["startIndex"], rng["endIndex"]):
+                    by_id[rng["sheetId"]]["widths"][c] = payload["properties"]["pixelSize"]
             else:
                 raise AssertionError(f"unexpected request {kind}")
         if self.after_batch:
@@ -251,8 +285,12 @@ def obs(index: int, *, retailer="laptop_factory", url=None, **kwargs):
     return observation
 
 
-def build_reports(base: Path) -> dict[str, Path]:
-    """Ten selected targets; reports for week 2026-10-05; pilot scope is the first seven."""
+def build_reports(
+    base: Path, *, shopee_ledger: list[dict[str, str]] | None = None
+) -> dict[str, Path]:
+    """Ten selected targets; reports for week 2026-10-05; pilot scope is the first seven. With
+    ``shopee_ledger`` (configuration_source_ledger.csv rows) the report carries Shopee snapshot
+    prices selected from it, and the ledger is written beside the report."""
     exact = {
         obs(1, price="1000.00"): "TGT-000001",
         obs(1, retailer="pcc", url=PCC_URL, price="990.50"): "TGT-000001",
@@ -283,10 +321,17 @@ def build_reports(base: Path) -> dict[str, Path]:
     matches[key] = replace(matches[key], match_status="REVIEW_REQUIRED", target_id="",
                            candidate_target_ids=("TGT-000004",),
                            reason_codes=("SECONDARY_CONFLICT",))
-    result = build_price_tracking(stored, matches, selected, context, week=WEEK, as_of=AS_OF)
+    shopee = None
+    if shopee_ledger is not None:
+        shopee, shopee_ledger = select_shopee_prices(shopee_ledger)
+    result = build_price_tracking(stored, matches, selected, context, week=WEEK, as_of=AS_OF,
+                                  shopee=shopee)
 
     report = base / "cycle" / "report"
     report.mkdir(parents=True)
+    if shopee_ledger is not None:
+        write_dicts(report / "configuration_source_ledger.csv", SOURCE_LEDGER_COLUMNS,
+                    shopee_ledger)
     write_dicts(report / "weekly_price_comparison.csv", COMPARISON_COLUMNS, result.comparison)
     write_dicts(report / "weekly_price_selections.csv", SELECTION_COLUMNS, result.selections)
     write_dicts(report / "price_history.csv", HISTORY_COLUMNS, result.history)
@@ -475,7 +520,7 @@ def test_a_different_selected_list_or_missing_report_is_refused(world) -> None:
     ["raw", "TARGET_MASTER", "SOURCE_MODEL_MAP", "MATCH_REVIEW", "P1_TOP_100_CONFIGURATIONS",
      "P1_TOP_100_TARGETS", "pilot_price_comparison", " PILOT_PRICE_COMPARISON"],
 )
-def test_only_the_four_publisher_tabs_are_allowed(title: str) -> None:
+def test_only_the_five_publisher_tabs_are_allowed(title: str) -> None:
     with pytest.raises(DestinationError):
         assert_publisher_tab(title)
 
@@ -528,8 +573,8 @@ def test_blank_prices_stay_blank_with_clear_statuses(world) -> None:
     assert out_of_stock["Laptop Factory status"] == "Comparable price (OUT OF STOCK)"
     # The inclusive minimum is labeled "observed"; with no in-stock offer the in-stock minimum
     # is blank, never the out-of-stock price.
-    assert out_of_stock["Lowest observed price (PHP)"] == "1500.0"
-    assert out_of_stock["Lowest in-stock price (PHP)"] == ""
+    assert out_of_stock["Lowest retailer price (PHP)"] == "1500.0"
+    assert out_of_stock["Lowest in-stock retailer price (PHP)"] == ""
     assert out_of_stock["Lowest in-stock retailer(s)"] == ""
     assert out_of_stock["Laptop Factory observed (Asia/Singapore)"].startswith("20")
     unobserved = row_for(fake, COMPARISON_TAB, "TGT-000005")
@@ -556,7 +601,7 @@ def test_prices_are_php_numbers_and_ids_are_text(world) -> None:
     assert cell["userEnteredFormat"]["numberFormat"]["type"] == "CURRENCY"
     target_cell = fake.cell(COMPARISON_TAB, 1, values[0].index("Target ID"))
     assert target_cell["userEnteredValue"] == {"stringValue": "TGT-000001"}
-    assert row_for(fake, COMPARISON_TAB, "TGT-000001")["Lowest observed price retailer(s)"] == (
+    assert row_for(fake, COMPARISON_TAB, "TGT-000001")["Lowest retailer price retailer(s)"] == (
         "PC Central"
     )
 
@@ -567,10 +612,12 @@ def test_a_tab_with_the_previous_publisher_header_is_still_owned(world) -> None:
 
     assert code == 0
     header = fake.values(COMPARISON_TAB)[0]
-    assert "Lowest observed price (PHP)" in header
-    # pilot-sheets-4 (2026-10-20): the matching basis of each minimum and of the comparison.
-    assert header[header.index("Lowest observed price retailer(s)") + 1] == (
-        "Lowest observed price basis")
+    assert "Lowest retailer price (PHP)" in header
+    # pilot-sheets-4 (2026-10-20): the matching basis of each minimum and of the comparison;
+    # pilot-sheets-5: the minimums are labelled as retailer minimums.
+    assert header[header.index("Lowest retailer price retailer(s)") + 1] == (
+        "Lowest retailer price basis")
+    assert "Lowest observed price (PHP)" not in header
     assert "Comparison basis" in header
 
 
@@ -660,7 +707,7 @@ def test_repeated_publication_does_not_duplicate_rows_or_touch_the_store(world) 
 
 def test_partial_failure_is_reported_and_a_retry_recovers(world, capsys) -> None:
     fake = FakeSpreadsheet()
-    fake.fail_on_batch = 3  # 1 run log, 2 comparison, 3 history
+    fake.fail_on_batch = 3  # 1 run log, 2 comparison, 3 summary
 
     code, fake, _ = run(world, fake=fake)
 

@@ -1,9 +1,10 @@
 """Manual Google Sheets publication of reviewed Phase 10 pilot price reports.
 
 The publisher reads saved, reviewed report files only. It never fetches retailer pages, reruns
-matching, imports observations, or opens the observation store. It writes exactly four
+matching, imports observations, or opens the observation store. It writes exactly five
 publisher-owned tabs (``PUBLISHER_TABS``) and refuses any other destination, including ``raw``,
-the catalog tabs, and the legacy ``P1_*`` outputs.
+the catalog tabs, and the legacy ``P1_*`` outputs. ``PILOT_PRICE_SUMMARY`` (2026-10-20) is a
+minimal price grid built from the detailed comparison's own cells, with context in cell notes.
 
 Cells are written with the Sheets ``updateCells`` request. Text is sent as literal string
 values, so nothing a retailer or the catalog wrote can become a formula. Prices are numbers
@@ -61,14 +62,20 @@ UNPRICED_STATUS_TEXT = {
     "DISCOVERY_NOT_ATTEMPTED": "Search not attempted",
 }
 
-PUBLISHER_VERSION = "pilot-sheets-4"
+PUBLISHER_VERSION = "pilot-sheets-5"
 COMPARISON_TAB = "PILOT_PRICE_COMPARISON"
+# The minimal side-by-side price grid (pilot-sheets-5, 2026-10-20): the detailed comparison's
+# own selected prices, one row per configuration, context in cell notes.
+SUMMARY_TAB = "PILOT_PRICE_SUMMARY"
 HISTORY_TAB = "PILOT_PRICE_HISTORY"
 REVIEW_TAB = "PILOT_PRICE_REVIEW"
 RUN_LOG_TAB = "PILOT_PRICE_RUN_LOG"
 # The exact destination allowlist. Names are compared exactly: no trimming or case folding.
-PUBLISHER_TABS: tuple[str, ...] = (COMPARISON_TAB, HISTORY_TAB, REVIEW_TAB, RUN_LOG_TAB)
-DATA_TABS: tuple[str, ...] = (COMPARISON_TAB, HISTORY_TAB, REVIEW_TAB)
+PUBLISHER_TABS: tuple[str, ...] = (
+    COMPARISON_TAB, SUMMARY_TAB, HISTORY_TAB, REVIEW_TAB, RUN_LOG_TAB)
+DATA_TABS: tuple[str, ...] = (COMPARISON_TAB, SUMMARY_TAB, HISTORY_TAB, REVIEW_TAB)
+# Tabs whose cells carry notes and italics: their field mask, clearing and readback include them.
+NOTE_TABS: tuple[str, ...] = (SUMMARY_TAB,)
 
 RETAILER_NAMES = {
     "DBZ": "DataBlitz",
@@ -107,10 +114,13 @@ CELL_FIELDS = (
     "userEnteredValue,userEnteredFormat.numberFormat,"
     "userEnteredFormat.textFormat.link,userEnteredFormat.textFormat.bold"
 )
+# NOTE_TABS also clear, write and verify notes and italics (other tabs keep any notes people add).
+NOTE_CELL_FIELDS = CELL_FIELDS + ",userEnteredFormat.textFormat.italic,note"
 READ_FIELDS = (
-    "sheets(properties(sheetId,title,gridProperties(rowCount,columnCount,frozenRowCount)),"
-    "data(startRow,startColumn,rowData(values(userEnteredValue,hyperlink,"
-    "userEnteredFormat(numberFormat,textFormat(link,bold))))))"
+    "sheets(properties(sheetId,title,gridProperties(rowCount,columnCount,frozenRowCount,"
+    "frozenColumnCount)),"
+    "data(startRow,startColumn,rowData(values(userEnteredValue,hyperlink,note,"
+    "userEnteredFormat(numberFormat,textFormat(link,bold,italic))))))"
 )
 
 
@@ -141,32 +151,39 @@ class Cell:
     link: str = ""
     number_format: str = ""
     bold: bool = False
+    # A cell note (pilot-sheets-5, PILOT_PRICE_SUMMARY only): context kept out of the visible
+    # grid. A blank cell may carry a note that explains the blank.
+    note: str = ""
+    italic: bool = False
 
     def plain(self) -> list[str]:
-        return [self.kind, self.value, self.link, self.number_format]
+        plain = [self.kind, self.value, self.link, self.number_format]
+        # Notes and italics are part of the published content (and its SHA-256) when present.
+        return plain + ([self.note, "italic" if self.italic else ""]
+                        if self.note or self.italic else [])
 
 
 BLANK = Cell()
 
 
-def text(value: object, *, link: str = "", bold: bool = False) -> Cell:
+def text(value: object, *, link: str = "", bold: bool = False, note: str = "") -> Cell:
     value = "" if value is None else str(value)
     if not value:
-        return BLANK
-    return Cell("text", value, link, "", bold)
+        return Cell(note=note) if note else BLANK
+    return Cell("text", value, link, "", bold, note)
 
 
-def number(value: str, number_format: str) -> Cell:
+def number(value: str, number_format: str, *, note: str = "", italic: bool = False) -> Cell:
     """A numeric cell from exact decimal text; blank text stays blank, never zero."""
     if value == "":
-        return BLANK
+        return Cell(note=note) if note else BLANK
     try:
         parsed = Decimal(value)
     except InvalidOperation:
         raise PublicationInputError([f"{value!r} is not a decimal number"]) from None
     if not parsed.is_finite():
         raise PublicationInputError(["a number is not finite"])
-    return Cell("number", value, "", number_format)
+    return Cell("number", value, "", number_format, note=note, italic=italic)
 
 
 @dataclass(frozen=True)
@@ -174,9 +191,14 @@ class TabPlan:
     title: str
     header: tuple[str, ...]
     rows: tuple[tuple[Cell, ...], ...]
+    # Header-cell notes, aligned with ``header`` (empty: no notes).
+    header_notes: tuple[str, ...] = ()
 
     def grid(self) -> list[list[Cell]]:
-        return [[text(name, bold=True) for name in self.header], *(list(r) for r in self.rows)]
+        notes = self.header_notes or ("",) * len(self.header)
+        return [[text(name, bold=True, note=note) for name, note in zip(self.header, notes,
+                                                                       strict=True)],
+                *(list(r) for r in self.rows)]
 
     @property
     def width(self) -> int:
@@ -201,7 +223,8 @@ REPORT_FILES = {
     "summary": "price_tracking_run_summary.json",
 }
 # Report files that older report folders do not have (read when present).
-OPTIONAL_REPORT_FILES = {"rechecks": "recheck_candidates.csv"}
+OPTIONAL_REPORT_FILES = {"rechecks": "recheck_candidates.csv",
+                         "ledger": "configuration_source_ledger.csv"}
 COLLECTION_FILES = {
     "summary": "collection_run_summary.json",
     "results": "match_results.csv",
@@ -588,6 +611,9 @@ def load_pilot_report(
             if cell.get(f"{row['retailer_code']}_Price"):
                 issues.append(f"{row['target_id']} {row['retailer_code']} has a recheck "
                               "candidate beside a comparable price")
+    snapshot_date = str(sales.get("extract_date") or (scope[0].get("sales_extract_date", "")
+                                                         if scope else ""))
+    issues += _shopee_issues(report_dir, pilot_comparison, snapshot_date, fingerprints)
     if issues:
         raise PublicationInputError(sorted(set(issues), key=issues.index))
 
@@ -626,6 +652,9 @@ def load_pilot_report(
             1 for r in pilot_comparison if r["Comparable_Retailer_Count"] != "0"
         ),
         "recheck_candidates": len(rechecks),
+        "shopee_snapshot_prices": sum(1 for r in pilot_comparison if r.get("Shopee_Price")),
+        "shopee_without_snapshot_price": sum(
+            1 for r in pilot_comparison if not r.get("Shopee_Price")),
         "blank_cells_with_recheck_link": sum(
             1 for r, c in cells if not r[f"{c}_Price"] and r.get(f"{c}_Candidate_URL")
         ),
@@ -760,10 +789,14 @@ def _minimum_retailers(retailers: str, notes: str) -> str:
     )
 
 
-def comparison_header(*, recheck: bool = True, basis: bool = True) -> tuple[str, ...]:
+def comparison_header(
+    *, recheck: bool = True, basis: bool = True, shopee: bool = True
+) -> tuple[str, ...]:
     """The comparison tab header. ``recheck=False`` is the pilot-sheets-2 layout (before the
-    recheck columns of 2026-10-19) and ``basis=False`` the pilot-sheets-3 layout (before the
-    matching-basis columns of 2026-10-20); both are recognised as this publisher's."""
+    recheck columns of 2026-10-19), ``basis=False`` the pilot-sheets-3 layout (before the
+    matching-basis columns of 2026-10-20) and ``shopee=False`` the pilot-sheets-4 layout (before
+    the Shopee snapshot columns and the retailer-minimum headers); all are recognised as this
+    publisher's, so the next publication migrates the layout."""
     header = [
         "Rank",
         "Target ID",
@@ -775,6 +808,9 @@ def comparison_header(*, recheck: bool = True, basis: bool = True) -> tuple[str,
         "RAM (GB)",
         "Storage (GB)",
     ]
+    if shopee:
+        # The configuration's historical Shopee snapshot (sales extract), never a current price.
+        header += list(SHOPEE_HEADER)
     for code, _ in RETAILERS:
         name = RETAILER_NAMES[code]
         header += [
@@ -787,12 +823,14 @@ def comparison_header(*, recheck: bool = True, basis: bool = True) -> tuple[str,
     header += [
         # Out-of-stock prices are comparable under the current owner policy, so this is the
         # lowest *observed* price; the in-stock minimum is calculated separately.
-        "Lowest observed price (PHP)",
-        "Lowest observed price retailer(s)",
-        *(["Lowest observed price basis"] if basis else []),
-        "Lowest in-stock price (PHP)",
-        "Lowest in-stock retailer(s)",
-        *(["Lowest in-stock price basis"] if basis else []),
+        *(RETAILER_MINIMUM_HEADER if shopee else (
+            "Lowest observed price (PHP)",
+            "Lowest observed price retailer(s)",
+            *(["Lowest observed price basis"] if basis else []),
+            "Lowest in-stock price (PHP)",
+            "Lowest in-stock retailer(s)",
+            *(["Lowest in-stock price basis"] if basis else []),
+        )),
         "Comparable retailers",
         *(["Comparison basis"] if basis else []),
         "Shopee sales snapshot (extract date)",
@@ -805,7 +843,9 @@ def comparison_header(*, recheck: bool = True, basis: bool = True) -> tuple[str,
 
 # The pilot-sheets-2 and pilot-sheets-3 comparison layouts are this publisher's own too.
 EARLIER_HEADERS[COMPARISON_TAB] += (
-    comparison_header(recheck=False, basis=False), comparison_header(basis=False),
+    comparison_header(recheck=False, basis=False, shopee=False),
+    comparison_header(basis=False, shopee=False),
+    comparison_header(shopee=False),
 )
 BASIS_WORDS = {"EXACT_PRODUCT": "exact product match", "LISTED_SPEC": "listed-spec match",
                "MIXED": "exact product and listed-spec matches"}
@@ -816,6 +856,115 @@ def _minimum_basis(label: str, basis: str) -> str:
     if not label:
         return ""
     return f"{label} — winning offer: {BASIS_WORDS.get(basis, basis)}" if basis else label
+
+
+# Shopee snapshot columns (pilot-sheets-5, 2026-10-20). The price is the lowest eligible
+# mapped-listing snapshot price of the sales extract (shopee_snapshot.py), dated by that extract.
+SHOPEE_HEADER: tuple[str, ...] = (
+    "Shopee price (PHP, snapshot)",
+    "Shopee listing link",
+    "Shopee variation",
+    "Shopee price status",
+    "Shopee snapshot date",
+)
+# The existing minimums are retailer minimums: the Shopee snapshot is never part of them.
+RETAILER_MINIMUM_HEADER: tuple[str, ...] = (
+    "Lowest retailer price (PHP)",
+    "Lowest retailer price retailer(s)",
+    "Lowest retailer price basis",
+    "Lowest in-stock retailer price (PHP)",
+    "Lowest in-stock retailer(s)",
+    "Lowest in-stock retailer price basis",
+)
+SHOPEE_STATUS_TEXT = {
+    "SNAPSHOT_PRICE": "Lowest eligible mapped-listing snapshot price",
+    "NO_MAPPED_SOURCE": "No snapshot price: no contributing listing is still mapped",
+    "NO_VALID_SNAPSHOT_PRICE": "No snapshot price: no valid price in the extract",
+    "SALES_RANKING_NOT_SUPPLIED": "No snapshot price: sales ranking not supplied",
+    "SHOPEE_SNAPSHOT_NOT_SUPPLIED": "No snapshot price: not supplied to this report",
+    "NO_CONTRIBUTING_SOURCE": "No snapshot price: no contributing listing",
+}
+SHOPEE_NOT_IN_REPORT = "Shopee snapshot not in this report (generated before 2026-10-20)"
+
+
+def _shopee_cells(row: Mapping[str, str]) -> list[Cell]:
+    """Price, product-page link, variation (with model_id), status and snapshot date. A report
+    written before the Shopee columns (loaded with those columns blank; a current report always
+    records a status) says so instead of inventing values."""
+    if not row.get("Shopee_Price_Status"):
+        return [BLANK, BLANK, BLANK, text(SHOPEE_NOT_IN_REPORT), text("not in this report")]
+    url = row["Shopee_Listing_URL"]
+    variation = row["Shopee_Variation"] or row["Shopee_Item_Name"]
+    if row["Shopee_Model_ID"]:
+        variation = f"{variation} (model_id {row['Shopee_Model_ID']})".strip()
+    status = SHOPEE_STATUS_TEXT.get(row["Shopee_Price_Status"], row["Shopee_Price_Status"])
+    detail = row["Shopee_Price_Detail"]
+    if row["Shopee_Price"]:
+        detail = "; ".join(filter(None, (
+            detail, "not a current price; stock not verified; the link opens the product page, "
+            "not the variation")))
+    return [
+        number(row["Shopee_Price"], "php"),
+        text(url, link=url) if url else BLANK,
+        text(variation),
+        text(f"{status} ({detail})" if detail else status),
+        text(f"{row['Shopee_Snapshot_Date']} (historical Shopee sales extract; "
+             f"{row['Shopee_Snapshot_Label']})" if row["Shopee_Snapshot_Date"] else ""),
+    ]
+
+
+def _shopee_issues(
+    report_dir: Path,
+    comparison: Sequence[Mapping[str, str]],
+    snapshot_date: str,
+    fingerprints: dict[str, str],
+) -> list[str]:
+    """The Shopee columns must agree with the sales snapshot and with the report's own source
+    ledger: the same selection recomputed, one source row for price, link and variation."""
+    from .shopee_snapshot import SNAPSHOT_PRICE, listing_url, select_shopee_prices
+
+    issues: list[str] = []
+    rows = [row for row in comparison if row.get("Shopee_Price_Status")]
+    if not rows:
+        return issues
+    if len(rows) != len(comparison):
+        issues.append("some configurations have no Shopee snapshot status")
+    for row in rows:
+        where = f"{row['target_id']} Shopee"
+        if row["Shopee_Snapshot_Date"] != snapshot_date:
+            issues.append(f"{where} snapshot date differs from the report's sales snapshot")
+        if bool(row["Shopee_Price"]) != (row["Shopee_Price_Status"] == SNAPSHOT_PRICE):
+            issues.append(f"{where} price and status disagree")
+        if row["Shopee_Price"]:
+            try:
+                amount = Decimal(row["Shopee_Price"])
+            except InvalidOperation:
+                issues.append(f"{where} price is not a decimal")
+                continue
+            if not amount.is_finite() or amount <= 0:
+                issues.append(f"{where} price is not positive")
+            if row["Shopee_Listing_URL"] != listing_url(row["Shopee_Shop_ID"],
+                                                        row["Shopee_Item_ID"]):
+                issues.append(f"{where} link is not built from the listing's own IDs")
+    ledger_path = report_dir / OPTIONAL_REPORT_FILES["ledger"]
+    if not ledger_path.is_file():
+        return issues
+    fingerprints[f"report/{ledger_path.name}"] = sha256_file(ledger_path)
+    with ledger_path.open(newline="", encoding="utf-8") as handle:
+        ledger = list(csv.DictReader(handle))
+    selections, _ = select_shopee_prices(ledger)
+    for row in rows:
+        selection = selections.get(row["target_id"])
+        expected_price = selection.amount if selection else None
+        expected_model = selection.source["model_id"] if selection and selection.source else ""
+        try:
+            shown = Decimal(row["Shopee_Price"]) if row["Shopee_Price"] else None
+        except InvalidOperation:
+            shown = None
+        if (shown, row["Shopee_Model_ID"]) != (expected_price, expected_model):
+            issues.append(f"{row['target_id']} Shopee price or listing is not the source ledger's "
+                          "lowest eligible mapped listing")
+    return issues
 
 
 def _recheck_cells(report: PilotReport, row: Mapping[str, str], code: str) -> list[Cell]:
@@ -849,6 +998,7 @@ def comparison_plan(report: PilotReport) -> TabPlan:
             text(row["CPU_Series"]),
             number(row["RAM_Capacity"], "integer"),
             number(row["Storage_Capacity"], "integer"),
+            *_shopee_cells(row),
         ]
         for code, _ in RETAILERS:
             url = row[f"{code}_Offer_URL"]
@@ -884,6 +1034,223 @@ def comparison_plan(report: PilotReport) -> TabPlan:
         ]
         rows.append(tuple(cells))
     return TabPlan(COMPARISON_TAB, tuple(header), tuple(rows))
+
+
+# PILOT_PRICE_SUMMARY (pilot-sheets-5, 2026-10-20): exactly these seven visible columns. Every
+# price is the detailed comparison's own cell (build_plan checks it); nothing is reselected,
+# rematched or combined, and no minimum mixes the historical Shopee snapshot with retailer
+# observations. Context lives in cell notes; listed-spec prices are italic.
+SUMMARY_HEADER: tuple[str, ...] = (
+    "Laptop", "Shopee", *(RETAILER_NAMES[code] for code, _ in RETAILERS))
+SUMMARY_SHOPEE_PRICE = "Shopee price (PHP, snapshot)"
+# Nonblocking extraction warnings in words for the summary notes (the code stays in brackets).
+NOTE_WARNING_TEXT = {
+    "CPU_NUMBER_TITLE_DIFFERS": "the title states a different processor number",
+    "COLOR_TITLE_DIFFERS": "the title states a different colour",
+    "MODEL_URL_DIFFERS": "the link wording names a different model",
+    "MPN_REPEATS_RETAILER_SKU": "the part number repeats the retailer SKU",
+    "SHARED_TITLE_DIFFERS_RAM_CAPACITY_GB": "a shared title states different RAM",
+    "SHARED_TITLE_DIFFERS_STORAGE_CAPACITY_GB": "a shared title states different storage",
+    "SHARED_DESCRIPTION_DIFFERS_RAM_CAPACITY_GB": "a shared description states different RAM",
+    "SHARED_DESCRIPTION_DIFFERS_STORAGE_CAPACITY_GB": (
+        "a shared description states different storage"),
+}
+DETAIL_TABS_TEXT = f"Detailed evidence: {COMPARISON_TAB} and {REVIEW_TAB}."
+_LABEL_TIEBREAK_FIELDS = ("Resolution", "Display Type", "Refresh Rate", "GPU_Model", "RAM_Type",
+                          "Storage_Type", "CPU_Generation")
+
+
+def _capacity_text(value: str) -> str:
+    """'512' -> '512GB', '1000' or '1024' -> '1TB'."""
+    try:
+        amount = int(Decimal(value))
+    except (InvalidOperation, ValueError):
+        return value
+    for unit in (1000, 1024):
+        if amount >= unit and amount % unit == 0:
+            return f"{amount // unit}TB"
+    return f"{amount}GB"
+
+
+def configuration_label(row: Mapping[str, str]) -> str:
+    """'Acer ANV15-42-R2UH · 15.6″ · Ryzen 5 · 16GB/512GB': brand, series and model (without
+    repeating words already in the model), screen, CPU family, installed RAM and storage."""
+    brand, series, model = (row.get(k, "").strip() for k in ("Brand", "Series", "Model"))
+    name = [] if model.lower().startswith(brand.lower()) else [brand]
+    if series and series.lower() not in model.lower():
+        name.append(series)
+    name.append(model)
+    screen = row.get("Screen Size", "").strip()
+    if screen.endswith(".0"):
+        screen = screen[:-2]
+    parts = [" ".join(p for p in name if p), f"{screen}″" if screen else "",
+             row.get("CPU_Series", "").strip(),
+             "/".join(_capacity_text(row.get(k, "").strip())
+                      for k in ("RAM_Capacity", "Storage_Capacity") if row.get(k, "").strip())]
+    return " · ".join(p for p in parts if p)
+
+
+def configuration_labels(rows: Sequence[Mapping[str, str]]) -> list[str]:
+    """Labels that distinguish every configuration: a repeated label gains the catalog fields
+    that differ (resolution, panel, refresh rate, GPU, …), then its position if still equal."""
+    labels = [configuration_label(row) for row in rows]
+    groups: dict[str, list[int]] = {}
+    for index, label in enumerate(labels):
+        groups.setdefault(label, []).append(index)
+    for label, indexes in groups.items():
+        if len(indexes) < 2:
+            continue
+        differing = [f for f in _LABEL_TIEBREAK_FIELDS
+                     if len({rows[i].get(f, "") for i in indexes}) > 1]
+        for i in indexes:
+            extra = [rows[i].get(f, "") or f"no {f.lower()}" for f in differing]
+            labels[i] = " · ".join([label, *extra])
+        repeated: dict[str, list[int]] = {}
+        for i in indexes:
+            repeated.setdefault(labels[i], []).append(i)
+        for same in repeated.values():
+            if len(same) > 1:
+                for n, i in enumerate(same, start=1):
+                    labels[i] += f" · configuration {n} of {len(same)}"
+    return labels
+
+
+def _shopee_summary_note(row: Mapping[str, str]) -> str:
+    """Snapshot date, selection, listing, variation and link of the Shopee cell, or why blank."""
+    if not row.get("Shopee_Price_Status"):
+        return f"{SHOPEE_NOT_IN_REPORT}. {DETAIL_TABS_TEXT}"
+    status = SHOPEE_STATUS_TEXT.get(row["Shopee_Price_Status"], row["Shopee_Price_Status"])
+    extract = (f"Shopee sales extract of {row['Shopee_Snapshot_Date']} "
+               f"({row['Shopee_Snapshot_Label']})" if row["Shopee_Snapshot_Date"]
+               else "Shopee sales extract date not recorded")
+    if not row["Shopee_Price"]:
+        lines = [f"No Shopee snapshot price. {status}.",
+                 *([row["Shopee_Price_Detail"]] if row["Shopee_Price_Detail"] else []),
+                 f"Snapshot: {extract}."]
+    else:
+        variation = row["Shopee_Variation"] or "(no variation name)"
+        lines = [
+            "HISTORICAL SHOPEE SNAPSHOT — not a current price; stock not verified.",
+            f"Snapshot: {extract}.",
+            f"Rule: {status.lower()} ({row['Shopee_Price_Detail']}).",
+            f"Listing: {row['Shopee_Item_Name']}",
+            f"Variation: {variation} (model_id {row['Shopee_Model_ID']}; shop_id "
+            f"{row['Shopee_Shop_ID']}; item_id {row['Shopee_Item_ID']}).",
+            f"Link (opens the product page, not the variation): {row['Shopee_Listing_URL']}",
+        ]
+    return "\n".join([*lines, DETAIL_TABS_TEXT])
+
+
+def _retailer_summary_note(
+    report: PilotReport, row: Mapping[str, str], code: str, stock: str
+) -> str:
+    """Basis, stock, bundle, warnings and link of a price; the explanation of a blank."""
+    name = RETAILER_NAMES[code]
+    warnings = _codes(row[f"{code}_Warnings"])
+    if not row[f"{code}_Price"]:
+        lines = [f"{name}: no comparable price this week. " + _status_text(
+            row[f"{code}_Price_Status"],
+            report.selections[(row["target_id"], code)]["not_comparable_reasons"], stock,
+            row[f"{code}_Match_Basis"], row[f"{code}_Warnings"],
+            row.get(f"{code}_Offer_Details", "")) + "."]
+        url = row.get(f"{code}_Candidate_URL", "")
+        if url:
+            count = int(row.get(f"{code}_Recheck_Count") or 1)
+            note = row.get(f"{code}_Recheck_Note") or row.get(f"{code}_Candidate_Detail", "")
+            lines.append(f"Recheck (unconfirmed page, not a price): {url}"
+                         + (f" — {note}" if note else "")
+                         + (f" (+{count - 1} more in {REVIEW_TAB})" if count > 1 else ""))
+        return "\n".join([*lines, DETAIL_TABS_TEXT])
+    if row[f"{code}_Match_Basis"] == "LISTED_SPEC":
+        lines = ["LISTED-SPEC MATCH — not an exact product match: brand, family, screen, CPU "
+                 "series, installed RAM and storage agree; the specific Shopee model is unknown."]
+        if row.get(f"{code}_Offer_Details"):
+            lines.append(f"Offer as listed: {row[f'{code}_Offer_Details']}")
+    else:
+        detail = ", ".join(BASIS_TEXT[tag] for tag in row[f"{code}_Match_Basis"].split("+")
+                           if tag in BASIS_TEXT)
+        lines = ["Exact product match" + (f" ({detail})." if detail else ".")]
+    stock = row.get(f"{code}_Stock") or stock
+    lines.append({
+        "IN_STOCK": "Stock: in stock.",
+        "OUT_OF_STOCK": "Stock: OUT OF STOCK (price kept under the owner-approved policy).",
+    }.get(stock, f"Stock: {REASON_TEXT.get('AVAILABILITY_' + stock, stock or 'not stated')}."))
+    if "BUNDLE_OFFER" in warnings:
+        lines.append("Bundle offer (price kept under the owner-approved policy).")
+    disagreements = [w for w in warnings if w.startswith("OFFERS_DISAGREE_")]
+    if disagreements:
+        lines.append("Warning: " + _reason_text(disagreements) + ".")
+    other = [w for w in warnings if w != "BUNDLE_OFFER" and w not in disagreements
+             and w != "SPECIFIC_IDENTITY_UNRESOLVED"]
+    if other:
+        lines.append("Notes: " + ", ".join(
+            REASON_TEXT.get(w) or (f"{NOTE_WARNING_TEXT[w]} ({w})" if w in NOTE_WARNING_TEXT
+                                   else w) for w in other) + ".")
+    lines += [f"Observed: {row[f'{code}_Observed_At']} (Asia/Singapore).",
+              f"Offer: {row[f'{code}_Offer_URL']}"]
+    return "\n".join([*lines, DETAIL_TABS_TEXT])
+
+
+def summary_plan(report: PilotReport) -> TabPlan:
+    """One row per configuration, in the detailed comparison's order and scope."""
+    stock_by_observation = {row["observation_id"]: row["availability"] for row in report.history}
+    week = (f"{report.week_start.isoformat()} to "
+            f"{(report.week_end - timedelta(days=1)).isoformat()}")
+    sales = report.summary["sales_snapshot"]
+    extract = str(sales.get("extract_date") or next(
+        (r.get("Shopee_Snapshot_Date", "") for r in report.comparison), ""))
+    rows = []
+    for row, label in zip(report.comparison, configuration_labels(report.comparison),
+                          strict=True):
+        cells = [text(label),
+                 number(row.get("Shopee_Price", ""), "php", note=_shopee_summary_note(row))]
+        for code, _ in RETAILERS:
+            selection = report.selections[(row["target_id"], code)]
+            stock = stock_by_observation.get(selection["observation_id"], "")
+            cells.append(number(row[f"{code}_Price"], "php",
+                                note=_retailer_summary_note(report, row, code, stock),
+                                italic=row[f"{code}_Match_Basis"] == "LISTED_SPEC"))
+        rows.append(tuple(cells))
+    snapshot = (f"the Shopee sales extract of {extract} (sales run {sales.get('run_id', '')}; "
+                f"{sales.get('label', '')})" if extract else "the Shopee sales extract")
+    notes = (
+        f"One row per configuration, in the order and scope of {COMPARISON_TAB} (reporting week "
+        f"{week}, Asia/Singapore; cutoff {_local(report.as_of)}). Label: brand and model · "
+        f"screen · CPU family · installed RAM/storage. {DETAIL_TABS_TEXT}",
+        f"HISTORICAL SHOPEE SNAPSHOT, not a current price: the lowest eligible mapped-listing "
+        f"snapshot price from {snapshot}. Stock is not verified, and it is never compared with "
+        f"or included in the retailer prices. Each cell's note gives the snapshot date, the "
+        f"source listing and its variation (model_id); a blank cell's note says why. "
+        f"{DETAIL_TABS_TEXT}",
+        *(f"{RETAILER_NAMES[code]}: the price selected in {COMPARISON_TAB} for the reporting week "
+          f"{week} (Asia/Singapore). Italic = listed-spec match, not an exact product match. "
+          f"Out-of-stock and bundle prices are kept under the owner-approved policy. Each cell's "
+          f"note gives the matching basis, stock, bundle terms and warnings; a blank cell's note "
+          f"explains the blank and links an unconfirmed page to recheck when one exists. "
+          f"{DETAIL_TABS_TEXT}" for code, _ in RETAILERS),
+    )
+    return TabPlan(SUMMARY_TAB, SUMMARY_HEADER, tuple(rows), notes)
+
+
+def summary_issues(comparison: TabPlan, summary: TabPlan) -> list[str]:
+    """The summary repeats the comparison exactly: same rows in the same order, and every price
+    cell (value, kind and PHP format) identical to the detailed comparison's cell."""
+    if len(comparison.rows) != len(summary.rows):
+        return [f"{SUMMARY_TAB} has a different number of rows from {COMPARISON_TAB}"]
+    if summary.header != SUMMARY_HEADER:
+        return [f"{SUMMARY_TAB} header differs from its seven columns"]
+    sources = [comparison.header.index(SUMMARY_SHOPEE_PRICE), *(
+        comparison.header.index(f"{RETAILER_NAMES[code]} price (PHP)") for code, _ in RETAILERS)]
+    target = comparison.header.index("Target ID")
+    issues = []
+    for detailed, brief in zip(comparison.rows, summary.rows, strict=True):
+        for column, source in enumerate(sources, start=1):
+            mine, theirs = brief[column], detailed[source]
+            if (mine.kind, mine.value, mine.number_format) != (
+                    theirs.kind, theirs.value, theirs.number_format):
+                issues.append(f"{SUMMARY_TAB} {detailed[target].value} "
+                              f"{SUMMARY_HEADER[column]} differs from {COMPARISON_TAB}")
+    return issues
 
 
 def history_plan(report: PilotReport) -> TabPlan:
@@ -1120,6 +1487,16 @@ RUN_LOG_HEADER: tuple[str, ...] = (
     "Published content SHA-256",
     "Publisher version",
 )
+# pilot-sheets-5 (2026-10-20) appends these; earlier rows are kept with them blank, and a run
+# log with the earlier header is still this publisher's.
+RUN_LOG_HEADER_PILOT_SHEETS_4 = RUN_LOG_HEADER
+RUN_LOG_HEADER = (
+    *RUN_LOG_HEADER_PILOT_SHEETS_4,
+    "Summary rows",
+    "Shopee snapshot prices",
+    "Shopee snapshot extract date",
+)
+EARLIER_HEADERS[RUN_LOG_TAB] = (RUN_LOG_HEADER_PILOT_SHEETS_4,)
 
 
 def publication_id(report: PilotReport) -> str:
@@ -1198,13 +1575,21 @@ class PublicationPlan:
             "Input fingerprints": text(json.dumps(report.fingerprints, sort_keys=True)),
             "Published content SHA-256": text(self.content_sha256),
             "Publisher version": text(PUBLISHER_VERSION),
+            "Summary rows": number(str(len(self.tabs[SUMMARY_TAB].rows)), "integer"),
+            "Shopee snapshot prices": number(str(counts.get("shopee_snapshot_prices", 0)),
+                                             "integer"),
+            "Shopee snapshot extract date": text(next(
+                (r["Shopee_Snapshot_Date"] for r in report.comparison
+                 if r.get("Shopee_Snapshot_Date")), "")),
         }
         return values
 
 
 def build_plan(report: PilotReport) -> PublicationPlan:
+    comparison = comparison_plan(report)
     tabs = {
-        COMPARISON_TAB: comparison_plan(report),
+        COMPARISON_TAB: comparison,
+        SUMMARY_TAB: summary_plan(report),
         HISTORY_TAB: history_plan(report),
         REVIEW_TAB: review_plan(report),
     }
@@ -1212,6 +1597,9 @@ def build_plan(report: PilotReport) -> PublicationPlan:
         for row in plan.rows:
             if len(row) != plan.width:
                 raise PublicationInputError([f"{plan.title} row width differs from its header"])
+    issues = summary_issues(comparison, tabs[SUMMARY_TAB])
+    if issues:
+        raise PublicationInputError(issues)
     return PublicationPlan(report, tabs, publication_id(report), grid_sha256(list(tabs.values())))
 
 
@@ -1220,6 +1608,31 @@ def write_plan_csv(path: Path, plan: TabPlan) -> None:
         writer = csv.writer(handle)
         for row in plan.grid():
             writer.writerow([cell.value for cell in row])
+
+
+def _column_letter(index: int) -> str:
+    letters = ""
+    index += 1
+    while index:
+        index, remainder = divmod(index - 1, 26)
+        letters = chr(65 + remainder) + letters
+    return letters
+
+
+def write_plan_notes_csv(path: Path, plan: TabPlan) -> int:
+    """The planned cell notes and italics of a tab (one row per annotated cell); the count."""
+    count = 0
+    with path.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.writer(handle)
+        writer.writerow(["cell", "column", "row_label", "value", "italic", "note"])
+        for r, row in enumerate(plan.grid()):
+            for c, cell in enumerate(row):
+                if cell.note or cell.italic:
+                    writer.writerow([f"{_column_letter(c)}{r + 1}", plan.header[c],
+                                     row[0].value if r else "(header)", cell.value,
+                                     "TRUE" if cell.italic else "", cell.note])
+                    count += 1
+    return count
 
 
 # Sheets access (gspread Spreadsheet-compatible object)
@@ -1237,8 +1650,12 @@ def _cell_data(cell: Cell) -> dict:
         text_format["link"] = {"uri": cell.link}
     if cell.bold:
         text_format["bold"] = True
+    if cell.italic:
+        text_format["italic"] = True
     if text_format:
         data.setdefault("userEnteredFormat", {})["textFormat"] = text_format
+    if cell.note:
+        data["note"] = cell.note
     return data
 
 
@@ -1253,7 +1670,8 @@ class TabState:
 
     @property
     def used_rows(self) -> int:
-        return sum(1 for row in self.grid if any(_has_content(cell) for cell in row))
+        notes = self.title in NOTE_TABS
+        return sum(1 for row in self.grid if any(_has_content(c, notes=notes) for c in row))
 
     def header(self) -> list[str]:
         if not self.grid:
@@ -1261,8 +1679,9 @@ class TabState:
         return [_cell_text(cell) for cell in self.grid[0]]
 
 
-def _has_content(cell: Mapping) -> bool:
-    return bool(cell.get("userEnteredValue"))
+def _has_content(cell: Mapping, *, notes: bool = False) -> bool:
+    """A value; with ``notes``, a note counts too (a stale note on a note tab)."""
+    return bool(cell.get("userEnteredValue")) or (notes and bool(cell.get("note")))
 
 
 def _cell_text(cell: Mapping) -> str:
@@ -1315,6 +1734,8 @@ def tab_requests(state: TabState, plan_grid: Sequence[Sequence[Cell]], width: in
     frozen header and filter. Every request targets only this tab's sheet ID."""
     sheet_id = state.sheet_id
     rows = len(plan_grid)
+    fields = NOTE_CELL_FIELDS if state.title in NOTE_TABS else CELL_FIELDS
+    summary = state.title == SUMMARY_TAB
     requests: list[dict] = []
     if rows > state.row_count or width > state.column_count:
         requests.append(
@@ -1332,19 +1753,23 @@ def tab_requests(state: TabState, plan_grid: Sequence[Sequence[Cell]], width: in
             }
         )
     requests += [
-        # Clear values, number formats, links and bold on the whole tab; other formatting stays.
-        {"updateCells": {"range": {"sheetId": sheet_id}, "fields": CELL_FIELDS}},
+        # Clear values, number formats, links and bold (and, on a note tab, notes and italics)
+        # on the whole tab; other formatting stays.
+        {"updateCells": {"range": {"sheetId": sheet_id}, "fields": fields}},
         {
             "updateCells": {
                 "start": {"sheetId": sheet_id, "rowIndex": 0, "columnIndex": 0},
                 "rows": [{"values": [_cell_data(c) for c in row]} for row in plan_grid],
-                "fields": CELL_FIELDS,
+                "fields": fields,
             }
         },
         {
+            # The summary also freezes its Laptop column.
             "updateSheetProperties": {
-                "properties": {"sheetId": sheet_id, "gridProperties": {"frozenRowCount": 1}},
-                "fields": "gridProperties.frozenRowCount",
+                "properties": {"sheetId": sheet_id, "gridProperties": {
+                    "frozenRowCount": 1, **({"frozenColumnCount": 1} if summary else {})}},
+                "fields": "gridProperties.frozenRowCount" + (
+                    ",gridProperties.frozenColumnCount" if summary else ""),
             }
         },
         {
@@ -1361,6 +1786,56 @@ def tab_requests(state: TabState, plan_grid: Sequence[Sequence[Cell]], width: in
             }
         },
     ]
+    if summary:
+        requests += summary_layout_requests(sheet_id, rows, width)
+    return requests
+
+
+# The summary's simple grid: a readable wrapped Laptop column, equal right-aligned price
+# columns, a shaded header and subtle row banding. Banding is a background on every second data
+# row, reset on the whole tab first, so a shorter publication leaves no stale bands.
+SUMMARY_LAPTOP_WIDTH = 340
+SUMMARY_PRICE_WIDTH = 125
+HEADER_BACKGROUND = {"red": 0.851, "green": 0.886, "blue": 0.925}
+BAND_BACKGROUND = {"red": 0.957, "green": 0.965, "blue": 0.976}
+SUMMARY_LAYOUT_FIELDS = (
+    "userEnteredFormat(backgroundColor,horizontalAlignment,verticalAlignment,wrapStrategy)"
+)
+
+
+def summary_layout_requests(sheet_id: int | None, rows: int, width: int) -> list[dict]:
+    """Layout of the summary tab; every request is scoped to its sheet ID."""
+
+    def area(top: int, bottom: int, left: int, right: int) -> dict:
+        return {"sheetId": sheet_id, "startRowIndex": top, "endRowIndex": bottom,
+                "startColumnIndex": left, "endColumnIndex": right}
+
+    def style(rng: dict, fmt: dict, fields: str = SUMMARY_LAYOUT_FIELDS) -> dict:
+        return {"repeatCell": {"range": rng, "cell": {"userEnteredFormat": fmt},
+                               "fields": fields}}
+
+    requests = [
+        style({"sheetId": sheet_id}, {}),
+        style(area(0, 1, 0, width), {"backgroundColor": HEADER_BACKGROUND,
+                                     "horizontalAlignment": "CENTER",
+                                     "verticalAlignment": "MIDDLE", "wrapStrategy": "WRAP"}),
+    ]
+    if rows > 1:
+        requests += [
+            style(area(1, rows, 0, 1), {"verticalAlignment": "MIDDLE", "wrapStrategy": "WRAP"}),
+            style(area(1, rows, 1, width), {"horizontalAlignment": "RIGHT",
+                                            "verticalAlignment": "MIDDLE"}),
+        ]
+    requests += [
+        style(area(row, row + 1, 0, width), {"backgroundColor": BAND_BACKGROUND},
+              "userEnteredFormat.backgroundColor")
+        for row in range(2, rows, 2)
+    ]
+    for left, right, pixels in ((0, 1, SUMMARY_LAPTOP_WIDTH), (1, width, SUMMARY_PRICE_WIDTH)):
+        requests.append({"updateDimensionProperties": {
+            "range": {"sheetId": sheet_id, "dimension": "COLUMNS", "startIndex": left,
+                      "endIndex": right},
+            "properties": {"pixelSize": pixels}, "fields": "pixelSize"}})
     return requests
 
 
@@ -1384,19 +1859,26 @@ def guard_requests(requests: Sequence[Mapping], allowed_sheet_ids: set[int]) -> 
         ids = sheet_ids(request)
         if not ids or any(sheet_id not in allowed_sheet_ids for sheet_id in ids):
             raise DestinationError("A write request targets a sheet outside the publisher tabs.")
-        if set(request) - {"updateCells", "updateSheetProperties", "setBasicFilter"}:
+        if set(request) - {"updateCells", "updateSheetProperties", "setBasicFilter",
+                           "repeatCell", "updateDimensionProperties"}:
             raise DestinationError("A write request uses an unexpected operation.")
 
 
 def verify_tab(state: TabState, plan_grid: Sequence[Sequence[Cell]]) -> list[str]:
     """Compare a read-back tab with the planned cells: values, links, PHP formats, extras."""
     issues: list[str] = []
+    notes = state.title in NOTE_TABS
     for r, planned_row in enumerate(plan_grid):
         actual_row = state.grid[r] if r < len(state.grid) else ()
         for c, planned in enumerate(planned_row):
             actual = actual_row[c] if c < len(actual_row) else {}
             where = f"{state.title} row {r + 1} column {c + 1}"
             value = actual.get("userEnteredValue") or {}
+            if notes and (actual.get("note") or "") != planned.note:
+                issues.append(f"{where} note differs")
+            if notes and bool(actual.get("userEnteredFormat", {}).get("textFormat", {}).get(
+                    "italic")) != planned.italic:
+                issues.append(f"{where} italic differs")
             if planned.kind == "blank":
                 if value:
                     issues.append(f"{where} should be blank")
@@ -1418,10 +1900,10 @@ def verify_tab(state: TabState, plan_grid: Sequence[Sequence[Cell]]) -> list[str
             if (link or "") != planned.link:
                 issues.append(f"{where} link differs")
         for c in range(len(planned_row), len(actual_row)):
-            if _has_content(actual_row[c]):
+            if _has_content(actual_row[c], notes=notes):
                 issues.append(f"{state.title} row {r + 1} has an unexpected extra cell")
     for r in range(len(plan_grid), len(state.grid)):
-        if any(_has_content(cell) for cell in state.grid[r]):
+        if any(_has_content(cell, notes=notes) for cell in state.grid[r]):
             issues.append(f"{state.title} row {r + 1} has unexpected content")
     return issues
 
@@ -1551,7 +2033,7 @@ def publish(
         error = f"{type(exc).__name__}: {exc}"
         try:
             log("PARTIAL_FAILURE", written, "NOT_RUN",
-                "Rerun the same --write-sheets command; it replaces all four tabs.")
+                "Rerun the same --write-sheets command; it replaces all publisher tabs.")
         except Exception as log_exc:  # pragma: no cover - reported to the caller
             error += f"; run-log update also failed ({type(log_exc).__name__})"
         return PublicationOutcome("PARTIAL_FAILURE", written, [], tab_ids, error)

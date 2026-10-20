@@ -13,13 +13,11 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent / "src"))
 
 from laptop_tracker.sheet_publication import (
-    COMPARISON_TAB,
     DATA_TABS,
-    HISTORY_TAB,
     PUBLISHER_TABS,
-    REVIEW_TAB,
     RUN_LOG_HEADER,
     RUN_LOG_TAB,
+    SUMMARY_TAB,
     DestinationError,
     PublicationInputError,
     build_plan,
@@ -28,6 +26,7 @@ from laptop_tracker.sheet_publication import (
     publish,
     read_tab,
     write_plan_csv,
+    write_plan_notes_csv,
 )
 
 ROOT = Path(__file__).resolve().parent
@@ -38,8 +37,9 @@ HTTP_TIMEOUT_SECONDS = (15.0, 90.0)  # (connect, read/send)
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Publish reviewed Phase 10 pilot price reports (from track_prices.py) to four "
-            "dedicated tabs: PILOT_PRICE_COMPARISON, PILOT_PRICE_HISTORY, PILOT_PRICE_REVIEW and "
+            "Publish reviewed Phase 10 pilot price reports (from track_prices.py) to five "
+            "dedicated tabs: PILOT_PRICE_COMPARISON, PILOT_PRICE_SUMMARY (a minimal price grid "
+            "of the comparison's own prices), PILOT_PRICE_HISTORY, PILOT_PRICE_REVIEW and "
             "PILOT_PRICE_RUN_LOG. --preview validates and inspects the destination read-only; "
             "--write-sheets backs up existing publisher tabs locally, replaces their content, "
             "and verifies every cell by readback. Never fetches retailer pages, reruns matching, "
@@ -49,7 +49,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     mode = parser.add_mutually_exclusive_group(required=True)
     mode.add_argument("--preview", action="store_true", help="Validate and plan; no writes.")
     mode.add_argument(
-        "--write-sheets", action="store_true", help="Publish to the four pilot tabs."
+        "--write-sheets", action="store_true", help="Publish to the five pilot tabs."
     )
     parser.add_argument(
         "--report-dir", type=Path, required=True, help="Reviewed track_prices.py report folder."
@@ -135,8 +135,11 @@ def main(
 
     run_dir = args.output_root / f"{published_at.strftime('%Y%m%dT%H%M%S%fZ')}_{mode}"
     run_dir.mkdir(parents=True, exist_ok=False)
+    notes: dict[str, int] = {}
     for title, tab in plan.tabs.items():
         write_plan_csv(run_dir / f"plan_{title}.csv", tab)
+        if any(cell.note or cell.italic for row in tab.grid() for cell in row):
+            notes[title] = write_plan_notes_csv(run_dir / f"plan_{title}_notes.csv", tab)
     week = report.summary["report_week"]
     local_report: dict = {
         "mode": mode.upper(),
@@ -152,6 +155,7 @@ def main(
         "counts": report.counts,
         "planned_rows": {title: len(tab.rows) for title, tab in plan.tabs.items()}
         | {RUN_LOG_TAB: "previous publications + 1"},
+        "planned_cell_notes": notes,
         "input_fingerprints": report.fingerprints,
         "published_content_sha256": plan.content_sha256,
     }
@@ -169,6 +173,12 @@ def main(
         f"Asia/Singapore), {week['status']}; report cutoff {report.summary['as_of_utc']}."
     )
     print(f"Shopee sales snapshot: {report.summary['sales_snapshot'].get('label', '')}.")
+    print(
+        f"Shopee snapshot prices (historical; never in the retailer minimums): "
+        f"{report.counts.get('shopee_snapshot_prices', 0)} of {len(report.comparison)} "
+        f"configurations. {SUMMARY_TAB}: {len(plan.tabs[SUMMARY_TAB].rows)} rows, "
+        f"{notes.get(SUMMARY_TAB, 0)} annotated cells."
+    )
     counts = report.counts
     print(
         f"Pilot scope: {counts['pilot_configurations']} configurations "
@@ -258,13 +268,13 @@ def main(
         },
         "backups": sorted(p.name for p in run_dir.glob("backup_*.json")),
         "retry": "Rerun the same --write-sheets command after fixing the cause; it replaces "
-        "all four publisher tabs and updates this publication's run-log row.",
+        "all five publisher tabs and updates this publication's run-log row.",
     }
     print(
         f"Publication {outcome.status}: tabs written {len(outcome.tabs_written)} of "
         f"{len(PUBLISHER_TABS)}; readback issues {len(outcome.readback_issues)}."
     )
-    for title in (COMPARISON_TAB, HISTORY_TAB, REVIEW_TAB):
+    for title in DATA_TABS:
         print(f"  {title}: {len(plan.tabs[title].rows)} rows planned.")
     if outcome.error:
         print(f"  Error: {outcome.error}", file=sys.stderr)

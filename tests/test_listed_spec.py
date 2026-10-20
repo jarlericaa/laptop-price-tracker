@@ -58,6 +58,7 @@ from laptop_tracker.sheet_publication import (
     _status_text,
     comparison_plan,
     load_pilot_report,
+    summary_plan,
 )
 from laptop_tracker.target_master import validate_target_master
 from laptop_tracker.verified_top import CONFIGURATION_COLUMNS
@@ -403,9 +404,14 @@ def test_the_publisher_accepts_and_labels_listed_spec_prices(tmp_path) -> None:
     assert values["Laptop Factory status"].startswith(
         "Comparable price; listed-spec match — brand, family, screen, CPU series, installed "
         "RAM and storage agree; specific Shopee model unknown; offer: title")
-    assert values["Lowest observed price basis"] == (
+    assert values["Lowest retailer price basis"] == (
         "Lowest price matching listed specs — winning offer: listed-spec match")
     assert values["Comparison basis"] == "listed-spec match"
+    # PILOT_PRICE_SUMMARY: the same price, italic, with a note that it is not an exact match.
+    summary = summary_plan(loaded)
+    cell = summary.rows[0][summary.header.index("Laptop Factory")]
+    assert (cell.value, cell.italic) == (values["Laptop Factory price (PHP)"], True)
+    assert cell.note.startswith("LISTED-SPEC MATCH — not an exact product match")
     assert _status_text("SELECTED", "", basis="LISTED_SPEC").startswith(
         "Comparable price; listed-spec match")
 
