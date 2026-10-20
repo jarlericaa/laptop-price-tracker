@@ -258,3 +258,28 @@ are `DISCOVERY_NOT_ATTEMPTED`, not `NO_CANDIDATE_FOUND`. New columns: `in_report
 Offer details add `is_current`, `price_role` (`CONFIRMED` / `UNCONFIRMED_NOT_COMPARED`),
 `differing_fields`, `offer_terms_category`, and relation `SEARCHED_FOR` beside `MATCHED`,
 `CANDIDATE` and `COLLECTED_FOR` (search context is never an assignment).
+
+## Matching basis and listed-spec prices (2026-10-20)
+
+Decision record: [DECISIONS.md](DECISIONS.md#listed-spec-comparison-for-broad-family-targets-2026-10-20).
+
+- `weekly_price_comparison.csv`:
+  - per retailer, `<code>_Match_Basis` is `LISTED_SPEC` for a listed-spec price, and the new
+    `<code>_Offer_Details` holds the chosen offer's own model, processor, GPU, panel and
+    resolution;
+  - per configuration, `Comparison_Basis`, `Lowest_Price_Basis` and `Lowest_In_Stock_Basis`
+    are `EXACT_PRODUCT`, `LISTED_SPEC` or `MIXED`;
+  - `Lowest_Price_Label` and `Lowest_In_Stock_Label` say "... matching listed specs" whenever a
+    listed-spec price is among those compared.
+- `weekly_price_selections.csv`: `comparison_basis`, `offer_details`.
+- `price_history.csv`: `listed_spec_status`, `listed_spec_target_ids`,
+  `listed_spec_ambiguous_target_ids`, `listed_spec_comparability`,
+  `listed_spec_comparability_reasons` (the stored match columns are unchanged).
+- `price_review_queue.csv`: `LISTED_SPEC_MATCH <target> (...)` rows show each listed-spec
+  association with the offer's details; `LISTED_SPEC_AMBIGUOUS (...)` rows show offers that fit
+  several targets equally.
+- Blank cells whose only offer is a listed-spec match with an excluded price read
+  `LISTED_SPEC_PRICE_EXCLUDED: <reasons>`.
+- `coverage.csv`: `LISTED_SPEC_PRICE_AVAILABLE`, `LISTED_SPEC_PRICE_EXCLUDED`, `price_basis`.
+- The matching-rules version is `five-field-exact+listed-spec-fallback/2026-10-20`, and
+  `listed_spec.py` is part of the rules fingerprint.

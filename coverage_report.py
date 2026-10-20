@@ -13,6 +13,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent / "src"))
 
+from laptop_tracker.listed_spec import ListedSpecMatcher
 from laptop_tracker.match_run import matcher_from_validated, read_observations_csv
 from laptop_tracker.observation_store import observation_id
 from laptop_tracker.offer_terms import (
@@ -28,7 +29,7 @@ from laptop_tracker.pilot_coverage import (
     coverage,
 )
 from laptop_tracker.price_tracking import RETAILERS, price_note_codes, utc_text
-from laptop_tracker.replay import price_comparability, reparse_saved_pages
+from laptop_tracker.replay import offer_price_eligibility, price_comparability, reparse_saved_pages
 from laptop_tracker.target_master import read_table_snapshot_csv, validate_target_master
 from laptop_tracker.verified_top import sha256_file
 
@@ -88,6 +89,7 @@ def main(argv: list[str] | None = None) -> int:
         return 1
     target_master = validate_target_master(read_table_snapshot_csv(args.target_master))
     matcher = matcher_from_validated(target_master)
+    listed = ListedSpecMatcher(target_master.valid_rows)
     target_rows = {
         str(row["target_id"]): row for row in target_master.valid_rows.to_dict(orient="records")
     }
@@ -96,8 +98,10 @@ def main(argv: list[str] | None = None) -> int:
     if args.html_dir:
         observations, failures = reparse_saved_pages(observations, args.html_dir)
         stage = f"saved HTML re-parsed with current adapters ({len(failures)} failures)"
+    # Collection lineage: the request that fetched each observation and the configuration it
+    # was requested for (a hint, never an assignment).
     hints = {
-        row["observation_id"]: row.get("expected_target_id", "")
+        row["observation_id"]: (row.get("expected_target_id", ""), row.get("request_id", ""))
         for path in args.match_results for row in read(path) or ()
     }
     offers = []
@@ -109,6 +113,8 @@ def main(argv: list[str] | None = None) -> int:
             continue  # The same saved observation in two inputs is one observation.
         seen.add(key)
         result = matcher.match_observation(observation)
+        association = listed.associate(dict(result.offer_attributes or {}), observation.raw_title,
+                                       result.reason_codes)
         terms = classify_offer_terms(observation)
         offers.append(OfferRecord(
             retailer_id=observation.retailer_id,
@@ -122,7 +128,8 @@ def main(argv: list[str] | None = None) -> int:
             price=format(observation.price, "f"),
             availability=observation.availability.value,
             price_eligibility=price_comparability(observation, result, args.offer_terms_policy),
-            expected_target_id=hints.get(key, ""),
+            expected_target_id=hints.get(key, ("", ""))[0],
+            request_id=hints.get(key, ("", ""))[1],
             bundle_flag=(flag := {None: "", True: "TRUE", False: "FALSE"}[
                 observation.details.bundle_flag if observation.details else None
             ]),
@@ -130,6 +137,11 @@ def main(argv: list[str] | None = None) -> int:
             price_notes=price_note_codes(flag, terms, args.offer_terms_policy),
             offer_terms_category=terms.category,
             offer_index=str(observation.offer_index),
+            raw_title=observation.raw_title,
+            listed_target_ids=association.target_ids,
+            listed_ambiguous_ids=association.ambiguous_ids,
+            listed_price_eligibility=offer_price_eligibility(observation, args.offer_terms_policy)
+            if association.status else "",
         ))
     scope = [row["target_id"] for row in read(args.scope) or ()]
     discovery = args.discovery_dir

@@ -566,7 +566,12 @@ def test_a_tab_with_the_previous_publisher_header_is_still_owned(world) -> None:
     code, fake, _ = run(world, fake=FakeSpreadsheet({COMPARISON_TAB: previous}))
 
     assert code == 0
-    assert fake.values(COMPARISON_TAB)[0][-9] == "Lowest observed price (PHP)"
+    header = fake.values(COMPARISON_TAB)[0]
+    assert "Lowest observed price (PHP)" in header
+    # pilot-sheets-4 (2026-10-20): the matching basis of each minimum and of the comparison.
+    assert header[header.index("Lowest observed price retailer(s)") + 1] == (
+        "Lowest observed price basis")
+    assert "Comparison basis" in header
 
 
 def test_text_is_never_sent_as_a_formula() -> None:
@@ -585,7 +590,14 @@ def test_links_are_exact_offers_and_candidates_are_never_confirmed_links(world) 
     lf_link = values[0].index("Laptop Factory product link")
     out_of_stock = fake.cell(COMPARISON_TAB, 2, lf_link)
     assert out_of_stock["hyperlink"] == "https://laptopfactory.com.ph/product/ex02/"
-    assert CANDIDATE_SLUG not in json.dumps(fake.values(COMPARISON_TAB))
+    # 2026-10-19 (second review): an unconfirmed page appears in the comparison only in the
+    # labelled recheck columns beside a blank price, never as a product link or a price.
+    header = fake.values(COMPARISON_TAB)[0]
+    for row in fake.values(COMPARISON_TAB)[1:]:
+        for name, value in zip(header, row, strict=False):
+            if CANDIDATE_SLUG in str(value):
+                assert name.endswith("recheck link (unconfirmed)") or name.endswith(
+                    "recheck note"), name
     # The candidate observation appears in history and review only as an unconfirmed page.
     for title in (HISTORY_TAB, REVIEW_TAB):
         header = fake.values(title)[0]

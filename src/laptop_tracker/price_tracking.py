@@ -35,26 +35,46 @@ offers for other catalog targets are kept and labelled out of scope.
 from __future__ import annotations
 
 import hashlib
+import re
 from collections import Counter, defaultdict
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, date, datetime, time, timedelta
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from types import ModuleType
 from zoneinfo import ZoneInfo
 
-from . import conventions, evidence_approvals, extraction, matching, normalization
+from . import (
+    conventions,
+    evidence_approvals,
+    extraction,
+    listed_spec,
+    matching,
+    normalization,
+    product_names,
+)
+from .conventions import canonical_gpu_models
+from .extraction import ExtractionStatus, extract_offer_attributes
+from .listed_spec import (
+    EXACT_PRODUCT_BASIS,
+    IDENTITY_UNRESOLVED_WARNING,
+    LISTED_SPEC_AMBIGUOUS,
+    LISTED_SPEC_BASIS,
+    LISTED_SPEC_MATCH,
+    ListedSpecMatcher,
+    ListedSpecResult,
+    offer_details,
+)
 from .matching import (
+    DIFFERENT_MODEL,
     SAME_MODEL_DIFFERENT_CONFIGURATION,
     ExactMatcher,
     MatchStatus,
+    configuration_outcome,
     core_differences,
-    describe_differences,
     is_warning_code,
     match_basis_from_codes,
-    offer_outcome,
-    review_codes,
 )
 from .normalization import CORE_MATCH_COLUMNS, core_key
 from .observation_store import (
@@ -72,6 +92,14 @@ from .offer_terms import (
     terms_price_effect,
 )
 from .offers import Availability, PriceType
+from .recheck import (
+    FETCHED_NOT_CONFIRMED,
+    RecheckCandidate,
+    merge_rechecks,
+    offer_explanation,
+    recheck_note,
+    url_key,
+)
 from .supporting_tables import TableResult
 from .target_master import (
     CONFIGURATION,
@@ -83,10 +111,11 @@ from .verified_top import CONTRIBUTING, money
 
 REPORTING_TIMEZONE = "Asia/Singapore"
 REPORTING_CURRENCY = "PHP"
-MATCHING_RULES_VERSION = "five-field-exact/scoped-evidence/2026-10-19"
+MATCHING_RULES_VERSION = "five-field-exact+listed-spec-fallback/2026-10-20"
 # Modules whose code defines matching outcomes; their bytes fingerprint the rule version.
 RULE_MODULES: tuple[ModuleType, ...] = (
-    normalization, conventions, evidence_approvals, extraction, matching
+    normalization, conventions, evidence_approvals, extraction, matching, product_names,
+    listed_spec,
 )
 
 # Retailer price columns in the requested order: code, adapter retailer_id.
@@ -159,6 +188,12 @@ RETAILER_DETAIL_SUFFIXES: tuple[str, ...] = (
     # An offer found for this configuration that is not a confirmed match (2026-10-19): its
     # link, outcome, and the differing values. Its price is never shown in the comparison.
     "Candidate_URL", "Candidate_Status", "Candidate_Detail",
+    # Recheck candidates (2026-10-19, second review): how many relevant unconfirmed pages are
+    # listed for a blank cell (recheck_candidates.csv), and the first one's reason in words.
+    "Recheck_Count", "Recheck_Note",
+    # The chosen offer's own model, processor and material hardware, as it states them
+    # (2026-10-20): a listed-spec price never claims full configuration equivalence.
+    "Offer_Details",
 )
 COMPARISON_COLUMNS: tuple[str, ...] = (
     *LEGACY_COMPARISON_COLUMNS[: LEGACY_COMPARISON_COLUMNS.index("Comparable_Retailer_Count")],
@@ -179,6 +214,14 @@ COMPARISON_COLUMNS: tuple[str, ...] = (
     "Shopee_Sales_Extract_Date",
     "matching_context_id",
     "selected_list_sha256",
+    # Matching basis of the configuration's prices and of each minimum (2026-10-20):
+    # EXACT_PRODUCT, LISTED_SPEC or MIXED; the labels say "matching listed specs" whenever a
+    # listed-spec price is among those compared.
+    "Comparison_Basis",
+    "Lowest_Price_Basis",
+    "Lowest_Price_Label",
+    "Lowest_In_Stock_Basis",
+    "Lowest_In_Stock_Label",
 )
 
 LEGACY_SELECTION_COLUMNS: tuple[str, ...] = (
@@ -235,6 +278,10 @@ SELECTION_COLUMNS: tuple[str, ...] = (
     "candidate_status",
     "candidate_detail",
     "candidate_observation_id",
+    "recheck_count",
+    "recheck_note",
+    "comparison_basis",
+    "offer_details",
 )
 
 HISTORY_COLUMNS: tuple[str, ...] = (
@@ -281,6 +328,12 @@ HISTORY_COLUMNS: tuple[str, ...] = (
     "offer_terms_evidence",
     "price_notes",
     "search_context_target_ids",
+    # Listed-spec association (2026-10-20): never an exact assignment; kept beside it.
+    "listed_spec_status",
+    "listed_spec_target_ids",
+    "listed_spec_ambiguous_target_ids",
+    "listed_spec_comparability",
+    "listed_spec_comparability_reasons",
 )
 
 SERIES_COLUMNS: tuple[str, ...] = (
@@ -670,6 +723,11 @@ def matching_rules_sha256(modules: Sequence[ModuleType] = RULE_MODULES) -> str:
                 b"retailer_evidence_approvals.csv\0"
                 + evidence_approvals.APPROVALS_PATH.read_bytes() + b"\0"
             )
+        if module is product_names and product_names.REGISTRY_PATH.is_file():
+            # The reviewed product-name registry decides name normalization and kinds.
+            digest.update(
+                b"product_name_registry.csv\0" + product_names.REGISTRY_PATH.read_bytes() + b"\0"
+            )
     return digest.hexdigest()
 
 
@@ -727,10 +785,23 @@ class ObservationView:
     notes: tuple[str, ...] = ()
     # Targets this offer was searched or collected for: context only, never an assignment.
     search_targets: tuple[str, ...] = ()
+    # Listed-spec association across broad-family targets (2026-10-20) and the offer's price
+    # comparability under that basis (the same price rules as an exact match).
+    listed: ListedSpecResult | None = None
+    listed_status: str = ""
+    listed_reasons: tuple[str, ...] = ()
+    # EXACT_PRODUCT, or LISTED_SPEC for the copy of a view that stands for one listed-spec
+    # association (``listed_target``) in a selection. The stored match is never changed.
+    basis: str = EXACT_PRODUCT_BASIS
+    listed_target: str = ""
 
     @property
     def target_id(self) -> str:
         return self.match.target_id
+
+    @property
+    def title(self) -> str:
+        return self.stored.record.get("raw_title", "")
 
     @property
     def is_exact(self) -> bool:
@@ -844,14 +915,36 @@ class Selection:
     candidate: ObservationView | None = None
     candidate_status: str = ""
     candidate_detail: str = ""
+    # Why the recorded discovery of this week found no related offer (search-stage status).
+    search_detail: str = ""
+    # Relevant unconfirmed pages to recheck manually, most useful first (never priced).
+    rechecks: tuple[RecheckCandidate, ...] = ()
+
+
+# Search-stage statuses a blank cell can take from the recorded discovery of the report week
+# (2026-10-19), shared with the coverage report (pilot_coverage.DiscoveryLogs.stage).
+SEARCH_STAGE_STATUSES: tuple[str, ...] = (
+    "FETCH_FAILED", "CANDIDATE_NOT_FETCHED", "CATALOG_IDENTITY_UNRESOLVED",
+    "NO_RELEVANT_CANDIDATE", "NO_CANDIDATE_FOUND", "DISCOVERY_INCOMPLETE", "SEARCH_FAILED",
+    "DISCOVERY_NOT_ATTEMPTED",
+)
 
 
 def select_week(
     week: ReportWeek,
     views: Sequence[ObservationView],
     selected: SelectedList,
+    search_outcomes: Mapping[tuple[str, str], tuple[str, str]] | None = None,
+    discovery_rechecks: Mapping[tuple[str, str], Sequence[RecheckCandidate]] | None = None,
 ) -> dict[tuple[str, str], Selection]:
-    """One selection per selected target and retailer for ``week`` (views already cut at as_of)."""
+    """One selection per selected target and retailer for ``week`` (views already cut at as_of).
+
+    ``discovery_rechecks`` (``(target_id, retailer_code)``) are this week's relevant unfetched
+    or failed pages; with the related unconfirmed offers they form a blank cell's recheck list.
+
+    ``search_outcomes`` maps ``(target_id, retailer_code)`` to the recorded discovery outcome of
+    this week (status, explanation); it explains a cell only when no offer relates to it.
+    """
     in_week = [view for view in views if view.week_start == week.start]
     by_offer: dict[str, list[ObservationView]] = defaultdict(list)
     for view in in_week:
@@ -859,9 +952,13 @@ def select_week(
     latest = [_latest(group) for group in by_offer.values()]
 
     exact_latest: dict[tuple[str, str], list[ObservationView]] = defaultdict(list)
+    listed_latest: dict[tuple[str, str], list[ObservationView]] = defaultdict(list)
     for view in latest:
         if view.is_exact and view.retailer_code:
             exact_latest[(view.target_id, view.retailer_code)].append(view)
+        if view.retailer_code:
+            for copy in listed_views(view):
+                listed_latest[(copy.listed_target, view.retailer_code)].append(copy)
     exact_all: Counter[tuple[str, str]] = Counter(
         (view.target_id, view.retailer_code) for view in in_week if view.is_exact
     )
@@ -871,29 +968,54 @@ def select_week(
         if view.status == REVIEW_REQUIRED
         for candidate in view.match.candidate_target_ids
     )
-    # Search context and near-match hints link unconfirmed offers to a cell; they never assign.
-    related: dict[tuple[str, str], list[ObservationView]] = defaultdict(list)
+    # Search context (collection lineage) and near-match hints link unconfirmed offers to a cell;
+    # they never assign. A near-match hint for another model is not related (2026-10-19).
+    related: dict[tuple[str, str], list[tuple[ObservationView, bool]]] = defaultdict(list)
     for view in latest:
-        for target_id in dict.fromkeys((*view.search_targets, *view.match.candidate_target_ids)):
-            if not (view.is_exact and view.target_id == target_id) and view.retailer_code:
-                related[(target_id, view.retailer_code)].append(view)
+        ambiguous = view.listed.ambiguous_ids if view.listed is not None else ()
+        associated = view.listed.target_ids if view.listed is not None and (
+            view.listed.status == LISTED_SPEC_MATCH) else ()
+        for target_id in dict.fromkeys(
+            (*view.search_targets, *view.match.candidate_target_ids, *ambiguous)
+        ):
+            if not (view.is_exact and view.target_id == target_id) and view.retailer_code and (
+                target_id not in associated
+            ):
+                related[(target_id, view.retailer_code)].append(
+                    (view, target_id in view.search_targets)
+                )
     earlier: dict[tuple[str, str], ObservationView] = {}
     for view in views:
-        if view.week_start < week.start and view.status == COMPARABLE:
-            key = (view.target_id, view.retailer_code)
-            if key not in earlier or _latest([earlier[key], view]) is view:
-                earlier[key] = view
+        if view.week_start >= week.start:
+            continue
+        for stand_in, target_id in (
+            [(view, view.target_id)] if view.status == COMPARABLE and view.is_exact else []
+        ) + [(copy, copy.listed_target) for copy in listed_views(view)
+             if copy.status == COMPARABLE]:
+            key = (target_id, view.retailer_code)
+            if key not in earlier or _latest([earlier[key], stand_in]) is stand_in:
+                earlier[key] = stand_in
 
     selections = {}
     for item in selected.configurations:
         for code, _ in RETAILERS:
             key = (item.target_id, code)
-            offers = exact_latest.get(key, [])
-            comparable = sorted((v for v in offers if v.status == COMPARABLE), key=_selection_key)
+            # An exact product match is preferred; a listed-spec match prices the cell only
+            # when no exact offer is comparable (2026-10-20). One retailer, one price.
+            exact_offers = exact_latest.get(key, [])
+            offers = [*exact_offers, *listed_latest.get(key, [])]
+            comparable = sorted((v for v in exact_offers if v.status == COMPARABLE),
+                                key=_selection_key) or sorted(
+                (v for v in offers if v.status == COMPARABLE), key=_selection_key)
             reasons = Counter(reason for v in offers for reason in v.reasons)
             candidate, candidate_status, candidate_detail = _best_candidate(
                 item, related.get(key, []), selected
             )
+            search_status, search_detail = (search_outcomes or {}).get(key, ("", ""))
+            rechecks: list[RecheckCandidate] = []
+            if not comparable:
+                rechecks = _rechecks(item, related.get(key, []), selected, offers,
+                                     (discovery_rechecks or {}).get(key, ()), candidate)
             if comparable:
                 status, chosen = SELECTED, comparable[0]
                 tied = sum(1 for v in comparable if v.stored.price == chosen.stored.price)
@@ -905,6 +1027,9 @@ def select_week(
                     status = REVIEW_REQUIRED_ONLY
                 elif candidate is not None:
                     status = CANDIDATE_NOT_CONFIRMED
+                elif search_status:
+                    # No related offer: the recorded discovery outcome of this week says why.
+                    status = search_status
                 else:
                     status = NO_OBSERVATION_IN_WEEK
             selections[key] = Selection(
@@ -915,7 +1040,7 @@ def select_week(
                 comparable_offers=len(comparable),
                 tied_offers=tied,
                 offers_observed=len(offers),
-                observations_in_week=exact_all[key],
+                observations_in_week=exact_all[key] + len(listed_latest.get(key, [])),
                 not_comparable_reasons=";".join(
                     f"{reason}:{count}" for reason, count in sorted(reasons.items())
                 ),
@@ -929,54 +1054,96 @@ def select_week(
                 candidate=candidate,
                 candidate_status=candidate_status,
                 candidate_detail=candidate_detail,
+                search_detail=search_detail if status == search_status else "",
+                rechecks=tuple(rechecks),
             )
     return selections
 
 
-# Candidate outcomes for a blank cell, most informative first.
+def _rechecks(
+    item: SelectedConfiguration,
+    related: Sequence[tuple[ObservationView, bool]],
+    selected: SelectedList,
+    offers: Sequence[ObservationView],
+    discovered: Sequence[RecheckCandidate],
+    best: ObservationView | None,
+) -> list[RecheckCandidate]:
+    """The cell's recheck list: related unconfirmed offers (same filter as the candidate) and
+    this week's relevant unfetched or failed pages; the cell's own exact offers are excluded."""
+    fetched = []
+    for view, collected in related:
+        outcome, _ = candidate_outcome(view, item.target, selected, item.target_id)
+        if not collected and outcome == DIFFERENT_MODEL:
+            continue
+        differences = core_differences(view.match.offer_attributes, item.target)
+        priority = 10 + (_CANDIDATE_ORDER.index(outcome) if outcome in _CANDIDATE_ORDER else 19)
+        if view is best:
+            priority = 0  # The cell's named candidate is listed first.
+        stored = view.stored
+        fetched.append(RecheckCandidate(
+            priority, FETCHED_NOT_CONFIRMED, outcome,
+            offer_explanation(outcome, view.match.reason_codes, differences,
+                              view.target_id if view.is_exact else ""),
+            stored.offer_url, stored.record.get("raw_title", ""), stored.availability,
+            local_text(stored.retrieved_at), stored.price_text, stored.observation_id,
+        ))
+    own = {url_key(view.stored.offer_url) for view in offers}
+    return [c for c in merge_rechecks(fetched, discovered) if url_key(c.url) not in own]
+
+
+# Candidate outcomes for a blank cell, most informative first (the coverage report's order).
 _CANDIDATE_ORDER = (
-    "AMBIGUOUS_TARGET", "IDENTITY_CONFLICT", "MODEL_UNVERIFIED", "EXTRACTION_INCOMPLETE",
-    SAME_MODEL_DIFFERENT_CONFIGURATION, "MATCHED_OTHER_CONFIGURATION",
-    "DIFFERENT_CONFIGURATION", "INACTIVE_TARGET",
+    "AMBIGUOUS_TARGET", "IDENTITY_CONFLICT", "CATALOG_IDENTITY_UNRESOLVED", "MODEL_UNVERIFIED",
+    "EXTRACTION_INCOMPLETE",
+    SAME_MODEL_DIFFERENT_CONFIGURATION, "DIFFERENT_CONFIGURATION", DIFFERENT_MODEL,
+    "INACTIVE_TARGET",
 )
 
 
 def candidate_outcome(
-    view: ObservationView, target_row: Mapping[str, object], selected: SelectedList
+    view: ObservationView,
+    target_row: Mapping[str, object],
+    selected: SelectedList,
+    target_id: str = "",
 ) -> tuple[str, str]:
     """Why an offer related to a configuration is not its confirmed match, with the differing
-    values where the offer's verified fields show them."""
+    values where the offer's verified fields show them. The rule is shared with the coverage
+    report (``matching.configuration_outcome``): "same model, different configuration" only for
+    RAM/storage options of one model code; another model is ``DIFFERENT_MODEL``."""
     match = view.match
-    differences = core_differences(match.offer_attributes, target_row)
-    detail = describe_differences(differences)
-    same_model = differences and all(field != "model" for field, _, _ in differences) and (
-        "model" in match.offer_attributes
+    target_id = target_id or str(target_row.get("target_id", "") or "")
+    if view.listed is not None and target_id in view.listed.ambiguous_ids:
+        return "AMBIGUOUS_TARGET", view.listed.detail()
+    outcome, detail = configuration_outcome(
+        match.match_status, match.target_id, match.reason_codes, match.offer_attributes,
+        target_id, target_row, title=view.title,
     )
-    if view.is_exact:
+    if view.is_exact and match.target_id:
         scope = "in the selected list" if match.target_id in selected.by_target else (
             "outside the selected list"
         )
-        status = SAME_MODEL_DIFFERENT_CONFIGURATION if same_model else (
-            "MATCHED_OTHER_CONFIGURATION"
+        detail = detail.replace(
+            f"confirmed as {match.target_id}", f"confirmed as {match.target_id} ({scope})", 1
         )
-        return status, "; ".join(filter(None, (
-            f"confirmed as {match.target_id} ({scope})", detail,
-        )))
-    outcome = offer_outcome(match.match_status, match.reason_codes)
-    if outcome == "DIFFERENT_CONFIGURATION" and same_model:
-        outcome = SAME_MODEL_DIFFERENT_CONFIGURATION
-    if outcome in {"DIFFERENT_CONFIGURATION", SAME_MODEL_DIFFERENT_CONFIGURATION}:
-        return outcome, detail
-    return outcome, "; ".join(filter(None, (";".join(review_codes(match.reason_codes)), detail)))
+    return outcome, detail
 
 
 def _best_candidate(
-    item: SelectedConfiguration, views: Sequence[ObservationView], selected: SelectedList
+    item: SelectedConfiguration,
+    views: Sequence[tuple[ObservationView, bool]],
+    selected: SelectedList,
 ) -> tuple[ObservationView | None, str, str]:
-    if not views:
+    """The most informative related offer. ``views`` pairs each offer with whether collection
+    lineage links it to the cell; a near-match hint alone never relates another model."""
+    outcomes = []
+    for view, collected in views:
+        outcome = candidate_outcome(view, item.target, selected, item.target_id)
+        if collected or outcome[0] != DIFFERENT_MODEL:
+            outcomes.append((outcome, view))
+    if not outcomes:
         return None, "", ""
     ranked = sorted(
-        ((candidate_outcome(view, item.target, selected), view) for view in views),
+        outcomes,
         key=lambda pair: (
             _CANDIDATE_ORDER.index(pair[0][0]) if pair[0][0] in _CANDIDATE_ORDER else 99,
             -pair[1].stored.retrieved_at.timestamp(),
@@ -1010,6 +1177,7 @@ class PriceTrackingResult:
     review: list[dict[str, str]]
     counts: dict[str, int] = field(default_factory=dict)
     terms_effect: dict[str, object] = field(default_factory=dict)
+    rechecks: list[dict[str, str]] = field(default_factory=list)
 
 
 def build_views(
@@ -1020,10 +1188,12 @@ def build_views(
     last_week: ReportWeek,
     offer_terms_policy: str = DEFAULT_OFFER_TERMS_POLICY,
     search_context: Mapping[str, Sequence[str]] | None = None,
+    listed_spec: ListedSpecMatcher | None = None,
 ) -> tuple[list[ObservationView], int]:
     """Classify observations retrieved no later than ``as_of`` and before ``last_week`` ends.
 
-    Returns the views and how many stored observations were left out by that cut-off.
+    Returns the views and how many stored observations were left out by that cut-off. With
+    ``listed_spec``, each view also carries its listed-spec association (2026-10-20).
     """
     views = []
     excluded = 0
@@ -1038,6 +1208,19 @@ def build_views(
             )
         terms = stored_offer_terms(stored)
         status, reasons = comparability(stored, match, terms=terms, policy=offer_terms_policy)
+        listed = None
+        listed_status, listed_reasons = "", ()
+        if listed_spec is not None:
+            listed = listed_spec.associate(dict(match.offer_attributes or {}),
+                                           stored.record.get("raw_title", ""), match.reason_codes)
+            if listed.status:
+                listed_reasons = price_rule_reasons(
+                    retailer_id=stored.retailer_id, currency=stored.currency,
+                    availability=stored.availability, bundle_flag=stored.bundle_flag,
+                    price_type=stored.price_type, price=stored.price, terms=terms,
+                    policy=offer_terms_policy,
+                )
+                listed_status = NOT_COMPARABLE if listed_reasons else COMPARABLE
         views.append(
             ObservationView(
                 stored,
@@ -1051,9 +1234,28 @@ def build_views(
                 search_targets=tuple(dict.fromkeys(
                     (search_context or {}).get(stored.observation_id, ())
                 )),
+                listed=listed,
+                listed_status=listed_status,
+                listed_reasons=tuple(listed_reasons),
             )
         )
     return views, excluded
+
+
+def listed_views(view: ObservationView) -> list[ObservationView]:
+    """One view per unambiguous listed-spec association, standing for that comparison only.
+
+    The copy keeps the stored observation and its stored match (an exact assignment to another
+    target is not rewritten); its status and reasons are the listed-spec price comparability.
+    """
+    if view.listed is None or view.listed.status != LISTED_SPEC_MATCH:
+        return []
+    return [
+        replace(view, status=view.listed_status, reasons=view.listed_reasons,
+                basis=LISTED_SPEC_BASIS, listed_target=target_id)
+        for target_id in view.listed.target_ids
+        if not (view.is_exact and view.target_id == target_id)
+    ]
 
 
 def offer_terms_effect(
@@ -1110,7 +1312,13 @@ def build_price_tracking(
     history_start: date | None = None,
     offer_terms_policy: str = DEFAULT_OFFER_TERMS_POLICY,
     search_context: Mapping[str, Sequence[str]] | None = None,
+    search_outcomes: Mapping[tuple[str, str], tuple[str, str]] | None = None,
+    discovery_rechecks: Mapping[tuple[str, str], Sequence[RecheckCandidate]] | None = None,
+    listed_spec: ListedSpecMatcher | None = None,
 ) -> PriceTrackingResult:
+    """``search_outcomes`` (``(target_id, retailer_code) -> (status, explanation)``) come from the
+    report week's recorded discovery and explain blank cells of that week only; earlier weeks in
+    the series never take them."""
     if as_of < week.start_utc:
         raise PriceTrackingInputError("--as-of is before the report week starts.")
     if offer_terms_policy not in OFFER_TERMS_POLICIES:
@@ -1118,6 +1326,7 @@ def build_price_tracking(
     views, excluded = build_views(
         observations, matches, as_of=as_of, last_week=week,
         offer_terms_policy=offer_terms_policy, search_context=search_context,
+        listed_spec=listed_spec,
     )
     first_week = ReportWeek(
         history_start
@@ -1135,7 +1344,11 @@ def build_price_tracking(
         cursor = ReportWeek(cursor.end)
 
     ranks = {item.target_id: item.rank for item in selected.configurations}
-    by_week = {w.start: select_week(w, views, selected) for w in weeks}
+    by_week = {
+        w.start: select_week(w, views, selected, search_outcomes if w == week else None,
+                             discovery_rechecks if w == week else None)
+        for w in weeks
+    }
     current = by_week[week.start]
     week_fields = {
         "report_week_start": week.start.isoformat(),
@@ -1195,11 +1408,47 @@ def build_price_tracking(
             if row["retailer_code"] == code and row["price_status"] == SELECTED
         )
     for status in (SELECTED, NO_COMPARABLE_OFFER, REVIEW_REQUIRED_ONLY, CANDIDATE_NOT_CONFIRMED,
-                   NO_OBSERVATION_IN_WEEK):
+                   *SEARCH_STAGE_STATUSES, NO_OBSERVATION_IN_WEEK):
         counts[f"cells_{status}"] = sum(1 for row in selections if row["price_status"] == status)
+    # Offers priced for one configuration that state different display or GPU evidence are
+    # flagged, never resolved: the catalog may not record the field (2026-10-19, independent
+    # review: PCX "Full-HD" vs DataBlitz/Laptop Factory WUXGA for AL14-45P-R10U).
+    disagreeing = 0
+    for item, row in zip(selected.configurations, comparison, strict=True):
+        chosen = {code: current[(item.target_id, code)].chosen for code, _ in RETAILERS
+                  if current[(item.target_id, code)].chosen is not None}
+        found = offer_disagreements(chosen)
+        disagreeing += bool(found)
+        for name, detail in found.items():
+            code_text = f"OFFERS_DISAGREE_{name.upper()}"
+            for code, view in chosen.items():
+                row[f"{code}_Warnings"] = ";".join(filter(None, (row[f"{code}_Warnings"],
+                                                                 code_text)))
+                review.append(_review_row(view, ranks, context, week)
+                              | {"review_reason": f"{code_text} ({detail})"})
+    counts["review_rows"] = len(review)
+    counts["configurations_with_offer_disagreement"] = disagreeing
+    chosen_views = [s.chosen for s in current.values() if s.chosen is not None]
+    counts["selected_retailer_prices_exact_product"] = sum(
+        1 for view in chosen_views if view.basis == EXACT_PRODUCT_BASIS)
+    counts["selected_retailer_prices_listed_spec"] = sum(
+        1 for view in chosen_views if view.basis == LISTED_SPEC_BASIS)
+    for basis in (EXACT_PRODUCT_BASIS, LISTED_SPEC_BASIS, "MIXED"):
+        counts[f"configurations_priced_{basis.lower()}"] = sum(
+            1 for row in comparison if row["Comparison_Basis"] == basis)
+    counts["week_listed_spec_associations"] = sum(
+        1 for view in week_views if view.listed is not None
+        and view.listed.status == LISTED_SPEC_MATCH)
+    counts["week_listed_spec_ambiguous"] = sum(
+        1 for view in week_views if view.listed is not None
+        and view.listed.status == LISTED_SPEC_AMBIGUOUS)
+    rechecks = recheck_rows(current, selected, week_fields)
+    counts["recheck_candidates"] = len(rechecks)
+    counts["blank_cells_with_recheck_link"] = sum(
+        1 for selection in current.values() if selection.chosen is None and selection.rechecks)
     return PriceTrackingResult(
         comparison, selections, history, series, review, counts,
-        offer_terms_effect(views, week, offer_terms_policy),
+        offer_terms_effect(views, week, offer_terms_policy), rechecks,
     )
 
 
@@ -1243,22 +1492,26 @@ def _comparison_row(
             f"{code}_Stock": linked_offer.stored.availability if linked_offer else "",
             f"{code}_Observed_At": local_text(linked_offer.stored.retrieved_at)
             if linked_offer else "",
-            f"{code}_Match_Basis": match_basis_from_codes(linked_offer.match.reason_codes)
-            if linked_offer else "",
+            f"{code}_Match_Basis": _match_basis(linked_offer),
             f"{code}_Warnings": ";".join(filter(None, (
                 _warnings(linked_offer),
                 ";".join(linked_offer.notes) if linked_offer else "",
             ))),
+            f"{code}_Offer_Details": _offer_details(linked_offer),
             f"{code}_Reason": cell_reason(selection),
-            f"{code}_Candidate_URL": selection.candidate.stored.offer_url
-            if selection.candidate and not chosen else "",
-            f"{code}_Candidate_Status": selection.candidate_status if not chosen else "",
-            f"{code}_Candidate_Detail": selection.candidate_detail if not chosen else "",
+            f"{code}_Candidate_URL": _candidate_url(selection) if not chosen else "",
+            f"{code}_Candidate_Status": _candidate_status(selection) if not chosen else "",
+            f"{code}_Candidate_Detail": _candidate_detail(selection) if not chosen else "",
+            f"{code}_Recheck_Count": str(len(selection.rechecks)) if not chosen else "",
+            f"{code}_Recheck_Note": recheck_note(selection.rechecks[0])
+            if selection.rechecks and not chosen else "",
         }
         if chosen:
             observed[code] = chosen
         if selection.chosen_in_stock:
             in_stock[code] = selection.chosen_in_stock
+    observed_basis = _basis_of(observed.values())
+    in_stock_basis = _basis_of(in_stock.values())
     row |= {
         "Comparable_Retailer_Count": str(len(observed)),
         **_minimum("Lowest_Price", "Lowest_Price", observed, stock=True),
@@ -1266,6 +1519,9 @@ def _comparison_row(
         "Shopee_Sales_Extract_Date": selected.sales_extract_date,
         "matching_context_id": context.context_id,
         "selected_list_sha256": selected.sha256,
+        "Comparison_Basis": observed_basis,
+        "Lowest_Price_Label": minimum_label(observed_basis, in_stock=False),
+        "Lowest_In_Stock_Label": minimum_label(in_stock_basis, in_stock=True),
     }
     return {column: row[column] for column in COMPARISON_COLUMNS}
 
@@ -1279,7 +1535,10 @@ def _minimum(
     """
     lowest = min((view.stored.price for view in views.values()), default=None)
     tied = [(code, view) for code, view in views.items() if view.stored.price == lowest]
+    basis_column = "Lowest_Price_Basis" if stock else "Lowest_In_Stock_Basis"
     values = {
+        # The matching basis of the winning offer(s): MIXED when tied offers differ.
+        basis_column: _basis_of(view for _, view in tied),
         price_column: money(lowest) if lowest is not None else "",
         f"{price_column}_Retailers": ";".join(code for code, _ in tied),
         f"{prefix}_Offer_URL": ";".join(view.stored.offer_url for _, view in tied),
@@ -1295,10 +1554,46 @@ def _minimum(
     return values
 
 
+def _basis_of(views) -> str:
+    """EXACT_PRODUCT, LISTED_SPEC, MIXED, or '' for no offer."""
+    bases = {view.basis for view in views}
+    return "" if not bases else bases.pop() if len(bases) == 1 else "MIXED"
+
+
+def minimum_label(basis: str, *, in_stock: bool) -> str:
+    """How a minimum is labelled: "matching listed specs" whenever listed-spec prices are
+    among those compared (2026-10-20)."""
+    if basis in {LISTED_SPEC_BASIS, "MIXED"}:
+        return ("Lowest in-stock price matching listed specs" if in_stock
+                else "Lowest price matching listed specs")
+    if not basis:
+        return ""
+    return "Lowest in-stock price" if in_stock else "Lowest observed price"
+
+
+def _match_basis(view: ObservationView | None) -> str:
+    if view is None:
+        return ""
+    if view.basis == LISTED_SPEC_BASIS:
+        return LISTED_SPEC_BASIS
+    return match_basis_from_codes(view.match.reason_codes)
+
+
+def _offer_details(view: ObservationView | None) -> str:
+    if view is None:
+        return ""
+    return offer_details(dict(view.match.offer_attributes or {}), view.title)
+
+
 def _warnings(view: ObservationView | None) -> str:
-    return ";".join(code for code in view.match.reason_codes if is_warning_code(code)) if (
-        view
-    ) else ""
+    if view is None:
+        return ""
+    codes = [code for code in view.match.reason_codes if is_warning_code(code)]
+    if view.basis == LISTED_SPEC_BASIS and view.listed is not None:
+        # The specific product identity stays unresolved; known processor differences show.
+        check = view.listed.checks.get(view.listed_target)
+        codes = [IDENTITY_UNRESOLVED_WARNING, *(check.warnings if check else ()), *codes]
+    return ";".join(dict.fromkeys(codes))
 
 
 def cell_reason(selection: Selection) -> str:
@@ -1309,7 +1604,9 @@ def cell_reason(selection: Selection) -> str:
             return "PRICE_SHOWN_WHILE_OUT_OF_STOCK"
         return ""
     if selection.status == NO_COMPARABLE_OFFER:
-        return "EXACT_PRICE_EXCLUDED: " + selection.not_comparable_reasons
+        listed = selection.observed is not None and selection.observed.basis == LISTED_SPEC_BASIS
+        prefix = "LISTED_SPEC_PRICE_EXCLUDED" if listed else "EXACT_PRICE_EXCLUDED"
+        return f"{prefix}: " + selection.not_comparable_reasons
     if selection.status == REVIEW_REQUIRED_ONLY:
         return f"MATCH_REVIEW_REQUIRED: {selection.review_required} observation(s)" + (
             f"; {selection.candidate_status}: {selection.candidate_detail}"
@@ -1323,13 +1620,17 @@ def cell_reason(selection: Selection) -> str:
             + (f" ({selection.candidate_detail})" if selection.candidate_detail else "")
             + f"; observed {local_text(candidate.stored.retrieved_at)}"
         )
+    stale = ""
     if selection.stale is not None:
-        stale = selection.stale.stored
-        return (
-            "NO_EXACT_OFFER_THIS_WEEK; last comparable "
-            f"{stale.price_text} on {local_text(stale.retrieved_at)} (not carried forward)"
+        stale = (
+            f"last comparable {selection.stale.stored.price_text} on "
+            f"{local_text(selection.stale.stored.retrieved_at)} (not carried forward)"
         )
-    return "NO_EXACT_OFFER_THIS_WEEK"
+    if selection.status in SEARCH_STAGE_STATUSES:
+        return "; ".join(filter(None, (
+            f"{selection.status}: {selection.search_detail}".rstrip(": "), stale,
+        )))
+    return "; ".join(filter(None, ("NO_EXACT_OFFER_THIS_WEEK", stale)))
 
 
 def _selection_row(
@@ -1378,8 +1679,7 @@ def _selection_row(
     latest = selection.observed.stored if selection.observed else None
     row |= {
         "availability": chosen.availability if chosen else "",
-        "match_basis": match_basis_from_codes(selection.chosen.match.reason_codes)
-        if selection.chosen else "",
+        "match_basis": _match_basis(selection.chosen),
         "match_warnings": _warnings(selection.chosen),
         "price_notes": ";".join(selection.chosen.notes) if selection.chosen else "",
         "in_stock_price": in_stock.price_text if in_stock else "",
@@ -1397,8 +1697,67 @@ def _selection_row(
         "candidate_detail": selection.candidate_detail if not chosen else "",
         "candidate_observation_id": selection.candidate.stored.observation_id
         if selection.candidate and not chosen else "",
+        "recheck_count": str(len(selection.rechecks)) if not chosen else "",
+        "recheck_note": recheck_note(selection.rechecks[0])
+        if selection.rechecks and not chosen else "",
+        "comparison_basis": selection.chosen.basis if selection.chosen else "",
+        "offer_details": _offer_details(selection.chosen),
     }
     return {column: row[column] for column in SELECTION_COLUMNS}
+
+
+def _candidate_url(selection: Selection) -> str:
+    if selection.candidate is not None:
+        return selection.candidate.stored.offer_url
+    return selection.rechecks[0].url if selection.rechecks else ""
+
+
+def _candidate_status(selection: Selection) -> str:
+    if selection.candidate is not None:
+        return selection.candidate_status
+    return selection.rechecks[0].status if selection.rechecks else ""
+
+
+def _candidate_detail(selection: Selection) -> str:
+    if selection.candidate is not None:
+        return selection.candidate_detail
+    return selection.rechecks[0].explanation if selection.rechecks else ""
+
+
+def recheck_rows(
+    selections: Mapping[tuple[str, str], Selection],
+    selected: SelectedList,
+    week_fields: Mapping[str, str],
+) -> list[dict[str, str]]:
+    """Every recheck candidate of the report week's blank cells (recheck_candidates.csv)."""
+    ranks = {item.target_id: item.rank for item in selected.configurations}
+    retailer_ids = dict(RETAILERS)
+    rows = []
+    for item in selected.configurations:
+        for code, _ in RETAILERS:
+            selection = selections[(item.target_id, code)]
+            if selection.chosen is not None:
+                continue
+            for index, candidate in enumerate(selection.rechecks, start=1):
+                rows.append({
+                    "report_week_start": week_fields["report_week_start"],
+                    "rank": str(ranks[item.target_id]),
+                    "target_id": item.target_id,
+                    "retailer_code": code,
+                    "retailer_id": retailer_ids[code],
+                    "recheck_rank": str(index),
+                    "stage": candidate.stage,
+                    "status": candidate.status,
+                    "explanation": candidate.explanation,
+                    "url": candidate.url,
+                    "title": candidate.title,
+                    "stock": candidate.stock,
+                    "observed_at_local": candidate.observed_at_local,
+                    "unconfirmed_price": candidate.unconfirmed_price,
+                    "observation_id": candidate.observation_id,
+                    "cell_price_status": selection.status,
+                })
+    return rows
 
 
 def _history_rows(
@@ -1472,6 +1831,13 @@ def _history_rows(
                 "offer_terms_evidence": " | ".join(view.terms.evidence) if view.terms else "",
                 "price_notes": ";".join(view.notes),
                 "search_context_target_ids": ";".join(view.search_targets),
+                "listed_spec_status": view.listed.status if view.listed else "",
+                "listed_spec_target_ids": ";".join(view.listed.target_ids) if view.listed
+                else "",
+                "listed_spec_ambiguous_target_ids": ";".join(view.listed.ambiguous_ids)
+                if view.listed else "",
+                "listed_spec_comparability": view.listed_status,
+                "listed_spec_comparability_reasons": ";".join(view.listed_reasons),
             }
         )
         if view.status == COMPARABLE:
@@ -1531,7 +1897,58 @@ def _series_rows(
     return rows
 
 
+DISAGREEMENT_FIELDS: tuple[str, ...] = ("resolution", "display_type", "gpu_model")
+_NOMINAL = re.compile(r"nominal ([0-9]+x[0-9]+)")
+
+
+def _display_statements(view: ObservationView) -> dict[str, tuple[str, str]]:
+    """``field -> (as stated, comparison key)`` for one offer's own display and GPU evidence.
+
+    Extracted values are used; when no resolution is extracted, a single marketing resolution
+    name is used by its nominal size and shown as such ("Full HD (nominal 1920x1080)").
+    """
+    extracted = extract_offer_attributes(view.stored.observation())
+    found: dict[str, tuple[str, str]] = {}
+    for item in extracted.evidence:
+        if item.field in DISAGREEMENT_FIELDS and item.status is ExtractionStatus.EXTRACTED:
+            key = item.value.casefold()
+            if item.field == "gpu_model":
+                forms = canonical_gpu_models(item.value)
+                key = forms.pop().casefold() if len(forms) == 1 else key
+            elif item.field == "display_type":
+                key = key.removesuffix("-level")
+            found[item.field] = (item.value, key)
+    names = [item.value for item in extracted.evidence if item.field == "resolution_name"]
+    nominal = _NOMINAL.search(names[0]) if len(set(names)) == 1 else None
+    if "resolution" not in found and nominal:
+        found["resolution"] = (names[0], nominal[1])
+    return found
+
+
+def offer_disagreements(chosen: Mapping[str, ObservationView]) -> dict[str, str]:
+    """``field -> "DBZ 1920x1200; PCX Full HD (nominal 1920x1080)"`` where the offers chosen for
+    one configuration state different values. Missing statements are never a disagreement."""
+    statements = {code: _display_statements(view) for code, view in chosen.items()}
+    found: dict[str, str] = {}
+    for name in DISAGREEMENT_FIELDS:
+        stated = {code: values[name] for code, values in statements.items() if name in values}
+        if len({key for _, key in stated.values()}) > 1:
+            found[name] = "; ".join(f"{code} {shown}" for code, (shown, _) in sorted(
+                stated.items()))
+    return found
+
+
 def _review_reason(view: ObservationView, ranks: Mapping[str, int]) -> str:
+    listed = view.listed
+    if listed is not None and listed.status == LISTED_SPEC_AMBIGUOUS and (
+        set(listed.ambiguous_ids) & set(ranks)
+    ):
+        return f"{LISTED_SPEC_AMBIGUOUS} ({listed.detail()})"
+    if not view.is_exact and listed is not None and listed.status == LISTED_SPEC_MATCH and (
+        set(listed.target_ids) & set(ranks)
+    ):
+        return (f"{LISTED_SPEC_MATCH} {';'.join(listed.target_ids)} "
+                f"({listed.detail()})")
     if not view.is_exact:
         return f"MATCH_{view.match.match_status}"
     if view.target_id not in ranks:

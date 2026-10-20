@@ -26,6 +26,7 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from .price_tracking import (
+    CANDIDATE_NOT_CONFIRMED,
     COMPARISON_COLUMNS,
     HISTORY_COLUMNS,
     LEGACY_COMPARISON_COLUMNS,
@@ -37,13 +38,30 @@ from .price_tracking import (
     RETAILERS,
     REVIEW_COLUMNS,
     REVIEW_REQUIRED_ONLY,
+    SEARCH_STAGE_STATUSES,
     SELECTED,
     SELECTION_COLUMNS,
 )
+from .recheck import RECHECK_COLUMNS
+from .recheck import STAGE_TEXT as RECHECK_STAGE_TEXT
 from .target_master import TARGET_ID_PATTERN
 from .verified_top import CONFIGURATION_COLUMNS, VerifiedRankingInputError, read_csv_rows
 
-PUBLISHER_VERSION = "pilot-sheets-2"
+# Blank-cell statuses that name an unconfirmed candidate or the week's recorded search outcome
+# (2026-10-19); none carries a price or a link.
+UNPRICED_STATUS_TEXT = {
+    CANDIDATE_NOT_CONFIRMED: "Candidate found, not a confirmed match (no price)",
+    "FETCH_FAILED": "Candidate found, fetching failed",
+    "CANDIDATE_NOT_FETCHED": "Candidate found, not fetched",
+    "NO_RELEVANT_CANDIDATE": "Searched; no relevant candidate found",
+    "NO_CANDIDATE_FOUND": "Searched; no candidate found",
+    "CATALOG_IDENTITY_UNRESOLVED": "Catalog identity unresolved (broad family name)",
+    "DISCOVERY_INCOMPLETE": "Search incomplete; no relevant candidate in the searches run",
+    "SEARCH_FAILED": "Search failed",
+    "DISCOVERY_NOT_ATTEMPTED": "Search not attempted",
+}
+
+PUBLISHER_VERSION = "pilot-sheets-4"
 COMPARISON_TAB = "PILOT_PRICE_COMPARISON"
 HISTORY_TAB = "PILOT_PRICE_HISTORY"
 REVIEW_TAB = "PILOT_PRICE_REVIEW"
@@ -64,6 +82,11 @@ REASON_TEXT = {
     "AVAILABILITY_PREORDER": "preorder",
     "AVAILABILITY_UNKNOWN": "stock unknown",
     "BUNDLE_OFFER": "bundle offer",
+    "SPECIFIC_IDENTITY_UNRESOLVED": "listed-spec match; specific Shopee model unknown",
+    "CPU_NUMBER_DIFFERS_FROM_TARGET_RECORD": "processor number differs from the target record",
+    "OFFERS_DISAGREE_RESOLUTION": "retailers state different resolutions (see review)",
+    "OFFERS_DISAGREE_DISPLAY_TYPE": "retailers state different panel types (see review)",
+    "OFFERS_DISAGREE_GPU_MODEL": "retailers state different GPUs (see review)",
     "BUNDLE_STATUS_UNKNOWN": "bundle status unknown",
     "INCLUDED_ITEMS_OFFER": "includes stated items",
     "PAID_PACKAGE_PRICE": "paid package price",
@@ -177,6 +200,8 @@ REPORT_FILES = {
     "review": "price_review_queue.csv",
     "summary": "price_tracking_run_summary.json",
 }
+# Report files that older report folders do not have (read when present).
+OPTIONAL_REPORT_FILES = {"rechecks": "recheck_candidates.csv"}
 COLLECTION_FILES = {
     "summary": "collection_run_summary.json",
     "results": "match_results.csv",
@@ -220,6 +245,9 @@ class PilotReport:
     collection_summary: dict | None
     fingerprints: dict[str, str]
     counts: dict[str, int] = field(default_factory=dict)
+    # Recheck candidates of blank pilot cells (recheck_candidates.csv; optional before
+    # 2026-10-19). Never prices: links and reasons for a manual recheck.
+    rechecks: list[dict[str, str]] = field(default_factory=list)
 
     @property
     def week_start(self) -> date:
@@ -379,7 +407,7 @@ def load_pilot_report(
                 issues.append(f"{where} status disagrees with the selections report")
                 continue
             if status not in {SELECTED, NO_COMPARABLE_OFFER, REVIEW_REQUIRED_ONLY,
-                              NO_OBSERVATION_IN_WEEK}:
+                              NO_OBSERVATION_IN_WEEK, *UNPRICED_STATUS_TEXT}:
                 issues.append(f"{where} has an unknown price status")
                 continue
             if status == SELECTED:
@@ -398,7 +426,15 @@ def load_pilot_report(
                 if not (start_utc <= retrieved < end_utc and retrieved <= as_of):
                     issues.append(f"{where} selected price was not observed in the report week")
                 observed = by_observation.get(selection["observation_id"])
-                if observed is None or (observed["match_status"], observed["target_id"]) != (
+                if selection.get("comparison_basis") == "LISTED_SPEC":
+                    # A listed-spec price (2026-10-20): the observation's own listed-spec
+                    # association for this target, comparable under the same price rules.
+                    if observed is None or target_id not in observed.get(
+                        "listed_spec_target_ids", ""
+                    ).split(";") or observed.get("listed_spec_comparability") != "COMPARABLE":
+                        issues.append(f"{where} listed-spec price is not a comparable listed-spec"
+                                      " association")
+                elif observed is None or (observed["match_status"], observed["target_id"]) != (
                     "EXACT", target_id
                 ):
                     issues.append(f"{where} selected price is not an exact observation")
@@ -412,8 +448,8 @@ def load_pilot_report(
                     fallback = [
                         h for h in history
                         if h["offer_url"] == url
-                        and h["match_status"] == "EXACT"
-                        and h["target_id"] == target_id
+                        and ((h["match_status"] == "EXACT" and h["target_id"] == target_id)
+                             or target_id in h.get("listed_spec_target_ids", "").split(";"))
                         and h["retailer_id"] == retailer_id
                         and h["report_week_start"] == week["start"]
                         and h["latest_for_offer_in_week"] == "True"
@@ -467,6 +503,11 @@ def load_pilot_report(
 
     # History and review include unassigned observations collected for this pilot scope.
     def in_scope(row: Mapping[str, str]) -> bool:
+        listed = set(filter(None, ";".join((
+            row.get("listed_spec_target_ids", ""), row.get("listed_spec_ambiguous_target_ids", ""),
+        )).split(";")))
+        if listed & scope_set:
+            return True
         if row["match_status"] == "EXACT":
             return row["target_id"] in scope_set
         candidates = set(filter(None, row["candidate_target_ids"].split(";")))
@@ -528,6 +569,25 @@ def load_pilot_report(
             ]
             for path in files.values():
                 fingerprints[f"collection/{path.name}"] = sha256_file(path)
+    rechecks: list[dict[str, str]] = []
+    recheck_path = report_dir / OPTIONAL_REPORT_FILES["rechecks"]
+    if recheck_path.is_file():
+        try:
+            rechecks = [
+                row for row in read_csv_rows(recheck_path, RECHECK_COLUMNS, "Recheck candidates")
+                if row["target_id"] in scope_set
+            ]
+        except VerifiedRankingInputError as exc:
+            issues.append(str(exc))
+        fingerprints[f"report/{recheck_path.name}"] = sha256_file(recheck_path)
+        for row in rechecks:
+            cell = by_target.get(row["target_id"], {})
+            if row["report_week_start"] != week["start"]:
+                issues.append("a recheck candidate is for a different week")
+            # An unconfirmed page never sits beside a comparable price for the same cell.
+            if cell.get(f"{row['retailer_code']}_Price"):
+                issues.append(f"{row['target_id']} {row['retailer_code']} has a recheck "
+                              "candidate beside a comparable price")
     if issues:
         raise PublicationInputError(sorted(set(issues), key=issues.index))
 
@@ -543,6 +603,10 @@ def load_pilot_report(
             if r["observation_id"] not in {x["observation_id"] for x in pilot_review}
         ),
         "comparable_prices": sum(1 for r, c in cells if r[f"{c}_Price_Status"] == SELECTED),
+        "listed_spec_prices": sum(
+            1 for r, c in cells
+            if r[f"{c}_Price_Status"] == SELECTED and r.get(f"{c}_Match_Basis") == "LISTED_SPEC"
+        ),
         "matched_excluded_cells": sum(
             1 for r, c in cells if r[f"{c}_Price_Status"] == NO_COMPARABLE_OFFER
         ),
@@ -552,8 +616,18 @@ def load_pilot_report(
         "not_observed_cells": sum(
             1 for r, c in cells if r[f"{c}_Price_Status"] == NO_OBSERVATION_IN_WEEK
         ),
+        "unconfirmed_candidate_cells": sum(
+            1 for r, c in cells if r[f"{c}_Price_Status"] == CANDIDATE_NOT_CONFIRMED
+        ),
+        "search_outcome_cells": sum(
+            1 for r, c in cells if r[f"{c}_Price_Status"] in SEARCH_STAGE_STATUSES
+        ),
         "configurations_with_price": sum(
             1 for r in pilot_comparison if r["Comparable_Retailer_Count"] != "0"
+        ),
+        "recheck_candidates": len(rechecks),
+        "blank_cells_with_recheck_link": sum(
+            1 for r, c in cells if not r[f"{c}_Price"] and r.get(f"{c}_Candidate_URL")
         ),
         "week_observations": len(week_history),
         "week_exact": sum(1 for r in week_history if r["match_status"] == "EXACT"),
@@ -575,6 +649,7 @@ def load_pilot_report(
         collection_summary=collection_summary,
         fingerprints=fingerprints,
         counts=counts,
+        rechecks=rechecks,
     )
 
 
@@ -583,6 +658,8 @@ def load_pilot_report(
 
 BASIS_TEXT = {
     "TITLE_MODEL_CORROBORATED": "model from title, other specs from the page",
+    "TITLE_PRODUCT_NAME_CORROBORATED": "product name from title, other specs from the page",
+    "MODEL_NAME_PRESENTATION_NORMALIZED": "product name with brand/colour wording removed",
     "OWNER_APPROVED_INTERPRETATION": "owner-approved listing interpretation",
     "SELECTED_VARIANT": "selected variant",
     "SHARED_PRODUCT": "shared product specs",
@@ -590,15 +667,22 @@ BASIS_TEXT = {
 
 
 def _status_text(
-    status: str, reasons: str, availability: str = "", basis: str = "", warnings: str = ""
+    status: str, reasons: str, availability: str = "", basis: str = "", warnings: str = "",
+    details: str = "",
 ) -> str:
     """Short status for one retailer cell. "Matched configuration" means the five-field policy
-    matched; it does not claim an identical factory SKU or processor number."""
+    matched; it does not claim an identical factory SKU or processor number. A listed-spec price
+    says so and shows the offer's own hardware (2026-10-20)."""
     if status == SELECTED:
         text_value = (
             "Comparable price (OUT OF STOCK)"
             if availability == "OUT_OF_STOCK" else "Comparable price"
         )
+        if basis == "LISTED_SPEC":
+            text_value += ("; listed-spec match — brand, family, screen, CPU series, installed "
+                           "RAM and storage agree; specific Shopee model unknown")
+            if details:
+                text_value += f"; {details}"
         detail = ", ".join(BASIS_TEXT[tag] for tag in basis.split("+") if tag in BASIS_TEXT)
         if detail:
             text_value += f"; matched configuration ({detail})"
@@ -606,6 +690,8 @@ def _status_text(
         text_value = "Matched, not comparable: " + (_reason_text(_codes(reasons)) or "excluded")
     elif status == REVIEW_REQUIRED_ONLY:
         text_value = "Needs match review (no price)"
+    elif status in UNPRICED_STATUS_TEXT:
+        text_value = UNPRICED_STATUS_TEXT[status]
     else:
         text_value = "No confirmed matched offer this week"
     if warnings:
@@ -636,6 +722,18 @@ EARLIER_HEADERS: dict[str, tuple[tuple[str, ...], ...]] = {
 
 
 def _outcome(row: Mapping[str, str]) -> str:
+    listed = row.get("listed_spec_target_ids", "")
+    if listed:
+        state = ("comparable" if row.get("listed_spec_comparability") == "COMPARABLE"
+                 else "excluded: " + _reason_text(_codes(
+                     row.get("listed_spec_comparability_reasons", ""))))
+        prefix = (f"Listed-spec match for {listed} (specific identity unresolved), {state}")
+        if row["match_status"] != "EXACT":
+            return prefix
+        return prefix + f"; exact product match for {row['target_id']}"
+    if row.get("listed_spec_ambiguous_target_ids"):
+        return ("Listed specs fit several targets equally ("
+                + row["listed_spec_ambiguous_target_ids"] + "); not priced")
     if row["match_status"] != "EXACT":
         return f"Matching problem: {row['match_status']}"
     if row["comparability_status"] == "COMPARABLE":
@@ -662,7 +760,10 @@ def _minimum_retailers(retailers: str, notes: str) -> str:
     )
 
 
-def comparison_plan(report: PilotReport) -> TabPlan:
+def comparison_header(*, recheck: bool = True, basis: bool = True) -> tuple[str, ...]:
+    """The comparison tab header. ``recheck=False`` is the pilot-sheets-2 layout (before the
+    recheck columns of 2026-10-19) and ``basis=False`` the pilot-sheets-3 layout (before the
+    matching-basis columns of 2026-10-20); both are recognised as this publisher's."""
     header = [
         "Rank",
         "Target ID",
@@ -674,26 +775,64 @@ def comparison_plan(report: PilotReport) -> TabPlan:
         "RAM (GB)",
         "Storage (GB)",
     ]
-    stock_by_observation = {row["observation_id"]: row["availability"] for row in report.history}
     for code, _ in RETAILERS:
         name = RETAILER_NAMES[code]
         header += [
             f"{name} price (PHP)", f"{name} product link", f"{name} status",
             f"{name} observed (Asia/Singapore)",
         ]
+        if recheck:
+            # Unconfirmed pages to recheck manually when the price is blank: never a price.
+            header += [f"{name} recheck link (unconfirmed)", f"{name} recheck note"]
     header += [
         # Out-of-stock prices are comparable under the current owner policy, so this is the
         # lowest *observed* price; the in-stock minimum is calculated separately.
         "Lowest observed price (PHP)",
         "Lowest observed price retailer(s)",
+        *(["Lowest observed price basis"] if basis else []),
         "Lowest in-stock price (PHP)",
         "Lowest in-stock retailer(s)",
+        *(["Lowest in-stock price basis"] if basis else []),
         "Comparable retailers",
+        *(["Comparison basis"] if basis else []),
         "Shopee sales snapshot (extract date)",
         "Reporting week (Asia/Singapore)",
         "Week status",
         "Report cutoff (Asia/Singapore)",
     ]
+    return tuple(header)
+
+
+# The pilot-sheets-2 and pilot-sheets-3 comparison layouts are this publisher's own too.
+EARLIER_HEADERS[COMPARISON_TAB] += (
+    comparison_header(recheck=False, basis=False), comparison_header(basis=False),
+)
+BASIS_WORDS = {"EXACT_PRODUCT": "exact product match", "LISTED_SPEC": "listed-spec match",
+               "MIXED": "exact product and listed-spec matches"}
+
+
+def _minimum_basis(label: str, basis: str) -> str:
+    """'Lowest price matching listed specs — winning offer: listed-spec match'."""
+    if not label:
+        return ""
+    return f"{label} — winning offer: {BASIS_WORDS.get(basis, basis)}" if basis else label
+
+
+def _recheck_cells(report: PilotReport, row: Mapping[str, str], code: str) -> list[Cell]:
+    """The first recheck link and its reason, only beside a blank price."""
+    url = row.get(f"{code}_Candidate_URL", "")
+    if row[f"{code}_Price"] or not url:
+        return [BLANK, BLANK]
+    note = row.get(f"{code}_Recheck_Note") or row.get(f"{code}_Candidate_Detail", "")
+    count = int(row.get(f"{code}_Recheck_Count") or 1)
+    if count > 1:
+        note += f" (+{count - 1} more in {REVIEW_TAB})"
+    return [text(url, link=url), text(note)]
+
+
+def comparison_plan(report: PilotReport) -> TabPlan:
+    header = list(comparison_header())
+    stock_by_observation = {row["observation_id"]: row["availability"] for row in report.history}
     week = (
         f"{report.week_start.isoformat()} to "
         f"{(report.week_end - timedelta(days=1)).isoformat()}"
@@ -720,17 +859,24 @@ def comparison_plan(report: PilotReport) -> TabPlan:
                 text(_status_text(row[f"{code}_Price_Status"],
                                   selection["not_comparable_reasons"],
                                   stock_by_observation.get(selection["observation_id"], ""),
-                                  row[f"{code}_Match_Basis"], row[f"{code}_Warnings"])),
+                                  row[f"{code}_Match_Basis"], row[f"{code}_Warnings"],
+                                  row.get(f"{code}_Offer_Details", ""))),
                 text(row[f"{code}_Observed_At"]),
+                *_recheck_cells(report, row, code),
             ]
         lowest = row["Lowest_Price_Retailers"]
         in_stock = row["Lowest_In_Stock_Price_Retailers"]
         cells += [
             number(row["Lowest_Price"], "php"),
             text(_minimum_retailers(lowest, row.get("Lowest_Price_Notes", ""))),
+            text(_minimum_basis(row.get("Lowest_Price_Label", ""),
+                                row.get("Lowest_Price_Basis", ""))),
             number(row["Lowest_In_Stock_Price"], "php"),
             text(_minimum_retailers(in_stock, row.get("Lowest_In_Stock_Notes", ""))),
+            text(_minimum_basis(row.get("Lowest_In_Stock_Label", ""),
+                                row.get("Lowest_In_Stock_Basis", ""))),
             number(row["Comparable_Retailer_Count"], "integer"),
+            text(BASIS_WORDS.get(row.get("Comparison_Basis", ""), "")),
             text(row["Shopee_Sales_Extract_Date"]),
             text(week),
             text(report.summary["report_week"]["status"]),
@@ -863,6 +1009,41 @@ def review_plan(report: PilotReport) -> TabPlan:
                 text(row["match_reason_codes"]),
                 text(row["comparability_status"]),
                 text(row["comparability_reasons"]),
+                text(row["observation_id"]),
+            )
+        )
+    ranks_by_target = {row["target_id"]: row["rank"] for row in report.scope}
+    for row in sorted(report.rechecks, key=lambda r: (
+        int(r["rank"]), [code for code, _ in RETAILERS].index(r["retailer_code"]),
+        int(r["recheck_rank"]),
+    )):
+        details = "; ".join(filter(None, (
+            row["explanation"],
+            row["stock"].replace("_", " ").lower(),
+            f"observed {row['observed_at_local']}" if row["observed_at_local"] else "",
+            f"unconfirmed price PHP {row['unconfirmed_price']}"
+            if row["unconfirmed_price"] else "",
+            f"listed title: {row['title']}" if row["title"] else "",
+        )))
+        rows.append(
+            (
+                text("Recheck candidate (unconfirmed)"),
+                text(RECHECK_STAGE_TEXT.get(row["stage"], row["stage"])),
+                text(details),
+                text(row["report_week_start"]),
+                text(row["observed_at_local"]),
+                number(ranks_by_target.get(row["target_id"], ""), "integer"),
+                BLANK,
+                text(row["target_id"]),
+                text(RETAILER_NAMES.get(row["retailer_code"], row["retailer_id"])),
+                BLANK,
+                text(row["url"], link=row["url"]),
+                BLANK,
+                text(row["stock"]),
+                text(row["status"]),
+                BLANK,
+                text(f"not priced (cell: {row['cell_price_status']})"),
+                BLANK,
                 text(row["observation_id"]),
             )
         )

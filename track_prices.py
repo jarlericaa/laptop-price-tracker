@@ -12,6 +12,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent / "src"))
 
+from laptop_tracker.listed_spec import ListedSpecMatcher
 from laptop_tracker.match_run import (
     ObservationFileError,
     TargetSnapshotError,
@@ -28,6 +29,13 @@ from laptop_tracker.offer_terms import (
     DEFAULT_OFFER_TERMS_POLICY,
     OFFER_TERMS_POLICIES,
 )
+from laptop_tracker.pilot_coverage import (
+    COVERAGE_PRIORITY,
+    collection_lineage,
+    discovery_started_at,
+    load_discovery_logs,
+    search_stage_outcomes,
+)
 from laptop_tracker.price_tracking import (
     COMPARISON_COLUMNS,
     HISTORY_COLUMNS,
@@ -36,6 +44,7 @@ from laptop_tracker.price_tracking import (
     REPORTING_TIMEZONE,
     RETAILERS,
     REVIEW_COLUMNS,
+    SEARCH_STAGE_STATUSES,
     SELECTION_COLUMNS,
     SERIES_COLUMNS,
     SOURCE_LEDGER_COLUMNS,
@@ -50,6 +59,7 @@ from laptop_tracker.price_tracking import (
     utc_text,
     validate_selected_list,
 )
+from laptop_tracker.recheck import RECHECK_COLUMNS, RecheckCandidate, discovery_rechecks
 from laptop_tracker.supporting_tables import validate_match_review, validate_source_model_map
 from laptop_tracker.target_master import (
     TargetMasterSchemaError,
@@ -85,6 +95,7 @@ OUTPUT_FILES = {
     "history": "price_history.csv",
     "review": "price_review_queue.csv",
     "ledger": "configuration_source_ledger.csv",
+    "rechecks": "recheck_candidates.csv",
     "summary": "price_tracking_run_summary.json",
 }
 
@@ -169,6 +180,19 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--discovery-dir",
+        type=Path,
+        action="append",
+        default=[],
+        help=(
+            "A discovery folder of the report week (repeatable; its collection/ inside). Its "
+            "candidate lineage links collected offers to the configurations they were searched "
+            "for, and its recorded search outcomes explain blank cells with no related offer "
+            "(NO_RELEVANT_CANDIDATE, SEARCH_FAILED, FETCH_FAILED, ...). A folder whose discovery "
+            "started outside the report week is refused. Context only: never an assignment."
+        ),
+    )
+    parser.add_argument(
         "--output-dir",
         type=Path,
         help="Report directory (default: data/output/price_tracking/week_<week-start>).",
@@ -184,6 +208,60 @@ def read_search_context(paths: list[Path]) -> dict[str, list[str]]:
             if row["observation_id"] and row["expected_target_id"]:
                 context.setdefault(row["observation_id"], []).append(row["expected_target_id"])
     return context
+
+
+def read_discovery(paths: list[Path], week, catalog_targets=None) -> tuple[
+    dict[str, list[str]], dict[tuple[str, str], tuple[str, str]],
+    dict[tuple[str, str], list[RecheckCandidate]],
+]:
+    """Search context and blank-cell search outcomes from discovery folders of ``week``.
+
+    Returns ``(observation_id -> [configurations], (target_id, retailer_code) -> (status,
+    explanation), (target_id, retailer_code) -> recheck candidates)``. Several folders: the most
+    informative outcome per cell wins. ``catalog_targets`` (target_id -> catalog row) ranks and
+    explains family-name leads by the target's own recorded code and screen.
+    """
+    context: dict[str, list[str]] = {}
+    outcomes: dict[tuple[str, str], tuple[str, str]] = {}
+    rechecks: dict[tuple[str, str], list[RecheckCandidate]] = {}
+    codes = {retailer_id: code for code, retailer_id in RETAILERS}
+    for folder in paths:
+        if not folder.is_dir():
+            raise PriceTrackingInputError(f"Discovery folder not found: {folder}")
+        started_text = discovery_started_at(folder)
+        if not started_text:
+            raise PriceTrackingInputError(f"{folder} records no discovery start time.")
+        started = parse_as_of(started_text)
+        if not week.start_utc <= started < week.end_utc:
+            raise PriceTrackingInputError(
+                f"{folder} was searched {utc_text(started)}, outside the report week; its search "
+                "outcomes cannot explain this week's cells."
+            )
+        logs = load_discovery_logs(folder)
+        results = folder / "collection" / "match_results.csv"
+        if results.is_file():
+            rows = read_csv_rows(results, ("observation_id", "expected_target_id"), "Collection")
+            for observation, targets in collection_lineage(logs, rows).items():
+                known = context.setdefault(observation, [])
+                known += [target for target in targets if target not in known]
+        listed = discovery_rechecks(
+            [row for rows in logs.listed.values() for row in rows],
+            [row for rows in logs.requested.values() for row in rows],
+            logs.report,
+            catalog_targets,
+        )
+        for (target_id, retailer_id), found in listed.items():
+            if codes.get(retailer_id):
+                rechecks.setdefault((target_id, codes[retailer_id]), []).extend(found)
+        for (target_id, retailer_id), (status, text) in search_stage_outcomes(logs).items():
+            key = (target_id, codes.get(retailer_id, ""))
+            if not key[1] or status not in SEARCH_STAGE_STATUSES:
+                continue
+            if key not in outcomes or COVERAGE_PRIORITY.index(status) < COVERAGE_PRIORITY.index(
+                outcomes[key][0]
+            ):
+                outcomes[key] = (status, text)
+    return context, outcomes, rechecks
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -244,6 +322,12 @@ def main(argv: list[str] | None = None) -> int:
             (path, read_observations_csv(path), sha256_file(path)) for path in args.observations
         ]
         search_context = read_search_context(args.search_context)
+        discovery_context, search_outcomes, discovered_rechecks = read_discovery(
+            args.discovery_dir, week,
+            {item.target_id: item.target for item in selected.configurations})
+        for observation, targets in discovery_context.items():
+            known = search_context.setdefault(observation, [])
+            known += [target for target in targets if target not in known]
     except (
         FileNotFoundError,
         UnicodeDecodeError,
@@ -287,6 +371,9 @@ def main(argv: list[str] | None = None) -> int:
             history_start=history_start,
             offer_terms_policy=args.offer_terms_policy,
             search_context=search_context,
+            search_outcomes=search_outcomes,
+            discovery_rechecks=discovered_rechecks,
+            listed_spec=ListedSpecMatcher(target_master.valid_rows),
         )
     except (
         ObservationConflictError,
@@ -303,6 +390,7 @@ def main(argv: list[str] | None = None) -> int:
     write_csv(outputs["history"], HISTORY_COLUMNS, result.history)
     write_csv(outputs["review"], REVIEW_COLUMNS, result.review)
     write_csv(outputs["ledger"], SOURCE_LEDGER_COLUMNS, ledger)
+    write_csv(outputs["rechecks"], RECHECK_COLUMNS, result.rechecks)
 
     status = week.status(as_of)
     inputs = {
@@ -316,6 +404,13 @@ def main(argv: list[str] | None = None) -> int:
             *((args.sales_ranking,) if use_sales else ()),
             *args.observations,
             *args.search_context,
+            *(
+                path for folder in args.discovery_dir
+                for path in (folder / name for name in (
+                    "search_jobs.csv", "search_requests.csv", "candidates.csv", "manifest.csv",
+                    "collection/match_results.csv", "collection/request_report.csv"))
+                if path.is_file()
+            ),
         )
     }
     summary = {
@@ -341,8 +436,16 @@ def main(argv: list[str] | None = None) -> int:
             "currency": REPORTING_CURRENCY,
             "price_basis": "Trusted displayed price (REGULAR or SALE price type); vouchers and "
             "shipping are not observed and stay unknown.",
-            "comparable": "EXACT match to a selected target, IN_STOCK or OUT_OF_STOCK, "
-            "acceptable purchase terms, PHP, known price type. Stock status remains visible.",
+            "comparable": "EXACT match to a selected target, or a listed-spec match to a "
+            "selected broad-family target (2026-10-20), IN_STOCK or OUT_OF_STOCK, acceptable "
+            "purchase terms, PHP, known price type. Stock status remains visible.",
+            "listed_spec": "A broad-family target (catalog model is a family name) may be priced "
+            "by an offer whose own evidence states the same brand and family and the same "
+            "screen, CPU series, installed RAM and installed storage, with no contradicted "
+            "recorded code or secondary specification. It is labelled LISTED_SPEC, never an "
+            "exact product match; an exact comparable offer at the same retailer is preferred. "
+            "Several equally specific family targets: none is priced (review). Minimums that "
+            "include listed-spec prices are labelled 'matching listed specs'.",
             "offer_terms_policy": args.offer_terms_policy,
             "bundles": (
                 "Ordinary offers with stated inclusions (Office, warranty, backpack, ...) are "
@@ -359,8 +462,17 @@ def main(argv: list[str] | None = None) -> int:
                 if args.offer_terms_policy != BUNDLE_FLAG_POLICY
                 else "displayed-price/stock-and-bundles/2026-10-15"
             ),
+            "recheck_candidates": "A blank price lists the relevant pages found for the "
+            "configuration that are not confirmed comparable offers (fetched but unconfirmed, "
+            "fetch failed, or not fetched), most useful first, in recheck_candidates.csv; the "
+            "first is named in the comparison. Accessories and unrelated results are never "
+            "listed. An amount shown is labelled unconfirmed and never used.",
             "unconfirmed_candidates": "A blank price may name an unconfirmed candidate offer "
             "(link, outcome, differing values); its price is never shown or used in minimums.",
+            "search_outcomes": "With --discovery-dir, a cell with no related offer this week "
+            "takes the week's recorded discovery outcome (NO_RELEVANT_CANDIDATE, "
+            "NO_CANDIDATE_FOUND, SEARCH_FAILED, FETCH_FAILED, CANDIDATE_NOT_FETCHED, "
+            "DISCOVERY_NOT_ATTEMPTED), the same rule as coverage.csv; earlier weeks never do.",
             "representative_observation": "Latest observation of each offer within the week.",
             "selection": "Lowest comparable price per target and retailer; no averaging.",
             "tie_break": TIE_BREAK,
@@ -464,10 +576,26 @@ def main(argv: list[str] | None = None) -> int:
         + ", ".join(f"{code} {counts[f'prices_{code}']}" for code, _ in RETAILERS)
         + f"; review rows: {counts['review_rows']}; history rows: {len(result.history)}."
     )
+    print(
+        f"Price basis: exact product {counts['selected_retailer_prices_exact_product']}, "
+        f"listed-spec {counts['selected_retailer_prices_listed_spec']}; configurations priced "
+        f"exact-only {counts['configurations_priced_exact_product']}, listed-spec-only "
+        f"{counts['configurations_priced_listed_spec']}, mixed "
+        f"{counts['configurations_priced_mixed']}; listed-spec associations this week "
+        f"{counts['week_listed_spec_associations']} (ambiguous "
+        f"{counts['week_listed_spec_ambiguous']})."
+    )
     if not selected.catalog_matches_build:
         print(
             "Note: TARGET_MASTER differs from the catalog the selected list was built on; every "
             "selected identity was rechecked and is unchanged."
+        )
+    if args.discovery_dir:
+        print(
+            "Blank cells explained by the recorded discovery: "
+            + ", ".join(f"{status} {counts[f'cells_{status}']}" for status in
+                        SEARCH_STAGE_STATUSES if counts[f"cells_{status}"])
+            + f"; still unexplained: {counts['cells_NO_OBSERVATION_IN_WEEK']}."
         )
     print(f"Reports written to {output_dir}.")
     return 0
