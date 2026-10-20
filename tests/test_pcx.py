@@ -99,7 +99,7 @@ def test_regular_page_yields_an_attributed_offer() -> None:
         "JSON-LD availability: InStock; add to cart button: Add to cart (enabled); "
         "notify-me button: hidden"
     )
-    assert offer.source.adapter_version == "pcx-2"
+    assert offer.source.adapter_version == "pcx-4"
     details = offer.details
     assert details.price_type is PriceType.REGULAR
     assert (details.regular_price, details.sale_price) == (Decimal("47990.00"), None)

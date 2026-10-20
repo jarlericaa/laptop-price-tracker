@@ -1,6 +1,6 @@
 # PC Central (PCC) Adapter
 
-**Status:** Adapter implemented and tested offline on 2026-10-01 (now `adapter_version = "pcc-4"` since 2026-10-15; scoped evidence and span layout below). **Live use is enabled** (`live_use_approved = True`) under the project-wide owner decision in [DECISIONS.md](../DECISIONS.md). PC Central's published pages neither grant nor prohibit automated collection, so the external-policy finding is **UNKNOWN**. No retailer permission is recorded. A bare-URL live check fetched the page and failed safely with `AMBIGUOUS_VARIANT`; a selected-variant check returned one in-stock ASUS VivoBook offer at PHP 36,999.00. See [PROGRESS_LOG.md](../PROGRESS_LOG.md#pcc-live-smoke-checks-2026-10-01). Adapter maintainer: Jarelle Ricaforte.
+**Status:** Adapter implemented and tested offline on 2026-10-01 (now `adapter_version = "pcc-6"` since 2026-10-19; scoped evidence, span layout, `pcc-5` and `pcc-6` below). **Live use is enabled** (`live_use_approved = True`) under the project-wide owner decision in [DECISIONS.md](../DECISIONS.md). PC Central's published pages neither grant nor prohibit automated collection, so the external-policy finding is **UNKNOWN**. No retailer permission is recorded. A bare-URL live check fetched the page and failed safely with `AMBIGUOUS_VARIANT`; a selected-variant check returned one in-stock ASUS VivoBook offer at PHP 36,999.00. See [PROGRESS_LOG.md](../PROGRESS_LOG.md#pcc-live-smoke-checks-2026-10-01). Adapter maintainer: Jarelle Ricaforte.
 
 | Item | Value |
 |---|---|
@@ -194,3 +194,16 @@ review (`MODEL_URL_CONFLICT`).
 - Bundle detection is keyword based and can over-flag or under-flag.
 - robots.txt and Shopify's platform comments point agents to UCP/MCP catalog endpoints. No adapter for those exists, and using them would need its own review.
 - The adapter parses product pages only. Search is handled separately by `discover_products.py` (bounded, manual runs; see [SETUP_AND_OPERATIONS.md](../SETUP_AND_OPERATIONS.md#automatic-product-discovery-phase-10-manual-runs)); collection and category pages are not crawled.
+
+## `pcc-5` (2026-10-19, second review)
+
+Product paths are compared with percent-escapes decoded (previously a case difference in an
+escape could make a single-product page `AMBIGUOUS_VARIANT`). Discovery collects a page with one
+named variant (`data-has-only-default-variant="false"`) at its `?variant=` URL so the variant is
+bound; default-variant pages are unchanged.
+
+## `pcc-6` (2026-10-19, independent review)
+
+Product paths compare in RFC 3986 normal form (`url_paths.normalized_path`) instead of fully
+decoded: an escaped `/` stays distinct from a separator. Variant IDs remain query values. The four
+saved AMBIGUOUS_VARIANT bodies of the original run still parse one offer each.

@@ -33,6 +33,7 @@ from ..offers import (
     url_host,
 )
 from ..scraping import FetchedPage, ParsedOffer, ParseError, ScrapeRequest
+from ..url_paths import normalized_path
 
 RETAILER_ID = "pcx"
 RETAILER_CODE = "PCX"
@@ -92,7 +93,7 @@ class PCXAdapter:
     retailer_code = RETAILER_CODE
     # Bump when parsing rules change; recorded in every observation's source metadata.
     # pcx-2 (2026-10-13): adds identifier provenance as scoped evidence; parsing is unchanged.
-    adapter_version = "pcx-2"
+    adapter_version = "pcx-4"
     allowed_hosts = frozenset({HOST})
     # Explicit project-owner authorization; not a claim of retailer consent.
     live_use_approved = True
@@ -225,8 +226,11 @@ def _node_paths(node: dict) -> set[str]:
     candidates = [node.get("@id"), node.get("url")]
     if isinstance(offers, dict):
         candidates.append(offers.get("url"))
+    # Paths are compared in RFC 3986 normal form (url_paths.py): ``%e2%84%a2`` and ``%E2%84%A2``
+    # are one handle, but an escaped "/" is never a path separator (2026-10-19, independent
+    # review; pcx-3 decoded every escape).
     return {
-        urlsplit(value.strip()).path.rstrip("/")
+        normalized_path(value)
         for value in candidates
         if isinstance(value, str) and value.strip()
     }

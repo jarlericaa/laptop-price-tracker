@@ -36,6 +36,7 @@ from ..offers import (
     url_host,
 )
 from ..scraping import FetchedPage, ParsedOffer, ParseError, ScrapeRequest
+from ..url_paths import normalized_path
 
 RETAILER_ID = "pcc"
 RETAILER_CODE = "PCC"
@@ -124,7 +125,7 @@ class PCCAdapter:
     # pcc-4 (2026-10-15): a description paragraph laid out as <span>Label </span><span>value
     # </span> keeps its label/value boundary (reviewed 2026-10-15 Nitro page). Other text is
     # byte-for-byte as before.
-    adapter_version = "pcc-4"
+    adapter_version = "pcc-6"
     allowed_hosts = frozenset({HOST})
     # Project-owner authorization under the project-wide decision; not retailer consent.
     live_use_approved = True
@@ -773,7 +774,9 @@ def _brand(product: dict) -> str:
 def _path(value: object) -> str:
     if not isinstance(value, str) or not value.strip():
         return ""
-    return urlsplit(value.strip()).path.rstrip("/")
+    # RFC 3986 normal form (url_paths.py): ``%e2`` and ``%E2`` escapes of one handle compare
+    # equal; an escaped "/" stays distinct from a separator (2026-10-19, independent review).
+    return normalized_path(value)
 
 
 def _first(values: list[str]) -> str:

@@ -1,6 +1,6 @@
 # PC Express (PCX) Adapter
 
-**Status:** Adapter implemented and tested offline on 2026-10-01 (now `adapter_version = "pcx-2"` since 2026-10-13; scoped evidence below). **Live use is enabled** (`live_use_approved = True`) by the explicit project-owner PCX decision in [DECISIONS.md](../DECISIONS.md). PC Express's published terms restrict automated collection without express written consent; the external-policy finding remains **RESTRICTED**, and no written consent is recorded. A user-reported live check returned one in-stock Acer Aspire Lite offer; its offer URL appeared as a Markdown link in the reported output. A controlled live check on 2026-10-01 of the reviewed HP 14 laptop page printed `repr(offer.offer_url)` as the bare `'https://pcx.com.ph/products/…'` string (a `str`, equal to the requested and final URLs). See [PROGRESS_LOG.md](../PROGRESS_LOG.md#phase-7-live-follow-up-checks-2026-10-01). Adapter maintainer: Jarelle Ricaforte.
+**Status:** Adapter implemented and tested offline on 2026-10-01 (now `adapter_version = "pcx-4"` since 2026-10-19; scoped evidence, `pcx-3` and `pcx-4` below). **Live use is enabled** (`live_use_approved = True`) by the explicit project-owner PCX decision in [DECISIONS.md](../DECISIONS.md). PC Express's published terms restrict automated collection without express written consent; the external-policy finding remains **RESTRICTED**, and no written consent is recorded. A user-reported live check returned one in-stock Acer Aspire Lite offer; its offer URL appeared as a Markdown link in the reported output. A controlled live check on 2026-10-01 of the reviewed HP 14 laptop page printed `repr(offer.offer_url)` as the bare `'https://pcx.com.ph/products/…'` string (a `str`, equal to the requested and final URLs). See [PROGRESS_LOG.md](../PROGRESS_LOG.md#phase-7-live-follow-up-checks-2026-10-01). Adapter maintainer: Jarelle Ricaforte.
 
 | Item | Value |
 |---|---|
@@ -127,3 +127,17 @@ as an unverified search token. The four extracted core fields (screen, CPU `Core
 - Bundle detection is keyword based. It can over-flag, for example the reviewed monitor's title ("Portable USB Monitor") is flagged for `MONITOR`. It can also under-flag freebies named with other words.
 - Robots.txt and Shopify's platform comments point agents to UCP/MCP catalog endpoints; no adapter for those exists, and using them would need its own review.
 - The adapter parses product pages only. Search is handled separately by `discover_products.py` (bounded, manual runs; see [SETUP_AND_OPERATIONS.md](../SETUP_AND_OPERATIONS.md#automatic-product-discovery-phase-10-manual-runs)); collection and category pages are not crawled.
+
+## `pcx-3` (2026-10-19, second review)
+
+JSON-LD node URLs are compared with percent-escapes decoded, so one handle written as
+`%e2%84%a2` in one block and `%E2%84%A2` in another is the same product (previously
+`AMBIGUOUS_PRODUCT`). The CPU label `Processors` is read. Raw rows are otherwise unchanged.
+
+## `pcx-4` (2026-10-19, independent review)
+
+`pcx-3` decoded every percent-escape, so `/products/a%2Fb` and `/products/a/b` compared equal.
+Node paths now compare in RFC 3986 normal form (`url_paths.normalized_path`): escape case only,
+escaped unreserved characters, and literal non-ASCII as UTF-8 escapes; reserved escapes, `%25`
+and path case are kept. The saved AMBIGUOUS_PRODUCT body of the original run still parses one
+offer.
