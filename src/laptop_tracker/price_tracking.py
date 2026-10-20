@@ -100,6 +100,7 @@ from .recheck import (
     recheck_note,
     url_key,
 )
+from .shopee_snapshot import ShopeeSelection, price_text
 from .supporting_tables import TableResult
 from .target_master import (
     CONFIGURATION,
@@ -195,6 +196,11 @@ RETAILER_DETAIL_SUFFIXES: tuple[str, ...] = (
     # (2026-10-20): a listed-spec price never claims full configuration equivalence.
     "Offer_Details",
 )
+SHOPEE_COMPARISON_COLUMNS: tuple[str, ...] = (
+    "Shopee_Price", "Shopee_Listing_URL", "Shopee_Variation", "Shopee_Item_Name",
+    "Shopee_Model_ID", "Shopee_Shop_ID", "Shopee_Item_ID", "Shopee_Price_Status",
+    "Shopee_Price_Detail", "Shopee_Snapshot_Date", "Shopee_Snapshot_Label",
+)
 COMPARISON_COLUMNS: tuple[str, ...] = (
     *LEGACY_COMPARISON_COLUMNS[: LEGACY_COMPARISON_COLUMNS.index("Comparable_Retailer_Count")],
     *(f"{code}_{suffix}" for code, _ in RETAILERS for suffix in RETAILER_DETAIL_SUFFIXES),
@@ -222,6 +228,10 @@ COMPARISON_COLUMNS: tuple[str, ...] = (
     "Lowest_Price_Label",
     "Lowest_In_Stock_Basis",
     "Lowest_In_Stock_Label",
+    # The configuration's Shopee snapshot price (2026-10-20, shopee_snapshot.py): the lowest
+    # eligible mapped-listing price of the sales extract, dated by that extract. Never a current
+    # price, never stock-verified, never part of a retailer minimum or count.
+    *SHOPEE_COMPARISON_COLUMNS,
 )
 
 LEGACY_SELECTION_COLUMNS: tuple[str, ...] = (
@@ -399,6 +409,10 @@ SOURCE_LEDGER_COLUMNS: tuple[str, ...] = (
     "sales_run_id",
     "sales_extract_date",
     "sales_period_label",
+    # The listing's role in the configuration's Shopee snapshot price (2026-10-20) and its
+    # product-page link from the verified shop/item IDs (the link does not select a variation).
+    "shopee_price_role",
+    "shopee_listing_url",
 )
 
 # Comparability statuses.
@@ -1315,6 +1329,7 @@ def build_price_tracking(
     search_outcomes: Mapping[tuple[str, str], tuple[str, str]] | None = None,
     discovery_rechecks: Mapping[tuple[str, str], Sequence[RecheckCandidate]] | None = None,
     listed_spec: ListedSpecMatcher | None = None,
+    shopee: Mapping[str, ShopeeSelection] | None = None,
 ) -> PriceTrackingResult:
     """``search_outcomes`` (``(target_id, retailer_code) -> (status, explanation)``) come from the
     report week's recorded discovery and explain blank cells of that week only; earlier weeks in
@@ -1358,6 +1373,7 @@ def build_price_tracking(
 
     comparison = [
         _comparison_row(item, current, selected, context, week_fields, as_of)
+        | _shopee_cells(selected, (shopee or {}).get(item.target_id), shopee is not None)
         for item in selected.configurations
     ]
     selections = [
@@ -1523,7 +1539,33 @@ def _comparison_row(
         "Lowest_Price_Label": minimum_label(observed_basis, in_stock=False),
         "Lowest_In_Stock_Label": minimum_label(in_stock_basis, in_stock=True),
     }
-    return {column: row[column] for column in COMPARISON_COLUMNS}
+    return {column: row[column] for column in COMPARISON_COLUMNS
+            if column not in SHOPEE_COMPARISON_COLUMNS}
+
+
+def _shopee_cells(
+    selected: SelectedList, selection: ShopeeSelection | None, supplied: bool
+) -> dict[str, str]:
+    """The Shopee snapshot columns of one configuration: the selected listing's price, link,
+    variation and IDs from one source row, dated by the sales extract."""
+    source = selection.source if selection and selection.source else {}
+    status = selection.status if selection else (
+        "NO_CONTRIBUTING_SOURCE" if supplied else "SHOPEE_SNAPSHOT_NOT_SUPPLIED")
+    return {
+        "Shopee_Price": price_text(selection.amount)
+        if selection and selection.amount is not None else "",
+        "Shopee_Listing_URL": selection.url if selection else "",
+        "Shopee_Variation": source.get("shopee_model_name", ""),
+        "Shopee_Item_Name": source.get("item_name", ""),
+        "Shopee_Model_ID": source.get("model_id", ""),
+        "Shopee_Shop_ID": source.get("shop_id", ""),
+        "Shopee_Item_ID": source.get("item_id", ""),
+        "Shopee_Price_Status": status,
+        "Shopee_Price_Detail": selection.detail() if selection else "",
+        "Shopee_Snapshot_Date": selected.sales_extract_date,
+        "Shopee_Snapshot_Label": f"sales run {selected.sales_run_id}; "
+        f"{selected.gmv_period_label()}",
+    }
 
 
 def _minimum(

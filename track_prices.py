@@ -7,6 +7,7 @@ import argparse
 import json
 import sqlite3
 import sys
+from collections import Counter
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -60,6 +61,14 @@ from laptop_tracker.price_tracking import (
     validate_selected_list,
 )
 from laptop_tracker.recheck import RECHECK_COLUMNS, RecheckCandidate, discovery_rechecks
+from laptop_tracker.shopee_snapshot import (
+    NO_MAPPED_SOURCE,
+    ShopeeSelection,
+    select_shopee_prices,
+    selection_row,
+)
+from laptop_tracker.shopee_snapshot import SELECTION_COLUMNS as SHOPEE_SELECTION_COLUMNS
+from laptop_tracker.shopee_snapshot import SELECTION_RULE as SHOPEE_SELECTION_RULE
 from laptop_tracker.supporting_tables import validate_match_review, validate_source_model_map
 from laptop_tracker.target_master import (
     TargetMasterSchemaError,
@@ -96,6 +105,7 @@ OUTPUT_FILES = {
     "review": "price_review_queue.csv",
     "ledger": "configuration_source_ledger.csv",
     "rechecks": "recheck_candidates.csv",
+    "shopee": "shopee_price_selection.csv",
     "summary": "price_tracking_run_summary.json",
 }
 
@@ -312,6 +322,9 @@ def main(argv: list[str] | None = None) -> int:
             else None
         )
         ledger = build_source_ledger(selected, contributions, mapping, sales_rows)
+        # The lowest eligible mapped-listing snapshot price per configuration (2026-10-20);
+        # every listing keeps its row and gains its role in that selection.
+        shopee, ledger = select_shopee_prices(ledger)
         matcher = matcher_from_validated(target_master)
         context = matching_context(
             target_master,
@@ -374,6 +387,7 @@ def main(argv: list[str] | None = None) -> int:
             search_outcomes=search_outcomes,
             discovery_rechecks=discovered_rechecks,
             listed_spec=ListedSpecMatcher(target_master.valid_rows),
+            shopee=shopee,
         )
     except (
         ObservationConflictError,
@@ -390,6 +404,16 @@ def main(argv: list[str] | None = None) -> int:
     write_csv(outputs["history"], HISTORY_COLUMNS, result.history)
     write_csv(outputs["review"], REVIEW_COLUMNS, result.review)
     write_csv(outputs["ledger"], SOURCE_LEDGER_COLUMNS, ledger)
+    sales_fields = {"sales_run_id": selected.sales_run_id,
+                    "sales_extract_date": selected.sales_extract_date,
+                    "sales_period_label": selected.gmv_period_label()}
+    shopee_rows = [
+        selection_row(str(item.rank), shopee.get(item.target_id) or ShopeeSelection(
+            item.target_id, NO_MAPPED_SOURCE), sales_fields)
+        for item in selected.configurations
+    ]
+    write_csv(outputs["shopee"], SHOPEE_SELECTION_COLUMNS, shopee_rows)
+    shopee_counts = Counter(row["shopee_price_status"] for row in shopee_rows)
     write_csv(outputs["rechecks"], RECHECK_COLUMNS, result.rechecks)
 
     status = week.status(as_of)
@@ -492,6 +516,24 @@ def main(argv: list[str] | None = None) -> int:
             "sales extract; they are not current marketplace prices and are never mixed with "
             "retailer prices.",
         },
+        "shopee_snapshot_prices": {
+            "rule": SHOPEE_SELECTION_RULE,
+            "snapshot_extract_date": selected.sales_extract_date,
+            "sales_run_id": selected.sales_run_id,
+            "label": selected.gmv_period_label(),
+            "note": "Historical Shopee snapshot prices from the sales extract, dated by that "
+            "extract; not current prices, no verified stock, and never part of the retailer "
+            "minimums or the comparable-retailer count. The product-page link does not select "
+            "the variation.",
+            "configurations_with_price": shopee_counts.get("SNAPSHOT_PRICE", 0),
+            "configurations_by_status": dict(sorted(shopee_counts.items())),
+            "configurations_with_tied_lowest_price": sum(
+                1 for row in shopee_rows if ";" in row["tied_model_ids"]),
+            "configurations_with_several_distinct_prices": sum(
+                1 for row in shopee_rows if row["distinct_prices"] not in {"", "0", "1"}),
+            "listings_by_role": dict(sorted(Counter(
+                row["shopee_price_role"] for row in ledger).items())),
+        },
         "selected_list": {
             "configurations": len(selected.configurations),
             "sha256": selected.sha256,
@@ -575,6 +617,12 @@ def main(argv: list[str] | None = None) -> int:
         "Retailer prices selected: "
         + ", ".join(f"{code} {counts[f'prices_{code}']}" for code, _ in RETAILERS)
         + f"; review rows: {counts['review_rows']}; history rows: {len(result.history)}."
+    )
+    print(
+        f"Shopee snapshot prices ({selected.sales_extract_date} extract, historical): "
+        f"{shopee_counts.get('SNAPSHOT_PRICE', 0)} of {len(shopee_rows)} configurations"
+        + "".join(f"; {status} {count}" for status, count in sorted(shopee_counts.items())
+                  if status != "SNAPSHOT_PRICE") + "."
     )
     print(
         f"Price basis: exact product {counts['selected_retailer_prices_exact_product']}, "
