@@ -1,0 +1,330 @@
+{
+ "resources": {
+  "results": {
+   "products": [
+    {
+     "available": true,
+     "body": "",
+     "compare_at_price_max": "0.00",
+     "compare_at_price_min": "0.00",
+     "handle": "apple-macbook-neo-13-8gb-256gb-a18-pro-chip-with-6-core-cpu-5-core-gpu-indigo-mhff4pp-a",
+     "id": 15347191087475,
+     "image": "https://cdn.shopify.com/s/files/1/0355/8296/7943/files/indigo-256gb.jpg?v=1776934351",
+     "price": "46990.00",
+     "price_max": "46990.00",
+     "price_min": "46990.00",
+     "tags": [
+      "256GB SSD",
+      "8GB RAM",
+      "Laptops",
+      "Non-Gaming Laptop",
+      "pc"
+     ],
+     "title": "Apple MacBook Neo 13\" 8GB+256GB A18 Pro Chip with 6-Core CPU & 5-Core GPU (Indigo) (MHFF4PP/A)",
+     "type": "Computer Non-Gaming Laptop",
+     "url": "/products/apple-macbook-neo-13-8gb-256gb-a18-pro-chip-with-6-core-cpu-5-core-gpu-indigo-mhff4pp-a?_pos=1&_psq=Apple+MacBook+Neo&_psid=a80c8b896&_ss=e",
+     "variants": [],
+     "vendor": "Apple",
+     "featured_image": {
+      "alt": "Apple MacBook Neo 13\"",
+      "aspect_ratio": 1.0,
+      "height": 1200,
+      "url": "https://cdn.shopify.com/s/files/1/0355/8296/7943/files/indigo-256gb.jpg?v=1776934351",
+      "width": 1200
+     }
+    },
+    {
+     "available": true,
+     "body": "",
+     "compare_at_price_max": "0.00",
+     "compare_at_price_min": "0.00",
+     "handle": "apple-macbook-neo-13-8gb-512gb-a18-pro-chip-with-6-core-cpu-5-core-gpu-silver-mhfc4pp-a",
+     "id": 15347191742835,
+     "image": "https://cdn.shopify.com/s/files/1/0355/8296/7943/files/silver-512gb.jpg?v=1776934585",
+     "price": "54950.00",
+     "price_max": "54950.00",
+     "price_min": "54950.00",
+     "tags": [
+      "512GB SSD",
+      "8GB RAM",
+      "Laptops",
+      "Non-Gaming Laptop",
+      "pc"
+     ],
+     "title": "Apple MacBook Neo 13\" 8GB+512GB A18 Pro Chip with 6-Core CPU & 5-Core GPU (Silver) (MHFC4PP/A)",
+     "type": "Computer Non-Gaming Laptop",
+     "url": "/products/apple-macbook-neo-13-8gb-512gb-a18-pro-chip-with-6-core-cpu-5-core-gpu-silver-mhfc4pp-a?_pos=2&_psq=Apple+MacBook+Neo&_psid=a80c8b896&_ss=e",
+     "variants": [],
+     "vendor": "Apple",
+     "featured_image": {
+      "alt": "Apple MacBook Neo 13\"",
+      "aspect_ratio": 1.0,
+      "height": 1200,
+      "url": "https://cdn.shopify.com/s/files/1/0355/8296/7943/files/silver-512gb.jpg?v=1776934585",
+      "width": 1200
+     }
+    },
+    {
+     "available": true,
+     "body": "",
+     "compare_at_price_max": "0.00",
+     "compare_at_price_min": "0.00",
+     "handle": "apple-macbook-neo-13-8gb-512gb-a18-pro-chip-with-6-core-cpu-5-core-gpu-citrus-mhfe4pp-a",
+     "id": 15359996297587,
+     "image": "https://cdn.shopify.com/s/files/1/0355/8296/7943/files/4sdg5sd6ag4.jpg?v=1777515005",
+     "price": "54950.00",
+     "price_max": "54950.00",
+     "price_min": "54950.00",
+     "tags": [
+      "512GB SSD",
+      "8GB RAM",
+      "Laptops",
+      "Non-Gaming Laptop",
+      "pc"
+     ],
+     "title": "Apple MacBook Neo 13\" 8GB+512GB A18 Pro Chip with 6-Core CPU & 5-Core GPU (Citrus) (MHFE4PP/A)",
+     "type": "Computer Non-Gaming Laptop",
+     "url": "/products/apple-macbook-neo-13-8gb-512gb-a18-pro-chip-with-6-core-cpu-5-core-gpu-citrus-mhfe4pp-a?_pos=3&_psq=Apple+MacBook+Neo&_psid=a80c8b896&_ss=e",
+     "variants": [],
+     "vendor": "Apple",
+     "featured_image": {
+      "alt": "Apple MacBook Neo 13\"",
+      "aspect_ratio": 1.0,
+      "height": 1200,
+      "url": "https://cdn.shopify.com/s/files/1/0355/8296/7943/files/4sdg5sd6ag4.jpg?v=1777515005",
+      "width": 1200
+     }
+    },
+    {
+     "available": true,
+     "body": "",
+     "compare_at_price_max": "0.00",
+     "compare_at_price_min": "0.00",
+     "handle": "apple-macbook-neo-13-8gb-512gb-a18-pro-chip-with-6-core-cpu-5-core-gpu-blush-mhfj4pp-a",
+     "id": 15412295762291,
+     "image": "https://cdn.shopify.com/s/files/1/0355/8296/7943/files/sd5a6g4dsag.jpg?v=1781749660",
+     "price": "54950.00",
+     "price_max": "54950.00",
+     "price_min": "54950.00",
+     "tags": [
+      "512GB SSD",
+      "8GB RAM",
+      "apple",
+      "Laptop",
+      "Laptops",
+      "Non-Gaming Laptop",
+      "pc"
+     ],
+     "title": "Apple MacBook Neo 13\" 8GB+512GB A18 Pro Chip with 6-Core CPU & 5-Core GPU (Blush) (MHFJ4PP/A)",
+     "type": "Computer Non-Gaming Laptop",
+     "url": "/products/apple-macbook-neo-13-8gb-512gb-a18-pro-chip-with-6-core-cpu-5-core-gpu-blush-mhfj4pp-a?_pos=4&_psq=Apple+MacBook+Neo&_psid=a80c8b896&_ss=e",
+     "variants": [],
+     "vendor": "Apple",
+     "featured_image": {
+      "alt": "Apple MacBook Neo 13\" 8GB+512GB A18 Pro Chip with 6-Core CPU & 5-Core GPU",
+      "aspect_ratio": 1.0,
+      "height": 1200,
+      "url": "https://cdn.shopify.com/s/files/1/0355/8296/7943/files/sd5a6g4dsag.jpg?v=1781749660",
+      "width": 1200
+     }
+    },
+    {
+     "available": true,
+     "body": "",
+     "compare_at_price_max": "0.00",
+     "compare_at_price_min": "0.00",
+     "handle": "apple-macbook-neo-13-8gb-256gb-a18-pro-chip-with-6-core-cpu-5-core-gpu-citrus-mhfd4pp-a",
+     "id": 15347186860403,
+     "image": "https://cdn.shopify.com/s/files/1/0355/8296/7943/files/citrus-256gb.jpg?v=1776933346",
+     "price": "46990.00",
+     "price_max": "46990.00",
+     "price_min": "46990.00",
+     "tags": [
+      "256GB SSD",
+      "8GB RAM",
+      "Laptops",
+      "Non-Gaming Laptop",
+      "pc"
+     ],
+     "title": "Apple MacBook Neo 13\" 8GB+256GB A18 Pro Chip with 6-Core CPU & 5-Core GPU (Citrus) (MHFD4PP/A)",
+     "type": "Computer Non-Gaming Laptop",
+     "url": "/products/apple-macbook-neo-13-8gb-256gb-a18-pro-chip-with-6-core-cpu-5-core-gpu-citrus-mhfd4pp-a?_pos=5&_psq=Apple+MacBook+Neo&_psid=a80c8b896&_ss=e",
+     "variants": [],
+     "vendor": "Apple",
+     "featured_image": {
+      "alt": "Apple MacBook Neo 13\"",
+      "aspect_ratio": 1.0,
+      "height": 1200,
+      "url": "https://cdn.shopify.com/s/files/1/0355/8296/7943/files/citrus-256gb.jpg?v=1776933346",
+      "width": 1200
+     }
+    },
+    {
+     "available": true,
+     "body": "",
+     "compare_at_price_max": "0.00",
+     "compare_at_price_min": "0.00",
+     "handle": "apple-macbook-neo-13-8gb-512gb-a18-pro-chip-with-6-core-cpu-5-core-gpu-indigo-mhfg4pp-a",
+     "id": 15347193872755,
+     "image": "https://cdn.shopify.com/s/files/1/0355/8296/7943/files/indigo-512gb.jpg?v=1776934729",
+     "price": "54950.00",
+     "price_max": "54950.00",
+     "price_min": "54950.00",
+     "tags": [
+      "512GB SSD",
+      "8GB RAM",
+      "apple",
+      "Laptops",
+      "Non-Gaming Laptop",
+      "pc"
+     ],
+     "title": "Apple MacBook Neo 13\" 8GB+512GB A18 Pro Chip with 6-Core CPU & 5-Core GPU (Indigo) (MHFG4PP/A)",
+     "type": "Computer Non-Gaming Laptop",
+     "url": "/products/apple-macbook-neo-13-8gb-512gb-a18-pro-chip-with-6-core-cpu-5-core-gpu-indigo-mhfg4pp-a?_pos=6&_psq=Apple+MacBook+Neo&_psid=a80c8b896&_ss=e",
+     "variants": [],
+     "vendor": "Apple",
+     "featured_image": {
+      "alt": "Apple MacBook Neo 13\"",
+      "aspect_ratio": 1.0,
+      "height": 1200,
+      "url": "https://cdn.shopify.com/s/files/1/0355/8296/7943/files/indigo-512gb.jpg?v=1776934729",
+      "width": 1200
+     }
+    },
+    {
+     "available": true,
+     "body": "",
+     "compare_at_price_max": "0.00",
+     "compare_at_price_min": "0.00",
+     "handle": "apple-mac-mini-m6-chip-with-12-core-cpu-and-12-core-gpu-16gb-unified-memory-256gb-ssd-silver-mhqk4pp-a",
+     "id": 15593751085427,
+     "image": "https://cdn.shopify.com/s/files/1/0355/8296/7943/files/dtrymftyu.jpg?v=1788263074",
+     "price": "64990.00",
+     "price_max": "64990.00",
+     "price_min": "64990.00",
+     "tags": [
+      "16GB RAM",
+      "256GB SSD",
+      "apple",
+      "Apple M6",
+      "MACOS",
+      "Mini-PC",
+      "non-gaming",
+      "pc"
+     ],
+     "title": "Apple Mac Mini M6 Chip with 12-Core CPU and 12-Core GPU | 16GB Unified Memory + 256GB SSD (Silver) (MHQK4PP/A)",
+     "type": "Mini PC",
+     "url": "/products/apple-mac-mini-m6-chip-with-12-core-cpu-and-12-core-gpu-16gb-unified-memory-256gb-ssd-silver-mhqk4pp-a?_pos=7&_psq=Apple+MacBook+Neo&_psid=a80c8b896&_ss=e",
+     "variants": [],
+     "vendor": "Apple",
+     "featured_image": {
+      "alt": "Apple Mac Mini M6 Chip with 12-Core CPU and 12-Core GPU 16GB Unified Memory + 256GB SSD",
+      "aspect_ratio": 1.0,
+      "height": 1200,
+      "url": "https://cdn.shopify.com/s/files/1/0355/8296/7943/files/dtrymftyu.jpg?v=1788263074",
+      "width": 1200
+     }
+    },
+    {
+     "available": true,
+     "body": "",
+     "compare_at_price_max": "0.00",
+     "compare_at_price_min": "0.00",
+     "handle": "apple-mac-mini-m5-pro-chip-with-15-core-cpu-and-16-core-gpu-24gb-unified-memory-512gb-ssd-silver-mhqn4pp-a",
+     "id": 15592749826419,
+     "image": "https://cdn.shopify.com/s/files/1/0355/8296/7943/files/srnrynm.jpg?v=1788263815",
+     "price": "119990.00",
+     "price_max": "119990.00",
+     "price_min": "119990.00",
+     "tags": [
+      "24GB RAM",
+      "512GB SSD",
+      "apple",
+      "Apple M5 Pro",
+      "MACOS",
+      "Mini-PC",
+      "pc"
+     ],
+     "title": "Apple Mac Mini M5 Pro Chip with 15-Core CPU and 16-Core GPU | 24GB Unified Memory + 512GB SSD (Silver) (MHQN4PP/A)",
+     "type": "Mini PC",
+     "url": "/products/apple-mac-mini-m5-pro-chip-with-15-core-cpu-and-16-core-gpu-24gb-unified-memory-512gb-ssd-silver-mhqn4pp-a?_pos=8&_psq=Apple+MacBook+Neo&_psid=a80c8b896&_ss=e",
+     "variants": [],
+     "vendor": "Apple",
+     "featured_image": {
+      "alt": "Apple Mac Mini M5 Pro Chip with 15-Core CPU and 16-Core GPU 24GB Unified Memory + 512GB SSD",
+      "aspect_ratio": 1.0,
+      "height": 1200,
+      "url": "https://cdn.shopify.com/s/files/1/0355/8296/7943/files/srnrynm.jpg?v=1788263815",
+      "width": 1200
+     }
+    },
+    {
+     "available": true,
+     "body": "",
+     "compare_at_price_max": "0.00",
+     "compare_at_price_min": "0.00",
+     "handle": "apple-mac-mini-m6-chip-with-12-core-cpu-and-12-core-gpu-16gb-unified-memory-512gb-ssd-silver-mhql4pp-a",
+     "id": 15592756478323,
+     "image": "https://cdn.shopify.com/s/files/1/0355/8296/7943/files/dtrymftyu_27349902-c03f-450a-96ae-a769cf8b1e8a.jpg?v=1788263218",
+     "price": "77990.00",
+     "price_max": "77990.00",
+     "price_min": "77990.00",
+     "tags": [
+      "16GB RAM",
+      "512GB SSD",
+      "apple",
+      "Apple M6",
+      "MACOS",
+      "Mini-PC",
+      "pc"
+     ],
+     "title": "Apple Mac Mini M6 Chip with 12-Core CPU and 12-Core GPU | 16GB Unified Memory + 512GB SSD (Silver) (MHQL4PP/A)",
+     "type": "Mini PC",
+     "url": "/products/apple-mac-mini-m6-chip-with-12-core-cpu-and-12-core-gpu-16gb-unified-memory-512gb-ssd-silver-mhql4pp-a?_pos=9&_psq=Apple+MacBook+Neo&_psid=a80c8b896&_ss=e",
+     "variants": [],
+     "vendor": "Apple",
+     "featured_image": {
+      "alt": "Apple Mac Mini M6 Chip with 12-Core CPU and 12-Core GPU 16GB Unified Memory + 512GB SSD (MHQL4PP/A)",
+      "aspect_ratio": 1.0,
+      "height": 1200,
+      "url": "https://cdn.shopify.com/s/files/1/0355/8296/7943/files/dtrymftyu_27349902-c03f-450a-96ae-a769cf8b1e8a.jpg?v=1788263218",
+      "width": 1200
+     }
+    },
+    {
+     "available": true,
+     "body": "",
+     "compare_at_price_max": "0.00",
+     "compare_at_price_min": "0.00",
+     "handle": "apple-mac-mini-m6-chip-with-12-core-cpu-and-12-core-gpu-24gb-unified-memory-512gb-ssd-silver-mhqm4pp-a",
+     "id": 15592764211571,
+     "image": "https://cdn.shopify.com/s/files/1/0355/8296/7943/files/dtrymftyu_54aab551-f8fa-4f57-8671-411e89f17fe3.jpg?v=1788263415",
+     "price": "90990.00",
+     "price_max": "90990.00",
+     "price_min": "90990.00",
+     "tags": [
+      "24GB RAM",
+      "512GB SSD",
+      "apple",
+      "Apple M6",
+      "MACOS",
+      "Mini-PC",
+      "pc"
+     ],
+     "title": "Apple Mac Mini M6 Chip with 12-Core CPU and 12-Core GPU | 24GB Unified Memory + 512GB SSD (Silver) (MHQM4PP/A)",
+     "type": "Mini PC",
+     "url": "/products/apple-mac-mini-m6-chip-with-12-core-cpu-and-12-core-gpu-24gb-unified-memory-512gb-ssd-silver-mhqm4pp-a?_pos=10&_psq=Apple+MacBook+Neo&_psid=a80c8b896&_ss=e",
+     "variants": [],
+     "vendor": "Apple",
+     "featured_image": {
+      "alt": "Apple Mac Mini M6 Chip with 12-Core CPU and 12-Core GPU 24GB Unified Memory + 512GB SSD (MHQM4PP/A)",
+      "aspect_ratio": 1.0,
+      "height": 1200,
+      "url": "https://cdn.shopify.com/s/files/1/0355/8296/7943/files/dtrymftyu_54aab551-f8fa-4f57-8671-411e89f17fe3.jpg?v=1788263415",
+      "width": 1200
+     }
+    }
+   ]
+  }
+ }
+}

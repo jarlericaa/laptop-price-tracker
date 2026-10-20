@@ -1,0 +1,335 @@
+{
+ "resources": {
+  "results": {
+   "products": [
+    {
+     "available": true,
+     "body": "",
+     "compare_at_price_max": "0.00",
+     "compare_at_price_min": "0.00",
+     "handle": "apple-macbook-neo-13-8gb-512gb-a18-pro-chip-with-6-core-cpu-5-core-gpu-blush-mhfj4pp-a",
+     "id": 15412295762291,
+     "image": "https://cdn.shopify.com/s/files/1/0355/8296/7943/files/sd5a6g4dsag.jpg?v=1781749660",
+     "price": "54950.00",
+     "price_max": "54950.00",
+     "price_min": "54950.00",
+     "tags": [
+      "512GB SSD",
+      "8GB RAM",
+      "apple",
+      "Laptop",
+      "Laptops",
+      "Non-Gaming Laptop",
+      "pc"
+     ],
+     "title": "Apple MacBook Neo 13\" 8GB+512GB A18 Pro Chip with 6-Core CPU & 5-Core GPU (Blush) (MHFJ4PP/A)",
+     "type": "Computer Non-Gaming Laptop",
+     "url": "/products/apple-macbook-neo-13-8gb-512gb-a18-pro-chip-with-6-core-cpu-5-core-gpu-blush-mhfj4pp-a?_pos=1&_psq=Apple+MacBook+Neo+A18+Pro+8GB+512GB&_psid=942142d88&_ss=e",
+     "variants": [],
+     "vendor": "Apple",
+     "featured_image": {
+      "alt": "Apple MacBook Neo 13\" 8GB+512GB A18 Pro Chip with 6-Core CPU & 5-Core GPU",
+      "aspect_ratio": 1.0,
+      "height": 1200,
+      "url": "https://cdn.shopify.com/s/files/1/0355/8296/7943/files/sd5a6g4dsag.jpg?v=1781749660",
+      "width": 1200
+     }
+    },
+    {
+     "available": true,
+     "body": "",
+     "compare_at_price_max": "0.00",
+     "compare_at_price_min": "0.00",
+     "handle": "apple-macbook-neo-13-8gb-512gb-a18-pro-chip-with-6-core-cpu-5-core-gpu-silver-mhfc4pp-a",
+     "id": 15347191742835,
+     "image": "https://cdn.shopify.com/s/files/1/0355/8296/7943/files/silver-512gb.jpg?v=1776934585",
+     "price": "54950.00",
+     "price_max": "54950.00",
+     "price_min": "54950.00",
+     "tags": [
+      "512GB SSD",
+      "8GB RAM",
+      "Laptops",
+      "Non-Gaming Laptop",
+      "pc"
+     ],
+     "title": "Apple MacBook Neo 13\" 8GB+512GB A18 Pro Chip with 6-Core CPU & 5-Core GPU (Silver) (MHFC4PP/A)",
+     "type": "Computer Non-Gaming Laptop",
+     "url": "/products/apple-macbook-neo-13-8gb-512gb-a18-pro-chip-with-6-core-cpu-5-core-gpu-silver-mhfc4pp-a?_pos=2&_psq=Apple+MacBook+Neo+A18+Pro+8GB+512GB&_psid=942142d88&_ss=e",
+     "variants": [],
+     "vendor": "Apple",
+     "featured_image": {
+      "alt": "Apple MacBook Neo 13\"",
+      "aspect_ratio": 1.0,
+      "height": 1200,
+      "url": "https://cdn.shopify.com/s/files/1/0355/8296/7943/files/silver-512gb.jpg?v=1776934585",
+      "width": 1200
+     }
+    },
+    {
+     "available": true,
+     "body": "",
+     "compare_at_price_max": "0.00",
+     "compare_at_price_min": "0.00",
+     "handle": "apple-macbook-neo-13-8gb-512gb-a18-pro-chip-with-6-core-cpu-5-core-gpu-citrus-mhfe4pp-a",
+     "id": 15359996297587,
+     "image": "https://cdn.shopify.com/s/files/1/0355/8296/7943/files/4sdg5sd6ag4.jpg?v=1777515005",
+     "price": "54950.00",
+     "price_max": "54950.00",
+     "price_min": "54950.00",
+     "tags": [
+      "512GB SSD",
+      "8GB RAM",
+      "Laptops",
+      "Non-Gaming Laptop",
+      "pc"
+     ],
+     "title": "Apple MacBook Neo 13\" 8GB+512GB A18 Pro Chip with 6-Core CPU & 5-Core GPU (Citrus) (MHFE4PP/A)",
+     "type": "Computer Non-Gaming Laptop",
+     "url": "/products/apple-macbook-neo-13-8gb-512gb-a18-pro-chip-with-6-core-cpu-5-core-gpu-citrus-mhfe4pp-a?_pos=3&_psq=Apple+MacBook+Neo+A18+Pro+8GB+512GB&_psid=942142d88&_ss=e",
+     "variants": [],
+     "vendor": "Apple",
+     "featured_image": {
+      "alt": "Apple MacBook Neo 13\"",
+      "aspect_ratio": 1.0,
+      "height": 1200,
+      "url": "https://cdn.shopify.com/s/files/1/0355/8296/7943/files/4sdg5sd6ag4.jpg?v=1777515005",
+      "width": 1200
+     }
+    },
+    {
+     "available": true,
+     "body": "",
+     "compare_at_price_max": "0.00",
+     "compare_at_price_min": "0.00",
+     "handle": "apple-macbook-neo-13-8gb-512gb-a18-pro-chip-with-6-core-cpu-5-core-gpu-indigo-mhfg4pp-a",
+     "id": 15347193872755,
+     "image": "https://cdn.shopify.com/s/files/1/0355/8296/7943/files/indigo-512gb.jpg?v=1776934729",
+     "price": "54950.00",
+     "price_max": "54950.00",
+     "price_min": "54950.00",
+     "tags": [
+      "512GB SSD",
+      "8GB RAM",
+      "apple",
+      "Laptops",
+      "Non-Gaming Laptop",
+      "pc"
+     ],
+     "title": "Apple MacBook Neo 13\" 8GB+512GB A18 Pro Chip with 6-Core CPU & 5-Core GPU (Indigo) (MHFG4PP/A)",
+     "type": "Computer Non-Gaming Laptop",
+     "url": "/products/apple-macbook-neo-13-8gb-512gb-a18-pro-chip-with-6-core-cpu-5-core-gpu-indigo-mhfg4pp-a?_pos=4&_psq=Apple+MacBook+Neo+A18+Pro+8GB+512GB&_psid=942142d88&_ss=e",
+     "variants": [],
+     "vendor": "Apple",
+     "featured_image": {
+      "alt": "Apple MacBook Neo 13\"",
+      "aspect_ratio": 1.0,
+      "height": 1200,
+      "url": "https://cdn.shopify.com/s/files/1/0355/8296/7943/files/indigo-512gb.jpg?v=1776934729",
+      "width": 1200
+     }
+    },
+    {
+     "available": true,
+     "body": "",
+     "compare_at_price_max": "0.00",
+     "compare_at_price_min": "0.00",
+     "handle": "apple-macbook-neo-13-8gb-256gb-a18-pro-chip-with-6-core-cpu-5-core-gpu-indigo-mhff4pp-a",
+     "id": 15347191087475,
+     "image": "https://cdn.shopify.com/s/files/1/0355/8296/7943/files/indigo-256gb.jpg?v=1776934351",
+     "price": "46990.00",
+     "price_max": "46990.00",
+     "price_min": "46990.00",
+     "tags": [
+      "256GB SSD",
+      "8GB RAM",
+      "Laptops",
+      "Non-Gaming Laptop",
+      "pc"
+     ],
+     "title": "Apple MacBook Neo 13\" 8GB+256GB A18 Pro Chip with 6-Core CPU & 5-Core GPU (Indigo) (MHFF4PP/A)",
+     "type": "Computer Non-Gaming Laptop",
+     "url": "/products/apple-macbook-neo-13-8gb-256gb-a18-pro-chip-with-6-core-cpu-5-core-gpu-indigo-mhff4pp-a?_pos=5&_psq=Apple+MacBook+Neo+A18+Pro+8GB+512GB&_psid=942142d88&_ss=e",
+     "variants": [],
+     "vendor": "Apple",
+     "featured_image": {
+      "alt": "Apple MacBook Neo 13\"",
+      "aspect_ratio": 1.0,
+      "height": 1200,
+      "url": "https://cdn.shopify.com/s/files/1/0355/8296/7943/files/indigo-256gb.jpg?v=1776934351",
+      "width": 1200
+     }
+    },
+    {
+     "available": true,
+     "body": "",
+     "compare_at_price_max": "0.00",
+     "compare_at_price_min": "0.00",
+     "handle": "apple-macbook-neo-13-8gb-256gb-a18-pro-chip-with-6-core-cpu-5-core-gpu-citrus-mhfd4pp-a",
+     "id": 15347186860403,
+     "image": "https://cdn.shopify.com/s/files/1/0355/8296/7943/files/citrus-256gb.jpg?v=1776933346",
+     "price": "46990.00",
+     "price_max": "46990.00",
+     "price_min": "46990.00",
+     "tags": [
+      "256GB SSD",
+      "8GB RAM",
+      "Laptops",
+      "Non-Gaming Laptop",
+      "pc"
+     ],
+     "title": "Apple MacBook Neo 13\" 8GB+256GB A18 Pro Chip with 6-Core CPU & 5-Core GPU (Citrus) (MHFD4PP/A)",
+     "type": "Computer Non-Gaming Laptop",
+     "url": "/products/apple-macbook-neo-13-8gb-256gb-a18-pro-chip-with-6-core-cpu-5-core-gpu-citrus-mhfd4pp-a?_pos=6&_psq=Apple+MacBook+Neo+A18+Pro+8GB+512GB&_psid=942142d88&_ss=e",
+     "variants": [],
+     "vendor": "Apple",
+     "featured_image": {
+      "alt": "Apple MacBook Neo 13\"",
+      "aspect_ratio": 1.0,
+      "height": 1200,
+      "url": "https://cdn.shopify.com/s/files/1/0355/8296/7943/files/citrus-256gb.jpg?v=1776933346",
+      "width": 1200
+     }
+    },
+    {
+     "available": false,
+     "body": "",
+     "compare_at_price_max": "0.00",
+     "compare_at_price_min": "0.00",
+     "handle": "apple-macbook-neo-13-8gb-256gb-a18-pro-chip-with-6-core-cpu-5-core-gpu-silver-mhfa4pp-a",
+     "id": 15347184238963,
+     "image": "https://cdn.shopify.com/s/files/1/0355/8296/7943/files/silver-256gb.jpg?v=1776933075",
+     "price": "46990.00",
+     "price_max": "46990.00",
+     "price_min": "46990.00",
+     "tags": [
+      "256GB SSD",
+      "8GB RAM",
+      "Laptops",
+      "Non-Gaming Laptop",
+      "pc"
+     ],
+     "title": "Apple MacBook Neo 13\" 8GB+256GB A18 Pro Chip with 6-Core CPU & 5-Core GPU (Silver) (MHFA4PP/A)",
+     "type": "Computer Non-Gaming Laptop",
+     "url": "/products/apple-macbook-neo-13-8gb-256gb-a18-pro-chip-with-6-core-cpu-5-core-gpu-silver-mhfa4pp-a?_pos=7&_psq=Apple+MacBook+Neo+A18+Pro+8GB+512GB&_psid=942142d88&_ss=e",
+     "variants": [],
+     "vendor": "Apple",
+     "featured_image": {
+      "alt": "Apple MacBook Neo 13\"",
+      "aspect_ratio": 1.0,
+      "height": 1200,
+      "url": "https://cdn.shopify.com/s/files/1/0355/8296/7943/files/silver-256gb.jpg?v=1776933075",
+      "width": 1200
+     }
+    },
+    {
+     "available": false,
+     "body": "",
+     "compare_at_price_max": "0.00",
+     "compare_at_price_min": "0.00",
+     "handle": "apple-macbook-neo-13-8gb-256gb-a18-pro-chip-with-6-core-cpu-5-core-gpu-blush-mhfh4pp-a",
+     "id": 15368615231859,
+     "image": "https://cdn.shopify.com/s/files/1/0355/8296/7943/files/stgnsrtnsr_1320d131-fa6f-4ccc-944d-eccd1d078f92.jpg?v=1781250854",
+     "price": "47950.00",
+     "price_max": "47950.00",
+     "price_min": "47950.00",
+     "tags": [
+      "256GB SSD",
+      "8GB RAM",
+      "apple",
+      "Laptop",
+      "Laptops",
+      "Non-Gaming Laptop",
+      "pc"
+     ],
+     "title": "Apple MacBook Neo 13\" 8GB+256GB A18 Pro Chip with 6-Core CPU & 5-Core GPU (Blush) (MHFH4PP/A)",
+     "type": "Computer Non-Gaming Laptop",
+     "url": "/products/apple-macbook-neo-13-8gb-256gb-a18-pro-chip-with-6-core-cpu-5-core-gpu-blush-mhfh4pp-a?_pos=8&_psq=Apple+MacBook+Neo+A18+Pro+8GB+512GB&_psid=942142d88&_ss=e",
+     "variants": [],
+     "vendor": "Apple",
+     "featured_image": {
+      "alt": "Apple MacBook Neo 13\"",
+      "aspect_ratio": 1.0,
+      "height": 900,
+      "url": "https://cdn.shopify.com/s/files/1/0355/8296/7943/files/stgnsrtnsr_1320d131-fa6f-4ccc-944d-eccd1d078f92.jpg?v=1781250854",
+      "width": 900
+     }
+    },
+    {
+     "available": false,
+     "body": "",
+     "compare_at_price_max": "0.00",
+     "compare_at_price_min": "0.00",
+     "handle": "macbook-pro-13-with-touch-bar-nov-2020-512gb-myd92pp-a-space-grey",
+     "id": 6128705962143,
+     "image": "https://cdn.shopify.com/s/files/1/0355/8296/7943/products/2main_laptop_apple_512_spacegray.jpg?v=1676806515",
+     "price": "40950.00",
+     "price_max": "40950.00",
+     "price_min": "40950.00",
+     "tags": [
+      "13 inch",
+      "13\" To 14.9\"",
+      "15 Inches & Under",
+      "512GB",
+      "8 GB RAM",
+      "Apple M1",
+      "Laptops",
+      "MAC",
+      "MACOS",
+      "Non-Gaming Laptop",
+      "over-5000",
+      "pc"
+     ],
+     "title": "MACBOOK PRO 13\" WITH TOUCH BAR (Nov-2020) 512GB MYD92PP/A (SPACE GREY)",
+     "type": "Computer Non-Gaming Laptop",
+     "url": "/products/macbook-pro-13-with-touch-bar-nov-2020-512gb-myd92pp-a-space-grey?_pos=9&_psq=Apple+MacBook+Neo+A18+Pro+8GB+512GB&_psid=942142d88&_ss=e",
+     "variants": [],
+     "vendor": "Apple",
+     "featured_image": {
+      "alt": "MACBOOK PRO 13\" WITH TOUCH BAR (Nov-2020) 512GB MYD92PP/A (SPACE GREY) - DataBlitz",
+      "aspect_ratio": 1.0,
+      "height": 1000,
+      "url": "https://cdn.shopify.com/s/files/1/0355/8296/7943/products/2main_laptop_apple_512_spacegray.jpg?v=1676806515",
+      "width": 1000
+     }
+    },
+    {
+     "available": false,
+     "body": "",
+     "compare_at_price_max": "0.00",
+     "compare_at_price_min": "0.00",
+     "handle": "macbook-air-13-nov-2020-512gb-mgna3pp-a-silver",
+     "id": 6131285131423,
+     "image": "https://cdn.shopify.com/s/files/1/0355/8296/7943/products/main_laptop_apple_512_silver.jpg?v=1676806585",
+     "price": "38950.00",
+     "price_max": "38950.00",
+     "price_min": "38950.00",
+     "tags": [
+      "13\" To 14.9\"",
+      "15 Inches & Under",
+      "512 GB",
+      "8 GB RAM",
+      "Apple M1",
+      "Laptop",
+      "Laptops",
+      "MAC",
+      "Non-Gaming Laptop",
+      "pc"
+     ],
+     "title": "MACBOOK AIR 13\" (Nov-2020) 512GB MGNA3PP/A (SILVER)",
+     "type": "Computer Non-Gaming Laptop",
+     "url": "/products/macbook-air-13-nov-2020-512gb-mgna3pp-a-silver?_pos=10&_psq=Apple+MacBook+Neo+A18+Pro+8GB+512GB&_psid=942142d88&_ss=e",
+     "variants": [],
+     "vendor": "Apple",
+     "featured_image": {
+      "alt": "MACBOOK AIR 13\" (Nov-2020) 512GB MGNA3PP/A (SILVER) - DataBlitz",
+      "aspect_ratio": 1.0,
+      "height": 1000,
+      "url": "https://cdn.shopify.com/s/files/1/0355/8296/7943/products/main_laptop_apple_512_silver.jpg?v=1676806585",
+      "width": 1000
+     }
+    }
+   ]
+  }
+ }
+}
