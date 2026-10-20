@@ -23,7 +23,13 @@ from dataclasses import dataclass, field
 from urllib.parse import parse_qs, urlsplit
 
 from .collection import ROUTES
-from .conventions import cpu_series_forms, model_codes
+from .conventions import (
+    cpu_series_forms,
+    is_model_code,
+    is_part_number_shape,
+    model_codes,
+    product_name_tokens,
+)
 from .discovery import _NOT_A_SUFFIX, _compact, normalize
 from .normalization import CORE_MATCH_COLUMNS, core_value_key
 from .offers import clean_text
@@ -32,6 +38,9 @@ from .retailer_search import SearchHit, SearchMethod, SearchRecord
 # Candidate categories, in priority order. A historical verified URL is a page that matched this
 # configuration exactly in an earlier collection; it is a seed to re-check, never a match.
 HISTORICAL_VERIFIED_URL = "HISTORICAL_VERIFIED_URL"
+# A known product page supplied by a person (config/supplied_candidate_urls.csv, 2026-10-19): a
+# discovery seed checked like any candidate, never an approved match or a target assignment.
+SUPPLIED_URL = "SUPPLIED_URL"
 CODE_MATCH = "CODE_MATCH"
 CODE_WITH_SUFFIX = "CODE_MATCH_WITH_UNEXPLAINED_SUFFIX"
 PART_NUMBER_MATCH = "VERIFIED_PART_NUMBER_MATCH"
@@ -40,18 +49,39 @@ CODE_URL_ONLY = "CODE_IN_URL_ONLY"
 FAMILY_ONLY = "FAMILY_ONLY"
 DIFFERENT_MODEL = "DIFFERENT_MODEL_CODE"
 UNRELATED = "UNRELATED"
+# Name-identified targets (2026-10-19, second review). A catalog model that is a marketed product
+# name (``MacBook Neo``) is found by that name; a broad family name (``IdeaPad``) cannot establish
+# one product, so results showing it stay review leads until the catalog is reconciled.
+NAME_MATCH = "PRODUCT_NAME_MATCH"
+FAMILY_NAME_LEAD = "FAMILY_NAME_LEAD_CATALOG_UNRESOLVED"
+# A listing that states a broad-family target's brand and family name (2026-10-20): collected
+# within the limits so its own page decides a listed-spec match (listed_spec.py). Never an exact
+# product match. Without the brand it stays a review lead (FAMILY_NAME_LEAD).
+FAMILY_SPEC_CANDIDATE = "FAMILY_LISTED_SPEC_CANDIDATE"
+# Not a laptop: a desktop, all-in-one, mini PC, handheld console, router, monitor or standalone
+# component. Rejected before any page request (2026-10-20).
+NOT_A_LAPTOP = "NOT_A_LAPTOP"
+# A bag, sleeve, charger, ... whose title names a laptop only for compatibility. Rejected before
+# any product-page request; never laptop identity.
+ACCESSORY = "ACCESSORY"
 CATEGORY_PRIORITY = {
-    HISTORICAL_VERIFIED_URL: -1,
-    CODE_MATCH: 0, CODE_WITH_SUFFIX: 1, PART_NUMBER_MATCH: 2, CODE_SPELLING: 3,
-    CODE_URL_ONLY: 4, FAMILY_ONLY: 5, DIFFERENT_MODEL: 6, UNRELATED: 7,
+    HISTORICAL_VERIFIED_URL: -1, SUPPLIED_URL: -1,
+    CODE_MATCH: 0, CODE_WITH_SUFFIX: 1, PART_NUMBER_MATCH: 2, CODE_SPELLING: 3, NAME_MATCH: 3,
+    FAMILY_SPEC_CANDIDATE: 3, CODE_URL_ONLY: 4, FAMILY_NAME_LEAD: 5, FAMILY_ONLY: 5,
+    DIFFERENT_MODEL: 6, UNRELATED: 7, ACCESSORY: 8, NOT_A_LAPTOP: 8,
 }
 # Categories whose page may be inspected and collected automatically (within the limits).
-COLLECTABLE = frozenset({HISTORICAL_VERIFIED_URL, CODE_MATCH, CODE_WITH_SUFFIX,
-                         PART_NUMBER_MATCH, CODE_SPELLING, CODE_URL_ONLY})
+COLLECTABLE = frozenset({HISTORICAL_VERIFIED_URL, SUPPLIED_URL, CODE_MATCH, CODE_WITH_SUFFIX,
+                         PART_NUMBER_MATCH, CODE_SPELLING, CODE_URL_ONLY, NAME_MATCH,
+                         FAMILY_SPEC_CANDIDATE})
 # Categories that, without contrary title clues, make a result plausible enough to stop the
 # fallback searches. An unexplained suffix or a code only in the URL is unresolved: searching
 # continues (2026-10-19).
-PLAUSIBLE = frozenset({CODE_MATCH, PART_NUMBER_MATCH, CODE_SPELLING})
+PLAUSIBLE = frozenset({CODE_MATCH, PART_NUMBER_MATCH, CODE_SPELLING, NAME_MATCH})
+# Kinds of catalog model value (identity of the search target).
+MODEL_CODE_KIND = "MODEL_CODE"
+PRODUCT_NAME_KIND = "PRODUCT_NAME"
+FAMILY_NAME_KIND = "FAMILY_NAME"
 _CONFIGURATION_CLUES = ("screen_size_in", "cpu_series", "ram_capacity_gb", "storage_capacity_gb")
 
 _BUNDLE = re.compile(r"\b(?:free|bundle|backpack|printer|monitor|bag|mouse|headset|chair)\b",
@@ -76,7 +106,14 @@ _LAYOUT_GROUP = re.compile(r"^\s*\([^()]*\)")
 
 @dataclass(frozen=True)
 class SearchTarget:
-    """A verified configuration to search for (CONFIGURATION targets only)."""
+    """A verified configuration to search for (CONFIGURATION targets only).
+
+    ``identity_kind`` says what the catalog ``model`` is: one manufacturer model code, a
+    marketed product name, or a broad family name (from the catalog reconciliation). Blank
+    means: a code when the value is exactly one code, otherwise an unreviewed name, treated as a
+    family name (review leads only) so that no family name is ever searched as if it were one
+    product.
+    """
 
     target_id: str
     rank: str
@@ -85,6 +122,19 @@ class SearchTarget:
     model: str
     part_number: str
     core: Mapping[str, str]
+    identity_kind: str = ""
+    # A manufacturer code the catalog records for a family-name target (2026-10-20): ranks
+    # listings stating it first; a listing stating another code is not collected for it.
+    recorded_code: str = ""
+    # The target's catalog row (brand, recorded codes, secondary fields): the listed-spec check
+    # of collected pages. Empty in older callers; never used to fill an offer's fields.
+    record: Mapping[str, object] = field(default_factory=dict)
+
+    @property
+    def kind(self) -> str:
+        if self.identity_kind:
+            return self.identity_kind
+        return MODEL_CODE_KIND if is_model_code(self.model) else FAMILY_NAME_KIND
 
 
 def title_clues(text: str) -> dict[str, set[str]]:
@@ -95,6 +145,13 @@ def title_clues(text: str) -> dict[str, set[str]]:
         clues["screen_size_in"].add(format(float(match[1]), "g"))
     for joined in _JOINED.finditer(plain):
         after = plain[joined.end(): joined.end() + 40]
+        first = int(joined[1]) * (1000 if joined[2].upper() == "TB" else 1)
+        second = int(joined[3]) * (1000 if joined[4].upper() == "TB" else 1)
+        if 0 < first <= 128 <= second and not _RAM_WORDS.match(after):
+            # The joined RAM+storage form ("8GB+256GB"), read as in extraction (2026-10-19).
+            clues["ram_capacity_gb"].add(str(first))
+            clues["storage_capacity_gb"].add(str(second))
+            continue
         name = "ram_capacity_gb" if _RAM_WORDS.match(after) else "storage_capacity_gb"
         clues[name].add(f"{joined[1]}{joined[2].upper()} + {joined[3]}{joined[4].upper()}")
     plain = _JOINED.sub(" ", plain)
@@ -174,6 +231,11 @@ class RankedCandidate:
     decision_reason: str = ""
     # An earlier verified offer URL for this product (may name a ?variant=), when known.
     seed_url: str = ""
+    # Lineage (2026-10-19): the discovery round that listed the candidate, and the collection
+    # request that fetched it (an earlier request when the same page was already collected).
+    discovery_round: int = 1
+    collection_url: str = ""
+    collection_request_id: str = ""
 
     @property
     def sort_key(self) -> tuple:
@@ -183,8 +245,89 @@ class RankedCandidate:
                     for record in self.records) if self.records else (0, 0)
         tier = min(record.query.tier for record in self.records) if self.records else "0"
         bundle = "BUNDLE_WORDING_IN_TITLE" in self.flags
-        return (CATEGORY_PRIORITY[self.category], differ, bundle, -agree, tier, first,
-                self.hit.product_url)
+        own_code = self.category == FAMILY_SPEC_CANDIDATE and "recorded code" in (
+            self.code_evidence)
+        return (CATEGORY_PRIORITY[self.category], not own_code, differ, bundle, -agree, tier,
+                first, self.hit.product_url)
+
+
+# Accessory products (2026-10-19, second review). The product noun of an accessory listing comes
+# first ("Tomtoc Sleeve for MacBook Air 13"); a laptop listing names the laptop first and may
+# list a bundled bag later ("... Laptop | ASUS VP4700 Backpack").
+_ACCESSORY_NOUN = re.compile(
+    r"\b(?:sleeves?|bags?|handbags?|briefcases?|pouch(?:es)?|totes?|backpacks?|cases?|covers?|"
+    r"skins?|protectors?|films?|shells?|chargers?|adapters?|power\s+suppl(?:y|ies)|stands?|"
+    r"docks?|docking\s+stations?|hubs?|mouse|mice|keyboards?|cooling\s+pads?|cables?|"
+    r"batter(?:y|ies)|monitors?|headsets?|webcams?)\b",
+    re.I,
+)
+_COMPATIBILITY = re.compile(r"\b(?:for|compatible\s+(?:with|for)|fits?|designed\s+for)\b", re.I)
+_LAPTOP_NOUN = re.compile(r"\b(?:laptops?|notebooks?|ultrabooks?|chromebooks?)\b", re.I)
+_ACCESSORY_TYPE = re.compile(
+    r"\b(?:bags?|sleeves?|cases?|accessor(?:y|ies)|peripherals?|chargers?|adapters?|mouse|"
+    r"keyboards?|monitors?|stands?)\b", re.I,
+)
+
+
+def accessory_reason(title: str, product_type: str = "") -> str:
+    """Why a search result is an accessory rather than a laptop, or ''.
+
+    The title's leading item (before ``|``, `` + ``, or a parenthesis) names an accessory and
+    states no processor, RAM, or storage of its own, and either uses compatibility wording after
+    the accessory noun ("sleeve for MacBook Air") or names no laptop before it. A retailer
+    product type naming an accessory category is also enough when the title states no laptop
+    specification. Compatibility wording never establishes laptop identity.
+    """
+    head = re.split(r"\s\|\s|\s\+\s|\(|\|", title, maxsplit=1)[0]
+    clues = title_clues(head)
+    specified = bool(clues["cpu_series"] or clues["ram_capacity_gb"]
+                     or clues["storage_capacity_gb"])
+    noun = _ACCESSORY_NOUN.search(head)
+    if noun and not specified:
+        before, after = head[: noun.start()], head[noun.end():]
+        if _COMPATIBILITY.match(after.lstrip()) or _COMPATIBILITY.search(after[:40]):
+            return f"accessory '{noun[0]}' with compatibility wording"
+        if not _LAPTOP_NOUN.search(before):
+            return f"accessory '{noun[0]}' named before any laptop"
+    if product_type and _ACCESSORY_TYPE.search(product_type) and not _LAPTOP_NOUN.search(
+        product_type
+    ) and not specified:
+        return f"retailer product type '{product_type}'"
+    return ""
+
+
+# Products that are not laptops (2026-10-20): matched on the listing's leading item or its
+# retailer product type, only when the title does not call the product a laptop or notebook.
+_NOT_LAPTOP = re.compile(
+    r"\b(?:desktop|all[\s-]?in[\s-]?one|AIO|mini\s?PC|tower\s+PC|gaming\s+PC|"
+    r"handheld|ROG\s+Ally|Legion\s+Go|Steam\s+Deck|MSI\s+Claw|router|mesh\s+wi-?fi|"
+    r"access\s+point|monitor|graphics\s+card|motherboard|power\s+supply|"
+    r"(?:internal|external|portable)\s+(?:SSD|HDD|hard\s+drive)|memory\s+module|"
+    r"tablet|smartphone|printer|projector)\b",
+    re.I,
+)
+
+
+def non_laptop_reason(title: str, product_type: str = "") -> str:
+    """Why a search result is not a laptop (desktop, handheld, router, component, ...), or ''."""
+    head = re.split(r"\s\|\s|\s\+\s|\(|\|", title, maxsplit=1)[0]
+    if _LAPTOP_WORDS.search(f"{head} {product_type}"):
+        return ""
+    found = _NOT_LAPTOP.search(head) or _NOT_LAPTOP.search(product_type or "")
+    return f"'{found[0]}'" if found else ""
+
+
+def name_in_title(title: str, name: str) -> str:
+    """The catalog product name as it appears in ``title`` (whole words, in order; case,
+    spacing and punctuation between words are presentation only), or ''."""
+    wanted = product_name_tokens(name)
+    if not wanted:
+        return ""
+    words = product_name_tokens(title)
+    for start in range(len(words) - len(wanted) + 1):
+        if words[start:start + len(wanted)] == wanted:
+            return " ".join(wanted)
+    return ""
 
 
 def hit_position(record: SearchRecord, product_url: str) -> int:
@@ -197,14 +340,29 @@ def hit_position(record: SearchRecord, product_url: str) -> int:
 def rank_hit(target: SearchTarget, hit: SearchHit, records: list[SearchRecord]) -> RankedCandidate:
     """Classify and explain one search result for one target (no identity decision)."""
     code = target.model.strip()
-    compact_code = _compact(code)
+    kind = target.kind
+    # Code rules (exact token, spelling variant, URL handle) apply only to a code target: a
+    # family or product name is never treated as a code spelling (2026-10-19, second review).
+    compact_code = _compact(code) if kind == MODEL_CODE_KIND else ""
     title = hit.title
     title_codes = model_codes(title)
     handle = urlsplit(hit.product_url).path.rstrip("/").rsplit("/", 1)[-1].lower()
     reasons: list[str] = []
     suffix = ""
     evidence = ""
-    if any(_compact(token) == compact_code for token in title_codes):
+    accessory = accessory_reason(title, hit.product_type)
+    not_laptop = non_laptop_reason(title, hit.product_type)
+    named = name_in_title(title, code) if kind != MODEL_CODE_KIND else ""
+    if not_laptop:
+        category = NOT_A_LAPTOP
+        evidence = not_laptop
+        reasons.append(f"Not a laptop ({not_laptop}). Rejected before any page request.")
+    elif accessory:
+        category = ACCESSORY
+        evidence = accessory
+        reasons.append(f"Accessory listing ({accessory}); compatibility wording never "
+                       "establishes laptop identity. Rejected before any page request.")
+    elif compact_code and any(_compact(token) == compact_code for token in title_codes):
         token = next(t for t in title_codes if _compact(t) == compact_code)
         suffix = _suffix(title, token)
         category = CODE_WITH_SUFFIX if suffix else CODE_MATCH
@@ -222,10 +380,38 @@ def rank_hit(target: SearchTarget, hit: SearchHit, records: list[SearchRecord]) 
         category = CODE_SPELLING
         evidence = f"title spelling '{spelled}'"
         reasons.append(f"Title shows the code with different spacing/punctuation: '{spelled}'.")
-    elif code and re.search(rf"(?:^|-){re.escape(code.lower())}(?:-|$)", handle):
+    elif compact_code and re.search(rf"(?:^|-){re.escape(code.lower())}(?:-|$)", handle):
         category = CODE_URL_ONLY
         evidence = "product URL handle"
         reasons.append("Only the product URL handle shows the model code.")
+    elif named and kind == PRODUCT_NAME_KIND:
+        category = NAME_MATCH
+        evidence = f"title shows product name '{named}'"
+        reasons.append(f"Title shows the catalog product name '{code}' (presentation only: case, "
+                       "spacing, punctuation); the page's own evidence decides the match.")
+    elif named:
+        stated = [c for c in title_codes if not is_part_number_shape(c)]
+        recorded = target.recorded_code
+        own = recorded and any(c.casefold() == recorded.casefold() for c in stated)
+        brand_stated = bool(target.brand) and name_in_title(
+            f"{title} {hit.vendor}", target.brand) != ""
+        if recorded and stated and not own:
+            category = DIFFERENT_MODEL
+            evidence = f"title code {', '.join(stated)}"
+            reasons.append(f"Title shows {', '.join(stated)}; the target records {recorded}. A "
+                           "recorded code is never bypassed by the listed-spec comparison.")
+        elif brand_stated:
+            category = FAMILY_SPEC_CANDIDATE
+            evidence = (f"title shows this target's recorded code {recorded}" if own
+                        else f"title shows brand and family '{named}'")
+            reasons.append(f"Title shows the brand and the family '{code}'. The page's own "
+                           "specifications decide a listed-spec comparison (never an exact "
+                           "product match).")
+        else:
+            category = FAMILY_NAME_LEAD
+            evidence = f"title shows family name '{named}'"
+            reasons.append(f"Title shows '{code}' but not the brand {target.brand or '(none)'}: "
+                           "kept for review, not fetched.")
     else:
         category = ""
     words = set(normalize(f"{title} {hit.vendor}").replace("|", " ").split())
@@ -235,7 +421,7 @@ def rank_hit(target: SearchTarget, hit: SearchHit, records: list[SearchRecord]) 
     )
     family = ("brand+series" if brand_ok and series_ok else "brand" if brand_ok
               else "series" if series_ok else "none")
-    prefix = code.split("-", 1)[0].casefold()
+    prefix = code.split("-", 1)[0].casefold() if kind == MODEL_CODE_KIND else "\0"
     same_prefix = [t for t in title_codes if t.split("-", 1)[0].casefold() == prefix]
     if not category:
         if title_codes and (brand_ok or series_ok or same_prefix):
@@ -291,19 +477,30 @@ def configuration_difference(candidate: RankedCandidate) -> str:
 
 
 def is_plausible(candidate: RankedCandidate) -> bool:
-    """Shows the complete code (or verified part number) and no contrary configuration clue."""
+    """Shows the complete code (or verified part number) and no contrary configuration clue. A
+    family listing needs at least two agreeing title clues as well (2026-10-20): an incomplete
+    title is still collected, but does not stop the fallback searches."""
+    if candidate.category == FAMILY_SPEC_CANDIDATE:
+        agree = sum(value == "AGREES" for value in candidate.clues.values())
+        return agree >= 2 and not configuration_difference(candidate)
     return candidate.category in PLAUSIBLE and not configuration_difference(candidate)
 
 
-def plausible_candidate(target: SearchTarget, records: Sequence[SearchRecord]) -> str:
+def plausible_candidate(
+    target: SearchTarget, records: Sequence[SearchRecord], exclude: frozenset[str] = frozenset()
+) -> str:
     """The first plausible candidate's URL among the results so far, or ''.
 
     Results showing only another RAM/storage configuration, an unexplained suffix, a code only
-    in the URL, or another model do not stop discovery: the fallback searches continue.
+    in the URL, or another model do not stop discovery: the fallback searches continue. Pages in
+    ``exclude`` (``strip_variant`` form) were already collected and found unsuitable for the
+    configuration, so they no longer stop a resumed search (2026-10-19).
     """
     from .retailer_search import unique_hits
 
     for hit, recs in unique_hits(records):
+        if strip_variant(hit.product_url) in exclude:
+            continue
         if is_plausible(rank_hit(target, hit, recs)):
             return hit.product_url
     return ""
@@ -342,6 +539,53 @@ def seed_candidate(
                            seed_url=seed_url)
 
 
+# Supplied candidate URLs (2026-10-19). Tracking parameters added by search engines and shops are
+# removed; every other query parameter (``variant`` above all) is kept, so a supplied variant URL
+# keeps its product and variant identity. The adapter must then accept the URL unchanged.
+_TRACKING_PARAMETERS = re.compile(
+    r"^(?:utm_[a-z]+|srsltid|gclid|gbraid|wbraid|fbclid|msclkid|_pos|_sid|_ss|_psq|_fid|"
+    r"ref|ref_src)$",
+    re.I,
+)
+
+
+def normalize_supplied_url(url: str) -> tuple[str, tuple[str, ...]]:
+    """``(normalized URL, removed parameter names)``: scheme and host lowercased, fragment and
+    tracking parameters removed, path and remaining query kept exactly (variant identity)."""
+    from urllib.parse import parse_qsl, urlencode, urlunsplit
+
+    parts = urlsplit(url.strip())
+    kept, removed = [], []
+    for name, value in parse_qsl(parts.query, keep_blank_values=True):
+        (removed if _TRACKING_PARAMETERS.match(name) else kept).append((name, value))
+    normalized = urlunsplit((parts.scheme.lower(), parts.netloc.lower(), parts.path,
+                             urlencode(kept), ""))
+    return normalized, tuple(dict.fromkeys(name for name, _ in removed))
+
+
+def url_shows_code(url: str, code: str) -> bool:
+    """True when the product URL handle contains the complete model code as whole segments."""
+    handle = urlsplit(url).path.rstrip("/").rsplit("/", 1)[-1].lower()
+    code = code.strip().lower()
+    return bool(code) and re.search(rf"(?:^|-){re.escape(code)}(?:-|$)", handle) is not None
+
+
+def supplied_candidate(
+    target: SearchTarget, retailer_id: str, url: str, supplied_id: str, basis: str
+) -> RankedCandidate:
+    """A supplied known page the native search did not return: a seed to check directly (the
+    bounded fallback), never an approved match. ``basis`` says why it belongs to this job."""
+    product_url = strip_variant(url) + ("/" if url.split("?")[0].endswith("/") else "")
+    hit = SearchHit(retailer_id, product_url, "(supplied candidate URL)", url, 0, 0)
+    reason = (f"Supplied known page {supplied_id} ({basis}); the retailer's native search did not "
+              "return it, so it is checked directly as a bounded fallback. A seed only: the "
+              "page's own evidence and the matcher decide.")
+    clues = dict.fromkeys(_CONFIGURATION_CLUES, "NOT_STATED")
+    return RankedCandidate(target, hit, [], SUPPLIED_URL, f"supplied URL {supplied_id}", "", "",
+                           clues, [SUPPLIED_URL, "NATIVE_SEARCH_MISSED_SUPPLIED_URL"], [reason],
+                           seed_url=url if "variant=" in url else "")
+
+
 def has_code_signal(target: SearchTarget, records: Sequence[SearchRecord]) -> bool:
     """True when any result so far shows the model code or verified part number."""
     from .retailer_search import unique_hits
@@ -371,6 +615,9 @@ class ProductInspection:
     outcome: str  # SINGLE_VARIANT, MULTI_VARIANT, NO_STRUCTURED_OFFERS, UNREADABLE
     variants: list[VariantInfo] = field(default_factory=list)
     message: str = ""
+    # The page says its variant options are named (Shopify ``data-has-only-default-variant=
+    # "false"``): its adapter needs the ``?variant=`` URL even for a single variant.
+    named_options: bool = False
 
 
 def _jsonld_offers(text: str) -> list[dict]:
@@ -386,6 +633,14 @@ def _jsonld_offers(text: str) -> list[dict]:
         for node in list(nodes):
             if isinstance(node, dict) and isinstance(node.get("@graph"), list):
                 nodes.extend(node["@graph"])
+        for node in list(nodes):
+            # A ProductGroup lists its variants as Products in ``hasVariant`` (DataBlitz
+            # multi-variant pages, 2026-10-19, second review).
+            if isinstance(node, dict) and "ProductGroup" in (
+                node.get("@type") if isinstance(node.get("@type"), list)
+                else [node.get("@type")]
+            ) and isinstance(node.get("hasVariant"), list):
+                nodes.extend(v for v in node["hasVariant"] if isinstance(v, dict))
         for node in nodes:
             if not isinstance(node, dict):
                 continue
@@ -465,7 +720,8 @@ def inspect_product_page(method: SearchMethod, product_url: str, text: str) -> P
         return ProductInspection(product_url, "NO_STRUCTURED_OFFERS",
                                  message="No JSON-LD Product offers on the page.")
     if len(distinct) == 1:
-        return ProductInspection(product_url, "SINGLE_VARIANT", variants)
+        return ProductInspection(product_url, "SINGLE_VARIANT", variants, named_options=bool(
+            re.search(r"data-has-only-default-variant=[\"']false[\"']", text)))
     if len(variants) < len(distinct):
         return ProductInspection(product_url, "UNREADABLE", variants,
                                  "Some JSON-LD offers have no usable variant URL.")
@@ -505,6 +761,8 @@ CANDIDATE_COLUMNS: tuple[str, ...] = (
     "flags", "queries", "search_positions", "vendor", "product_type", "search_available",
     "search_price", "decision", "decision_reason", "reasons",
     "configuration_difference", "plausible", "seed_url",
+    # Lineage (2026-10-19): search job -> candidate -> collection request -> observation.
+    "discovery_round", "collection_url", "collection_request_id",
 )
 
 
@@ -538,6 +796,9 @@ def candidate_row(candidate: RankedCandidate) -> dict[str, str]:
         "configuration_difference": configuration_difference(candidate),
         "plausible": "TRUE" if is_plausible(candidate) else "FALSE",
         "seed_url": candidate.seed_url,
+        "discovery_round": str(candidate.discovery_round),
+        "collection_url": candidate.collection_url,
+        "collection_request_id": candidate.collection_request_id,
     }
     return {column: row.get(column, "") for column in CANDIDATE_COLUMNS}
 

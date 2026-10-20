@@ -23,32 +23,57 @@ from laptop_tracker.collection import (
     ManifestError,
     validate_manifest,
 )
-from laptop_tracker.match_run import TargetSnapshotError, matcher_from_validated
+from laptop_tracker.collection_replay import (
+    load_saved_collections,
+    merge_collection_rounds,
+    replay_outcomes,
+    write_replayed_collection,
+)
+from laptop_tracker.extraction import extract_offer_attributes
+from laptop_tracker.match_run import (
+    ObservationFileError,
+    TargetSnapshotError,
+    matcher_from_validated,
+    read_observations_csv,
+)
+from laptop_tracker.matching import configuration_outcome, is_model_code
 from laptop_tracker.normalization import CORE_MATCH_COLUMNS
+from laptop_tracker.observation_store import observation_id
 from laptop_tracker.price_tracking import (
     PriceTrackingInputError,
+    matching_context,
     utc_text,
     validate_selected_list,
 )
 from laptop_tracker.product_discovery import (
+    ACCESSORY,
     CANDIDATE_COLUMNS,
     COLLECTABLE,
     COVERAGE_COLUMNS,
+    FAMILY_NAME_LEAD,
+    FAMILY_SPEC_CANDIDATE,
     HISTORICAL_VERIFIED_URL,
+    NOT_A_LAPTOP,
+    SUPPLIED_URL,
     RankedCandidate,
     SearchTarget,
     candidate_row,
     configuration_difference,
     inspect_product_page,
+    normalize_supplied_url,
     plausible_candidate,
     rank_target_hits,
     results_summary,
     seed_candidate,
     strip_variant,
+    supplied_candidate,
+    url_shows_code,
     variant_decision,
 )
+from laptop_tracker.product_names import default_registry
 from laptop_tracker.retailer_search import (
     BUDGET_CODE,
+    FIRST_TIERS,
     NO_RESULTS,
     NOT_SENT_BUDGET,
     NOT_SENT_LIMIT,
@@ -64,6 +89,7 @@ from laptop_tracker.retailer_search import (
     SearchLayoutError,
     SearchQuery,
     SearchRecord,
+    search_cache_key,
     search_queries,
     search_record_row,
 )
@@ -94,6 +120,9 @@ from laptop_tracker.verified_top import (
 )
 
 ROOT = Path(__file__).resolve().parent
+DEFAULT_SUPPLIED_URLS = ROOT / "config" / "supplied_candidate_urls.csv"
+SUPPLIED_URL_COLUMNS = ("supplied_id", "retailer_id", "url", "search_target_id", "supplied_by",
+                        "supplied_on", "notes")
 NOT_SENT_RETAILER = "NOT_SENT_RETAILER_FAILING"
 CONSECUTIVE_ERRORS_TO_STOP = 2
 
@@ -105,10 +134,31 @@ STOP_SEARCH_LIMIT = "SEARCH_REQUEST_LIMIT_REACHED"
 STOP_BUDGET = "TOTAL_REQUEST_BUDGET_REACHED"
 STOP_RETAILER = "RETAILER_STOPPED_AFTER_ERRORS"
 STOP_REPLAY = "REPLAY_ONLY_NO_SAVED_RESPONSE"
+# How discovery ended for the configuration that started the job (2026-10-19). Identity only: a
+# suitable offer is an exact match for the configuration; its price may still be excluded.
+SUITABLE_OFFER_FOUND = "SUITABLE_OFFER_FOUND"
+# In-memory only: the fields a collected page established, attached to its result row.
+OFFER_ATTRIBUTES_KEY = "__offer_attributes__"
+# The planned queries all ran; this never means the retailer's whole catalog was searched
+# (result caps and unread pages are reported in search_coverage).
+QUERY_PLAN_EXHAUSTED = "QUERY_PLAN_EXHAUSTED"
+# The plausible candidate that stopped the search could not be collected (held for review,
+# variants unreadable, per-retailer candidate limit) and no tiers were left to resume.
+PLAUSIBLE_NOT_COLLECTED = "PLAUSIBLE_CANDIDATE_NOT_COLLECTED"
+BUDGET_EXHAUSTED = "BUDGET_EXHAUSTED"
+PROVIDER_FAILURE = "PROVIDER_FAILURE"
+SEARCH_INCOMPLETE_REPLAY_ONLY = "SEARCH_INCOMPLETE_REPLAY_ONLY"
+NOT_EVALUATED = "NOT_EVALUATED_SEARCH_ONLY"
 SEARCH_JOB_COLUMNS = (
     "target_id", "rank", "retailer_id", "queries_planned", "queries_run", "pages_sent",
     "pages_from_cache", "pages_not_sent", "tiers_run", "stop_reason", "plausible_candidate_url",
     "historical_seeds",
+    # Continuation and coverage (2026-10-19).
+    "supplied_urls", "search_coverage", "initial_stop_reason", "resumed", "resume_reason",
+    "tiers_after_resume", "search_pages_after_resume", "search_pages_not_sent_after_resume",
+    "inspections_after_resume", "collection_requests_after_resume", "discovery_rounds",
+    "candidate_outcomes", "suitable_offer_url", "suitable_offer_observation_id",
+    "discovery_outcome", "identity_kind",
 )
 
 
@@ -176,6 +226,26 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--seed-store", type=Path,
                         help="History store whose EXACT results seed offer URLs as candidates.")
     parser.add_argument("--max-seed-urls-per-target-retailer", type=positive, default=2)
+    parser.add_argument("--supplied-urls", type=Path, action="append", default=[],
+                        help="CSV of known product pages supplied by people (repeatable; default "
+                             f"{DEFAULT_SUPPLIED_URLS.relative_to(ROOT)} when it exists). Each URL "
+                             "is a discovery seed for the scoped configuration it names "
+                             "(search_target_id) or whose model code its URL handle shows; when "
+                             "native search misses it, it is checked directly (bounded fallback). "
+                             "Never an approved match.")
+    parser.add_argument("--no-supplied-urls", action="store_true",
+                        help="Do not read the default supplied-URL file.")
+    parser.add_argument("--max-supplied-urls-per-target-retailer", type=positive, default=2)
+    parser.add_argument("--max-discovery-rounds", type=positive, default=3,
+                        help="Search-and-collect rounds (default 3). A search that stopped at a "
+                             "plausible candidate resumes its remaining query tiers in the next "
+                             "round when collection did not confirm the configuration; every "
+                             "round stays within the same request limits.")
+    parser.add_argument("--replay-collection", type=Path, action="append", default=[],
+                        help="With --replay-only --collect: an earlier collection folder "
+                             "(repeatable) whose saved observation records are reused for the "
+                             "same URLs; pages saved by --search-cache inspections are parsed. "
+                             "No request is sent and nothing is stored.")
     parser.add_argument("--no-collect-title-differences", action="store_true",
                         help="Do not collect same-code pages whose title states another "
                              "configuration (default: collect them so the page's own "
@@ -190,8 +260,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     args = parser.parse_args(argv)
     if args.live and args.max_total_requests is None:
         parser.error("--live requires --max-total-requests.")
-    if args.replay_only and args.collect:
-        parser.error("--replay-only cannot collect pages; run collect_and_match.py separately.")
+    if args.replay_only and args.collect and not args.replay_collection:
+        parser.error("--replay-only collects only from saved evidence: add --replay-collection "
+                     "<earlier collection folder>, or run collect_and_match.py separately.")
+    if args.replay_collection and not args.replay_only:
+        parser.error("--replay-collection is for offline replays (--replay-only).")
     if args.replay_only and not args.search_cache:
         parser.error("--replay-only needs at least one --search-cache folder.")
     if args.min_seconds_between_requests < FetchConfig().min_request_interval_seconds:
@@ -251,9 +324,20 @@ def load_targets(args):
             model=str(row["model"]),
             part_number=str(row.get("manufacturer_part_number", "") or "").strip(),
             core={name: str(item.list_row[name]) for name in CORE_MATCH_COLUMNS},
+            identity_kind=default_registry().kind(str(row.get("brand", "") or ""),
+                                                  str(row["model"])),
+            recorded_code=recorded_code(row),
+            record=dict(row),
         ))
     ranks = {item.target_id: item.rank for item in selected.configurations}
-    return targets, excluded, ranks
+    return targets, excluded, ranks, target_master
+
+
+
+def recorded_code(row) -> str:
+    """The manufacturer code a family-name target records, when it is one code."""
+    value = str(row.get("manufacturer_model_code", "") or "").strip()
+    return value if value and value != "nan" and is_model_code(value) else ""
 
 
 class SearchJob:
@@ -265,6 +349,12 @@ class SearchJob:
     part number) whose title does not state another configuration. Results showing only another
     RAM/storage configuration, an unexplained suffix, or a code only in the URL keep the search
     going (2026-10-19). Every query records why it ran, and the job records why it stopped.
+
+    Continuation (2026-10-19): a plausible title is not suitability. When collection of the
+    plausible candidate does not confirm the job's own configuration (another configuration, an
+    unresolved or unmatched page, a failed fetch), the job resumes its remaining tiers in the next
+    discovery round, ignoring pages already evaluated. The original candidate and its outcome are
+    kept; a match to another configuration stays valid for that configuration only.
     """
 
     def __init__(self, target: SearchTarget, retailer_id: str, max_pages: int,
@@ -275,7 +365,7 @@ class SearchJob:
         self.retailer_id = retailer_id
         self.all_queries = search_queries(
             target.target_id, retailer_id, model=target.model, part_number=target.part_number,
-            brand=target.brand, series=target.series, core=target.core,
+            brand=target.brand, series=target.series, core=target.core, kind=target.kind,
         )
         self.queries = self.all_queries[:max_queries]
         self.max_pages = max_pages if method.paginated else 1
@@ -286,6 +376,28 @@ class SearchJob:
         self.done = False
         self.stop_reason = ""
         self.plausible_url = ""
+        self.plausible_urls: list[str] = []
+        # Continuation state.
+        self.initial_stop_reason = ""
+        self.resumed = False
+        self.resume_reasons: list[str] = []
+        self.resume_record_index = 0
+        self.evaluated: set[str] = set()  # strip_variant URLs collected for this configuration
+        self.rounds = 1
+        self.round_limit_reached = False
+        self.inspections_after_resume = 0
+        self.collection_requests_after_resume = 0
+        self.candidate_outcomes: list[str] = []
+        self.suitable_url = ""
+        self.suitable_observation_id = ""
+        self.collected = False
+        self.supplied = 0
+        self.supplied_missed = 0
+        self.outcome = ""
+
+    @property
+    def key(self) -> tuple[str, str]:
+        return (self.target.target_id, self.retailer_id)
 
     def current(self) -> tuple[SearchQuery, int, str] | None:
         if self.done:
@@ -300,10 +412,14 @@ class SearchJob:
     def run_reason(self, query: SearchQuery, page_number: int) -> str:
         if page_number > 1:
             return f"result page {page_number} of the same query"
-        if query.tier == TIER_MODEL_CODE:
-            return "first query: complete model code without specification filters"
+        if query.tier in FIRST_TIERS:
+            return ("first query: complete model code without specification filters"
+                    if query.tier == TIER_MODEL_CODE else
+                    "first query: brand and catalog product name (no model code recorded)")
         tiers = ", ".join(dict.fromkeys(r.query.tier for r in self.records))
-        return (f"no plausible candidate after {tiers}; "
+        resumed = (f"resumed after collection: {self.resume_reasons[-1]}; "
+                   if self.resumed and len(self.records) == self.resume_record_index else "")
+        return (f"{resumed}no plausible candidate after {tiers}; "
                 f"{results_summary(self.target, self.records)}")
 
     def advance(self, record: SearchRecord) -> None:
@@ -312,11 +428,18 @@ class SearchJob:
             self.page += 1
             self.next_url = record.next_url
             return
+        if record.outcome == RESULTS and record.next_url:
+            # More result pages exist than --max-search-pages reads (2026-10-19, second review:
+            # Laptop Factory "HP" page 3 was unread yet reported complete).
+            record.possibly_truncated = True
+            record.message = (record.message + " " if record.message else "") + (
+                "Next result page not read (--max-search-pages).")
         self.page, self.next_url = 1, ""
         self.index += 1
-        url = plausible_candidate(self.target, self.records)
+        url = plausible_candidate(self.target, self.records, frozenset(self.evaluated))
         if url:
             self.done, self.stop_reason, self.plausible_url = True, STOP_PLAUSIBLE, url
+            self.plausible_urls.append(url)
         elif self.index >= len(self.queries):
             self._finish()
 
@@ -344,10 +467,69 @@ class SearchJob:
         self.done = True
         self.stop_reason = stop_reason or self.stop_reason or STOP_ALL_TIERS
 
+    def can_resume(self) -> bool:
+        """Stopped at a plausible candidate that collection evaluated without confirming this
+        configuration, with query tiers left."""
+        return (
+            self.done and self.stop_reason == STOP_PLAUSIBLE and not self.suitable_url
+            and self.index < len(self.queries)
+            and strip_variant(self.plausible_url) in self.evaluated
+        )
+
+    def resume(self, reason: str, round_number: int) -> None:
+        if not self.resumed:
+            self.initial_stop_reason = self.stop_reason
+            self.resume_record_index = len(self.records)
+        self.resumed = True
+        self.resume_reasons.append(reason)
+        self.rounds = round_number
+        self.done, self.stop_reason, self.plausible_url = False, "", ""
+
+    def search_coverage(self) -> str:
+        """Whether the searches cover the retailer's results: provider failures, unsent pages,
+        result caps, and supplied pages the native search did not return."""
+        notes = []
+        if any(r.outcome in {SEARCH_ERROR, UNSUPPORTED_LAYOUT} for r in self.records):
+            notes.append(PROVIDER_FAILURE)
+        if any(r.outcome.startswith("NOT_SENT") for r in self.records):
+            notes.append("INCOMPLETE_NOT_SENT")
+        if any(r.possibly_truncated for r in self.records):
+            # Predictive search returns at most its page size and has no pagination; HTML search
+            # has unread pages. Either way more matching products may exist than were read.
+            notes.append("MORE_PAGES_NOT_READ" if self.method.paginated
+                         else "RESULT_CAP_REACHED")
+        if self.supplied_missed:
+            notes.append("NATIVE_SEARCH_MISSED_SUPPLIED_URL")
+        return ";".join(notes) or "COMPLETE"
+
+    def finish_outcome(self) -> str:
+        """How discovery ended for this configuration (identity only)."""
+        if self.suitable_url:
+            return SUITABLE_OFFER_FOUND
+        if not self.collected:
+            return NOT_EVALUATED
+        outcomes = {r.outcome for r in self.records}
+        if NOT_SENT_REPLAY_ONLY in outcomes or self.stop_reason == STOP_REPLAY:
+            return SEARCH_INCOMPLETE_REPLAY_ONLY
+        if self.stop_reason == STOP_RETAILER:
+            return PROVIDER_FAILURE
+        if self.round_limit_reached or self.stop_reason in {
+            STOP_BUDGET, STOP_SEARCH_LIMIT, STOP_QUERY_LIMIT
+        }:
+            return BUDGET_EXHAUSTED
+        if self.stop_reason == STOP_PLAUSIBLE:
+            return PLAUSIBLE_NOT_COLLECTED
+        sent = [r for r in self.records if r.outcome in {RESULTS, NO_RESULTS, SEARCH_ERROR,
+                                                         UNSUPPORTED_LAYOUT}]
+        if sent and all(r.outcome in {SEARCH_ERROR, UNSUPPORTED_LAYOUT} for r in sent):
+            return PROVIDER_FAILURE
+        return QUERY_PLAN_EXHAUSTED
+
     def job_row(self, seeds: int) -> dict[str, str]:
         sent = [r for r in self.records if r.outcome in {RESULTS, NO_RESULTS, SEARCH_ERROR,
                                                          UNSUPPORTED_LAYOUT} and not r.cache]
         cached = [r for r in self.records if r.cache]
+        after = self.records[self.resume_record_index:] if self.resumed else []
         return {
             "target_id": self.target.target_id,
             "rank": self.target.rank,
@@ -358,10 +540,31 @@ class SearchJob:
             "pages_from_cache": str(len(cached)),
             "pages_not_sent": str(sum(1 for r in self.records if r.outcome.startswith(
                 "NOT_SENT"))),
-            "tiers_run": ";".join(dict.fromkeys(r.query.tier for r in sent + cached)),
+            "tiers_run": ";".join(
+                query.tier for query in self.queries
+                if any(r.query.tier == query.tier for r in sent + cached)),
             "stop_reason": self.stop_reason,
-            "plausible_candidate_url": self.plausible_url,
+            "plausible_candidate_url": ";".join(dict.fromkeys(self.plausible_urls)),
             "historical_seeds": str(seeds),
+            "supplied_urls": str(self.supplied),
+            "search_coverage": self.search_coverage(),
+            "initial_stop_reason": self.initial_stop_reason or self.stop_reason,
+            "resumed": "TRUE" if self.resumed else "FALSE",
+            "resume_reason": " | ".join(self.resume_reasons),
+            "tiers_after_resume": ";".join(
+                f"{r.query.tier}:{r.outcome}" + (":cached" if r.cache else "") for r in after
+            ),
+            "search_pages_after_resume": str(sum(1 for r in after if r in sent)),
+            "search_pages_not_sent_after_resume": str(
+                sum(1 for r in after if r.outcome.startswith("NOT_SENT"))),
+            "inspections_after_resume": str(self.inspections_after_resume),
+            "collection_requests_after_resume": str(self.collection_requests_after_resume),
+            "discovery_rounds": str(self.rounds),
+            "candidate_outcomes": " | ".join(self.candidate_outcomes),
+            "suitable_offer_url": self.suitable_url,
+            "suitable_offer_observation_id": self.suitable_observation_id,
+            "discovery_outcome": self.outcome or self.finish_outcome(),
+            "identity_kind": self.target.kind,
         }
 
 
@@ -455,18 +658,22 @@ def _store_page(record: SearchRecord, job, page: FetchedPage, evidence_dir: Path
 
 
 def run_searches(jobs, fetcher, transport, args, evidence_dir: Path, log, *,
-                 saved: dict | None = None) -> int:
+                 saved: dict | None = None, answered: dict | None = None,
+                 sent_before: int = 0) -> int:
     """Round-robin across retailers so per-retailer throttling waits overlap.
 
     An identical search already answered in this run is reused (``SAME_RUN``), and a saved
     response from an earlier run is replayed (``SAVED:<folder>``) instead of a new request.
-    Reused responses count toward no limit, because nothing is sent.
+    Reused responses count toward no limit, because nothing is sent. ``answered`` is shared by
+    every round of a run (2026-10-19, second review: later rounds re-sent 38 identical searches),
+    searches are identified by ``search_cache_key`` (query case and spacing ignored), and
+    ``sent_before`` makes ``--max-search-requests`` a limit for the whole run, not each round.
     """
     sent = 0
     errors: Counter[str] = Counter()
     stopped: set[str] = set()
-    answered: dict[str, SearchRecord] = {}
-    saved = saved or {}
+    answered = {} if answered is None else answered
+    saved = {search_cache_key(url): entry for url, entry in (saved or {}).items()}
     pending = list(jobs)
     while pending:
         progressed = False
@@ -477,14 +684,15 @@ def run_searches(jobs, fetcher, transport, args, evidence_dir: Path, log, *,
                 continue
             query, page_number, url = planned
             reason = job.run_reason(query, page_number)
-            if url in answered:
-                record = _copy_record(answered[url], query, reason)
-            elif url in saved:
+            key = search_cache_key(url)
+            if key in answered:
+                record = _copy_record(answered[key], query, reason)
+            elif key in saved:
                 record = SearchRecord(query, page_number, url, run_reason=reason,
-                                      cache=f"SAVED:{saved[url][2]}")
-                _store_page(record, job, saved_page(job.retailer_id, url, saved[url]),
+                                      cache=f"SAVED:{saved[key][2]}")
+                _store_page(record, job, saved_page(job.retailer_id, url, saved[key]),
                             evidence_dir)
-                answered[url] = record
+                answered[key] = record
             elif args.replay_only:
                 record = SearchRecord(query, page_number, url, NOT_SENT_REPLAY_ONLY,
                                       message="--replay-only: no saved response.",
@@ -494,7 +702,7 @@ def run_searches(jobs, fetcher, transport, args, evidence_dir: Path, log, *,
                               STOP_RETAILER)
                 pending.remove(job)
                 continue
-            elif sent >= args.max_search_requests:
+            elif sent + sent_before >= args.max_search_requests:
                 job.skip_rest(NOT_SENT_LIMIT, "--max-search-requests reached.", STOP_SEARCH_LIMIT)
                 pending.remove(job)
                 continue
@@ -523,7 +731,7 @@ def run_searches(jobs, fetcher, transport, args, evidence_dir: Path, log, *,
                     errors[job.retailer_id] = 0
                     _store_page(record, job, page, evidence_dir)
                     if record.outcome in {RESULTS, NO_RESULTS}:
-                        answered[url] = record
+                        answered[key] = record
             log(f"  search {job.retailer_id:15} {job.target.target_id} {query.tier} "
                 f"p{page_number}: {record.outcome} ({record.hits} results)"
                 + (f" [{record.cache.split(':', 1)[0]}]" if record.cache else ""))
@@ -536,7 +744,7 @@ def run_searches(jobs, fetcher, transport, args, evidence_dir: Path, log, *,
     for job in jobs:
         if args.replay_only and job.stop_reason in {STOP_ALL_TIERS, STOP_QUERY_LIMIT} and all(
             r.outcome == NOT_SENT_REPLAY_ONLY for r in job.records if r.query.tier
-            == TIER_MODEL_CODE
+            in FIRST_TIERS
         ):
             job.stop_reason = STOP_REPLAY
     return sent
@@ -604,9 +812,34 @@ def select_and_inspect(candidates, job, fetcher, transport, args, state, evidenc
     method = job.method
     collect_differences = not getattr(args, "no_collect_title_differences", False)
     max_seeds = getattr(args, "max_seed_urls_per_target_retailer", 2)
+    supplied_count = 0
+    max_supplied = getattr(args, "max_supplied_urls_per_target_retailer", 2)
     for candidate in candidates:
         title_differs = bool(configuration_difference(candidate))
         seeded = candidate.category == HISTORICAL_VERIFIED_URL
+        supplied = candidate.category == SUPPLIED_URL
+        if candidate.category == ACCESSORY:
+            candidate.decision = "REJECTED_ACCESSORY"
+            candidate.decision_reason = f"{candidate.code_evidence}; no page request."
+            continue
+        if candidate.category == NOT_A_LAPTOP:
+            candidate.decision = "REJECTED_PRODUCT_TYPE"
+            candidate.decision_reason = (
+                f"Not a laptop ({candidate.code_evidence}); no page request.")
+            continue
+        if candidate.category == FAMILY_NAME_LEAD:
+            candidate.decision = "REVIEW_CATALOG_IDENTITY"
+            candidate.decision_reason = (
+                "The title names the family but not the target's brand; kept for review. "
+                "Not fetched.")
+            continue
+        if candidate.category == FAMILY_SPEC_CANDIDATE and title_differs:
+            # A family listing whose title states another configuration is not fetched; it does
+            # not end the search either (2026-10-20).
+            candidate.decision = "REVIEW_DIFFERENT_CONFIGURATION_BY_TITLE"
+            candidate.decision_reason = ("Title clues state a different configuration: "
+                                         + configuration_difference(candidate) + ".")
+            continue
         if candidate.category not in COLLECTABLE:
             candidate.decision = "NOT_SELECTED"
             candidate.decision_reason = f"Category {candidate.category} is never collected " \
@@ -618,6 +851,12 @@ def select_and_inspect(candidates, job, fetcher, transport, args, state, evidenc
                 candidate.decision_reason = "--max-seed-urls-per-target-retailer reached."
                 continue
             seeds += 1
+        elif supplied:
+            if supplied_count >= max_supplied:
+                candidate.decision = "NOT_SELECTED_LIMIT"
+                candidate.decision_reason = "--max-supplied-urls-per-target-retailer reached."
+                continue
+            supplied_count += 1
         else:
             if chosen >= args.max_candidates_per_target_retailer:
                 candidate.decision = "NOT_SELECTED_LIMIT"
@@ -637,7 +876,8 @@ def select_and_inspect(candidates, job, fetcher, transport, args, state, evidenc
             candidate.decision = collect
             candidate.decision_reason = why or (
                 "Historical verified URL; re-checked." if seeded
-                else "Product page; collected as listed.")
+                else "Supplied known page; checked directly (native search missed it)."
+                if supplied else "Product page; collected as listed.")
             manifest.append((candidate, candidate.seed_url or candidate.hit.product_url, ""))
             continue
         url = candidate.hit.product_url
@@ -652,11 +892,27 @@ def select_and_inspect(candidates, job, fetcher, transport, args, state, evidenc
                     "NOT_INSPECTED_BUDGET") else row["outcome"]
                 candidate.decision_reason = row.get("message", "")
             continue
+        if inspection.outcome == "SINGLE_VARIANT" and method.multi_variant_collection and (
+            inspection.named_options and inspection.variants
+            and inspection.variants[0].variant_id
+        ):
+            # One offer whose URL names its variant (named options such as "8GB DDR5 RAM / 512GB
+            # SSD"): collect that exact variant URL, so the adapter binds the selected variant
+            # instead of refusing the bare page (2026-10-19, second review).
+            variant = inspection.variants[0]
+            decision, reason = variant_decision(variant, job.target)
+            candidate.decision = "COLLECT_VARIANT"
+            candidate.decision_reason = (
+                f"Variant {variant.variant_id} (only variant; option '{variant.title}'): "
+                f"{reason}" + (f" {why}" if why else ""))
+            manifest.append((candidate, variant.url, variant.variant_id))
+            continue
         if inspection.outcome == "SINGLE_VARIANT":
             candidate.decision = collect
             candidate.decision_reason = why or (
                 "Historical verified URL; single-variant page." if seeded
-                else "Single-variant product page.")
+                else "Supplied known page; single-variant page checked directly (native search "
+                     "missed it)." if supplied else "Single-variant product page.")
             manifest.append((candidate, url, ""))
             continue
         if inspection.outcome != "MULTI_VARIANT":
@@ -729,7 +985,9 @@ def load_seeds(args, targets, retailers) -> dict[tuple[str, str], list[tuple[str
 
     for path in args.seed_urls:
         for row in read_rows(path):
-            if row.get("match_status", "EXACT") == "EXACT":
+            # Only rows that say EXACT seed; a file without match_status is refused earlier
+            # (check_seed_files), so an unverified URL is never labeled historically verified.
+            if row.get("match_status") == "EXACT":
                 add(row.get("retailer_id", ""), row.get("offer_url") or row.get("product_url", ""),
                     row.get("target_id") or row.get("expected_target_id", ""), path.name)
     if args.seed_store and args.seed_store.exists():
@@ -745,6 +1003,113 @@ def load_seeds(args, targets, retailers) -> dict[tuple[str, str], list[tuple[str
         for retailer_id, url, target_id in rows:
             add(retailer_id, url, target_id, args.seed_store.name)
     return {key: list(urls.items()) for key, urls in found.items()}
+
+
+def check_seed_files(paths) -> None:
+    """A seed file must state each row's match status; known pages go to --supplied-urls."""
+    for path in paths:
+        with path.open(newline="", encoding="utf-8-sig") as handle:
+            columns = csv.DictReader(handle).fieldnames or []
+        if "match_status" not in columns:
+            raise ValueError(
+                f"{path} has no match_status column. --seed-urls re-checks earlier EXACT results "
+                "only; list known pages without a verified match in --supplied-urls."
+            )
+
+
+def load_supplied(args, targets, retailers):
+    """Supplied known pages per (target, retailer), plus one report row per supplied URL.
+
+    A URL is normalized (tracking parameters and fragment removed; ``variant`` and the path
+    kept) and must be accepted unchanged by its retailer's adapter. It seeds the scoped
+    configuration named by ``search_target_id`` (a search hint, never an assignment), or else
+    every scoped configuration whose complete model code its URL handle shows. It is never a
+    match: collection and the matcher decide.
+    """
+    paths = list(args.supplied_urls)
+    if not paths and not args.no_supplied_urls and DEFAULT_SUPPLIED_URLS.is_file():
+        paths = [DEFAULT_SUPPLIED_URLS]
+    by_id = {t.target_id: t for t in targets}
+    found: dict[tuple[str, str], list[tuple[str, str, str]]] = {}
+    report: list[dict[str, str]] = []
+    for path in paths:
+        for row in read_rows(path):
+            missing = [c for c in ("supplied_id", "retailer_id", "url") if c not in row]
+            if missing:
+                raise ValueError(f"{path} lacks column(s) {', '.join(missing)}.")
+            retailer = row["retailer_id"].strip()
+            normalized, removed = normalize_supplied_url(row["url"])
+            entry = {
+                "supplied_id": row["supplied_id"].strip(), "retailer_id": retailer,
+                "supplied_url": row["url"].strip(), "normalized_url": normalized,
+                "removed_parameters": ";".join(removed),
+                "search_target_hint": row.get("search_target_id", "").strip(),
+                "source_file": str(path), "assigned_target_ids": "", "assignment_basis": "",
+                "found_by_native_search": "", "candidate_decision": "",
+                "collection_request_id": "",
+            }
+            report.append(entry)
+            if retailer not in retailers:
+                entry["assignment_basis"] = "RETAILER_NOT_IN_THIS_RUN"
+                continue
+            try:
+                accepted = ROUTES[retailer].product_request(normalized).url == normalized
+            except (KeyError, ValueError):
+                accepted = False
+            if not accepted:
+                entry["assignment_basis"] = "URL_REJECTED_BY_ADAPTER"
+                continue
+            hint = entry["search_target_hint"]
+            if hint:
+                chosen = [by_id[hint]] if hint in by_id else []
+                basis = "SEARCH_TARGET_HINT" if chosen else "HINT_NOT_IN_SCOPE"
+            else:
+                chosen = [t for t in targets if url_shows_code(normalized, t.model)]
+                basis = "URL_HANDLE_SHOWS_MODEL_CODE" if chosen else "UNASSIGNED_NO_CODE_IN_URL"
+            entry["assignment_basis"] = basis
+            entry["assigned_target_ids"] = ";".join(t.target_id for t in chosen)
+            for target in chosen:
+                found.setdefault((target.target_id, retailer), []).append(
+                    (entry["supplied_id"], normalized, basis))
+    return found, report
+
+
+def merge_supplied(ranked, job, supplied, report) -> list[RankedCandidate]:
+    """Add supplied pages to a job's candidates; a page native search already returned is only
+    flagged. A page the search missed is checked directly (the bounded fallback)."""
+    by_url = {strip_variant(c.hit.product_url): c for c in ranked}
+    rows = {(row["supplied_id"], row["normalized_url"]): row for row in report}
+    for supplied_id, url, basis in supplied:
+        row = rows.get((supplied_id, url))
+        existing = by_url.get(strip_variant(url))
+        job.supplied += 1
+        if existing is not None and not existing.records:
+            # Already listed only as a historical seed: the native search still missed it.
+            job.supplied_missed += 1
+            existing.flags.append("ALSO_SUPPLIED_URL")
+            existing.reasons.append(f"Also supplied as a known page ({supplied_id}); native "
+                                    "search did not return it.")
+            if row is not None:
+                row["found_by_native_search"] = "FALSE"
+            continue
+        if existing is not None:
+            if "variant=" in url and not existing.seed_url:
+                existing.seed_url = url
+            existing.flags.append("ALSO_SUPPLIED_URL")
+            existing.reasons.append(f"Also supplied as a known page ({supplied_id}).")
+            if row is not None:
+                row["found_by_native_search"] = "TRUE"
+            continue
+        job.supplied_missed += 1
+        candidate = supplied_candidate(job.target, job.retailer_id, url, supplied_id, basis)
+        ranked.append(candidate)
+        by_url[strip_variant(url)] = candidate
+        if row is not None:
+            row["found_by_native_search"] = "FALSE"
+    ranked.sort(key=lambda c: c.sort_key)
+    for index, candidate in enumerate(ranked, start=1):
+        candidate.rank = index
+    return ranked
 
 
 def merge_seeds(ranked, target, retailer_id, seeds) -> list[RankedCandidate]:
@@ -841,8 +1206,10 @@ def main(argv: list[str] | None = None, *, transport: Transport | None = None,
         print(f"Discovery stopped: no search support for {', '.join(unknown)}.", file=sys.stderr)
         return 1
     try:
-        targets, excluded, ranks = load_targets(args)
+        targets, excluded, ranks, target_master = load_targets(args)
         evidence_approvals.read_approvals()
+        check_seed_files(args.seed_urls)
+        supplied, supplied_report = load_supplied(args, targets, retailers)
     except (FileNotFoundError, KeyError, ValueError, TargetMasterSchemaError,
             TargetSnapshotError, VerifiedRankingInputError, PriceTrackingInputError) as exc:
         print(f"Discovery stopped before any request: {exc}", file=sys.stderr)
@@ -879,7 +1246,7 @@ def main(argv: list[str] | None = None, *, transport: Transport | None = None,
                 "query": query.text,
                 "verified_identifier": "TRUE" if query.verified_identifier else "FALSE",
                 "runs": "NOT_RUN_QUERY_LIMIT" if limited else (
-                    "ALWAYS" if query.tier == TIER_MODEL_CODE
+                    "ALWAYS" if order == 1
                     else "ONLY_IF_NO_PLAUSIBLE_CANDIDATE"),
                 "max_pages": str(pages), "first_page_url": job.method.first_page_url(query.text),
                 "mechanism": job.method.kind, "notes": job.method.notes,
@@ -936,7 +1303,7 @@ def main(argv: list[str] | None = None, *, transport: Transport | None = None,
         log(f"Preview only: no request was made. Plan written to {out}.")
         return 0
 
-    # Live search (or replay of saved responses).
+    # Live search (or replay of saved responses), in bounded discovery rounds.
     evidence_dir = out / "evidence"
     evidence_dir.mkdir()
     budget = BudgetedTransport(transport or UrllibTransport(), args.max_total_requests)
@@ -950,106 +1317,80 @@ def main(argv: list[str] | None = None, *, transport: Transport | None = None,
     seeds = load_seeds(args, targets, retailers)
     log(f"Saved responses available: {len(saved_searches)} searches, "
         f"{len(saved_inspections)} product pages; historical seed URLs: "
-        f"{sum(len(v) for v in seeds.values())}.")
-    log("Searching...")
-    searches_sent = run_searches(jobs, fetcher, budget, args, evidence_dir, log,
-                                 saved=saved_searches)
-    records = [record for job in jobs for record in job.records]
-    write_csv(out / "search_jobs.csv", SEARCH_JOB_COLUMNS,
-              (job.job_row(len(seeds.get((job.target.target_id, job.retailer_id), [])))
-               for job in jobs))
-    write_csv(out / "search_requests.csv", SEARCH_RECORD_COLUMNS,
-              (search_record_row(r) for r in records))
-    hit_rows = [
-        {"target_id": r.query.target_id, "retailer_id": r.query.retailer_id,
-         "tier": r.query.tier, "query": r.query.text, "page_number": str(r.page_number),
-         "position": str(h.position), "product_url": h.product_url, "listed_url": h.listed_url,
-         "title": h.title, "vendor": h.vendor, "product_type": h.product_type,
-         "available": h.available, "price": h.price_text, "tags": "; ".join(h.tags)}
-        for r in records for h in r.hit_items
-    ]
-    write_csv(out / "search_results.csv", [
-        "target_id", "retailer_id", "tier", "query", "page_number", "position", "product_url",
-        "listed_url", "title", "vendor", "product_type", "available", "price", "tags",
-    ], hit_rows)
-
-    # Rank, inspect, and decide.
-    log("Ranking and inspecting candidates...")
+        f"{sum(len(v) for v in seeds.values())}; supplied URLs: {len(supplied_report)}.")
     state = {"product_fetches": 0, "saved_inspections": saved_inspections}
-    all_candidates: list[RankedCandidate] = []
-    manifest: list[tuple[RankedCandidate, str, str]] = []
-    inspections: list[dict[str, str]] = []
-    variant_rows: list[dict[str, str]] = []
-    for job in jobs:
-        try:
-            ranked = merge_seeds(
-                rank_target_hits(job.target, job.retailer_id, job.records), job.target,
-                job.retailer_id, seeds.get((job.target.target_id, job.retailer_id), []),
-            )
-            chosen, inspected, variants = select_and_inspect(
-                ranked, job, fetcher, budget, args, state, evidence_dir, log
-            )
-        except Exception as exc:  # One retailer's failure must not discard the others.
-            log(f"  {job.retailer_id} {job.target.target_id}: candidate step failed "
-                f"({type(exc).__name__}); kept for review.")
-            inspections.append({"target_id": job.target.target_id,
-                                "retailer_id": job.retailer_id, "outcome": "STEP_FAILED",
-                                "message": f"{type(exc).__name__}: {exc}"})
-            continue
-        all_candidates += ranked
-        manifest += chosen
-        inspections += inspected
-        variant_rows += variants
-    inspection_columns = [
-        "target_id", "retailer_id", "product_url", "outcome", "variants", "retrieved_at",
-        "content_sha256", "evidence_file", "message", "cache",
-    ]
-    write_csv(out / "product_inspections.csv", inspection_columns, (
-        {column: row.get(column, "") for column in inspection_columns} for row in inspections
-    ))
-    write_csv(out / "variants.csv", [
-        "target_id", "retailer_id", "product_url", "variant_id", "variant_url", "option_title",
-        "availability", "price", "decision", "reason",
-    ], variant_rows)
-
-    # Manifest: one row per collected URL; a URL found for two targets is kept once.
-    remaining_fetches = args.max_product_fetches - state["product_fetches"]
-    manifest_rows: list[dict[str, str]] = []
-    seen: set[tuple[str, str]] = set()
-    for candidate, url, _variant in manifest:
-        key = (candidate.hit.retailer_id, url)
-        if key in seen:
-            candidate.decision = "DUPLICATE_OF_EARLIER_CANDIDATE"
-            continue
-        if len(manifest_rows) >= remaining_fetches:
-            candidate.decision = "NOT_COLLECTED_BUDGET"
-            candidate.decision_reason = "Product-fetch budget reached before collection."
-            continue
-        seen.add(key)
-        manifest_rows.append({
-            "request_id": f"disc-{candidate.hit.retailer_id}-{candidate.target.target_id}-"
-                          f"{len(manifest_rows) + 1}",
-            "retailer_id": candidate.hit.retailer_id,
-            "product_url": url,
-            "expected_target_id": candidate.target.target_id,
-            "enabled": "TRUE",
-        })
-    write_csv(out / "candidates.csv", CANDIDATE_COLUMNS,
-              (candidate_row(c) for c in all_candidates))
-    manifest_path = out / "manifest.csv"
-    write_csv(manifest_path, MANIFEST_COLUMNS, manifest_rows)
+    run = DiscoveryRun(out, jobs, seeds, supplied, supplied_report)
+    collection = RoundCollector(args, out, budget, clock, log, ranks, target_master,
+                                saved_inspections)
+    searches_sent = 0
+    answered: dict[str, SearchRecord] = {}  # One search cache for every round of the run.
     manifest_issue = ""
-    if manifest_rows:
-        try:
-            validate_manifest(
-                [row | {"_row_number": str(i)} for i, row in enumerate(manifest_rows, start=2)],
-                ranks,
-            )
-        except ManifestError as error:
-            manifest_issue = str(error)
+    active = list(jobs)
+    for round_number in range(1, args.max_discovery_rounds + 1):
+        run.rounds = round_number
+        log(f"Discovery round {round_number}: searching {len(active)} job(s)...")
+        searches_sent += run_searches(active, fetcher, budget, args, evidence_dir, log,
+                                      saved=saved_searches, answered=answered,
+                                      sent_before=searches_sent)
+        log("Ranking and inspecting candidates...")
+        round_manifest: list[tuple[RankedCandidate, str, str]] = []
+        for job in active:
+            before = state["product_fetches"]
+            try:
+                ranked = run.round_candidates(job, round_number)
+                chosen, inspected, variants = select_and_inspect(
+                    ranked, job, fetcher, budget, args, state, evidence_dir, log
+                )
+            except Exception as exc:  # One retailer's failure must not discard the others.
+                log(f"  {job.retailer_id} {job.target.target_id}: candidate step failed "
+                    f"({type(exc).__name__}); kept for review.")
+                run.inspections.append({"target_id": job.target.target_id,
+                                        "retailer_id": job.retailer_id, "outcome": "STEP_FAILED",
+                                        "message": f"{type(exc).__name__}: {exc}"})
+                continue
+            if round_number > 1:
+                job.inspections_after_resume += state["product_fetches"] - before
+            run.add_candidates(job, ranked)
+            round_manifest += chosen
+            run.inspections += inspected
+            run.variants += variants
+        new_rows = run.add_manifest_rows(round_manifest, args.max_product_fetches
+                                         - state["product_fetches"])
+        if new_rows:
+            try:
+                validate_manifest(
+                    [row | {"_row_number": str(i)}
+                     for i, row in enumerate(run.manifest_rows, start=2)],
+                    ranks,
+                )
+            except ManifestError as error:
+                manifest_issue = str(error)
+        run.write_files()
+        if not args.collect or manifest_issue or not new_rows:
+            break
+        results, statuses = collection.collect(round_number, new_rows)
+        run.record_collection(results, statuses)
+        resumable = [job for job in jobs if job.can_resume()]
+        if not resumable:
+            break
+        if round_number == args.max_discovery_rounds:
+            for job in resumable:
+                job.round_limit_reached = True
+            log(f"  {len(resumable)} job(s) could resume but --max-discovery-rounds was reached.")
+            break
+        for job in resumable:
+            job.resume(run.resume_reason(job), round_number + 1)
+            log(f"  resume {job.retailer_id:15} {job.target.target_id}: {job.resume_reasons[-1]}")
+        active = resumable
+    for job in jobs:
+        job.outcome = job.finish_outcome()
+    run.write_files()
+    records = [record for job in jobs for record in job.records]
 
     approvals = evidence_approvals.read_approvals()
     approval_urls = {(row["retailer_id"], row["offer_url"]) for row in approvals}
+    all_candidates = run.candidates
+    manifest_rows = run.manifest_rows
     summary |= {
         "requests_sent": budget.sent,
         "search_requests_sent": searches_sent,
@@ -1062,7 +1403,20 @@ def main(argv: list[str] | None = None, *, transport: Transport | None = None,
             r.query.tier for r in records if r.outcome in {RESULTS, NO_RESULTS}
         )),
         "search_stop_reasons": dict(Counter(job.stop_reason for job in jobs)),
+        "discovery_rounds": run.rounds,
+        "continuation": {
+            "policy": "A search that stopped at a plausible candidate resumes its remaining "
+                      "query tiers in the next round when collection did not confirm the "
+                      "configuration (another configuration, unresolved, unmatched, or a "
+                      "failed fetch). Pages already evaluated are not fetched again; every "
+                      "round uses the same request limits; at most --max-discovery-rounds.",
+            "jobs_resumed": sum(job.resumed for job in jobs),
+            "round_limit_reached": sum(job.round_limit_reached for job in jobs),
+        },
+        "discovery_outcomes": dict(Counter(job.outcome for job in jobs)),
+        "search_coverage": dict(Counter(job.search_coverage() for job in jobs)),
         "historical_seed_urls": sum(len(v) for v in seeds.values()),
+        "supplied_urls": dict(Counter(row["assignment_basis"] for row in supplied_report)),
         "candidates": dict(Counter(c.category for c in all_candidates)),
         "decisions": dict(Counter(c.decision for c in all_candidates)),
         "manifest_rows": len(manifest_rows),
@@ -1085,41 +1439,22 @@ def main(argv: list[str] | None = None, *, transport: Transport | None = None,
         },
     }
 
-    # Collection and matching through the existing collector.
+    # Collection rounds merged into one collection folder.
     status = "SEARCH_ONLY"
-    if args.collect and manifest_rows and not manifest_issue:
-        collection_budget = min(len(manifest_rows), budget.remaining)
-        if collection_budget < len(manifest_rows):
-            summary["collection_note"] = "Total budget smaller than the manifest; some rows " \
-                                         "may fail with REQUEST_BUDGET_EXHAUSTED."
-        backup = out / "store_backup_before_collection.sqlite3"
-        summary["store_backup"] = {"path": str(backup), "sha256": backup_store(args.store,
-                                                                                backup)}
-        # A fresh Fetcher inside the collector: wait one interval so per-retailer spacing holds.
-        clock.sleep(FetchConfig().min_request_interval_seconds)
-        log(f"Collecting {len(manifest_rows)} candidate pages with collect_and_match.py...")
-        code = load_collector().main([
-            "--live", "--manifest", str(manifest_path),
-            "--target-master", str(args.target_master),
-            "--selected-list", str(args.selected_list),
-            "--contributions", str(args.contributions),
-            "--store", str(args.store), "--output-dir", str(out / "collection"),
-        ], transport=budget, clock=clock)
-        summary["collection_exit_code"] = code
-        results = out / "collection" / "match_results.csv"
-        if results.exists():
-            rows = read_rows(results)
-            summary["match_statuses"] = dict(Counter(r["match_status"] for r in rows))
-            summary["expected_target_checks"] = dict(
-                Counter(r["expected_target_check"] for r in rows)
-            )
-            review = out / "collection" / "match_review_queue.csv"
-            summary["review_rows"] = len(read_rows(review)) if review.exists() else 0
-            summary["owner_decisions"]["collected_offers_with_listing_approval"] = sorted(
-                {r["offer_url"] for r in rows if (r["retailer_id"], r["offer_url"])
-                 in approval_urls}
-            )
-        status = {0: "SUCCESS", 2: "PARTIAL_SUCCESS"}.get(code, "COLLECTION_FAILED")
+    if collection.round_dirs:
+        merged = merge_collection_rounds(collection.round_dirs, out / "collection")
+        summary |= collection.summary()
+        rows = read_rows(out / "collection" / "match_results.csv")
+        summary["match_statuses"] = dict(Counter(r["match_status"] for r in rows))
+        summary["expected_target_checks"] = dict(
+            Counter(r["expected_target_check"] for r in rows)
+        )
+        summary["review_rows"] = merged["review_rows"]
+        summary["owner_decisions"]["collected_offers_with_listing_approval"] = sorted(
+            {r["offer_url"] for r in rows if (r["retailer_id"], r["offer_url"]) in approval_urls}
+        )
+        status = {"SUCCESS": "SUCCESS", "PARTIAL_SUCCESS": "PARTIAL_SUCCESS",
+                  "REPLAY_ONLY": "REPLAY_ONLY"}.get(merged["run_status"], "COLLECTION_FAILED")
     elif args.collect and manifest_issue:
         status = "MANIFEST_INVALID"
     summary["requests_sent"] = budget.sent
@@ -1143,15 +1478,336 @@ def main(argv: list[str] | None = None, *, transport: Transport | None = None,
     summary["finished_at_utc"] = utc_text(clock.now())
     (out / "discovery_summary.json").write_text(json.dumps(summary, indent=2) + "\n",
                                                 encoding="utf-8")
-    log(f"Search jobs stopped: {dict(Counter(job.stop_reason for job in jobs))}.")
+    log(f"Search jobs stopped: {dict(Counter(job.stop_reason for job in jobs))}; discovery "
+        f"outcomes: {summary['discovery_outcomes']}; resumed: "
+        f"{summary['continuation']['jobs_resumed']}.")
     log(f"Discovery {status}: {budget.sent} requests sent ({searches_sent} searches, "
         f"{state['product_fetches']} inspections); candidates "
         f"{dict(Counter(c.category for c in all_candidates))}; manifest rows "
-        f"{len(manifest_rows)}.")
+        f"{len(manifest_rows)} over {len(collection.round_dirs) or 0} collection round(s).")
     if manifest_issue:
         log(f"  Manifest not collected: {manifest_issue}")
     log(f"Reports written to {out}.")
     return 0 if status in {"SUCCESS", "SEARCH_ONLY", "REPLAY_ONLY"} else 2
+
+
+class DiscoveryRun:
+    """Candidates, manifest rows, and output files of one discovery run, across rounds.
+
+    Lineage: each candidate records its round and the collection request that fetched its page
+    (``collection_request_id``; an earlier request when the page was already collected for
+    another configuration), so search job -> candidate -> request -> observation stays explicit.
+    """
+
+    def __init__(self, out: Path, jobs, seeds, supplied, supplied_report) -> None:
+        self.out = out
+        self.jobs = jobs
+        self.seeds = seeds
+        self.supplied = supplied
+        self.supplied_report = supplied_report
+        self.by_job: dict[tuple[str, str], list[RankedCandidate]] = {}
+        self.candidates: list[RankedCandidate] = []
+        self.manifest_rows: list[dict[str, str]] = []
+        self.requested: dict[tuple[str, str], str] = {}  # (retailer, url) -> request_id
+        self.inspections: list[dict[str, str]] = []
+        self.variants: list[dict[str, str]] = []
+        self.results: dict[str, list[dict[str, str]]] = {}  # request_id -> match result rows
+        self.request_status: dict[str, str] = {}
+        self.rounds = 1
+
+    def round_candidates(self, job: SearchJob, round_number: int) -> list[RankedCandidate]:
+        """Round 1: every search result plus historical and supplied seeds. Later rounds: the
+        results new to this job, plus earlier relevant candidates a per-round limit skipped."""
+        if round_number == 1:
+            ranked = merge_seeds(
+                rank_target_hits(job.target, job.retailer_id, job.records), job.target,
+                job.retailer_id, self.seeds.get(job.key, []),
+            )
+            return merge_supplied(ranked, job, self.supplied.get(job.key, []),
+                                  self.supplied_report)
+        known = {strip_variant(c.hit.product_url): c for c in self.by_job.get(job.key, [])}
+        ranked = []
+        for candidate in rank_target_hits(job.target, job.retailer_id, job.records):
+            earlier = known.get(strip_variant(candidate.hit.product_url))
+            if earlier is None:
+                candidate.discovery_round = round_number
+                ranked.append(candidate)
+            elif earlier.decision == "NOT_SELECTED_LIMIT":
+                ranked.append(earlier)  # Relevant, skipped by a per-round limit: decided again.
+        ranked.sort(key=lambda c: c.sort_key)
+        next_rank = len(known)
+        for candidate in ranked:
+            if candidate.discovery_round == round_number:
+                next_rank += 1
+                candidate.rank = next_rank
+        return ranked
+
+    def add_candidates(self, job: SearchJob, ranked: list[RankedCandidate]) -> None:
+        listed = self.by_job.setdefault(job.key, [])
+        for candidate in ranked:
+            if candidate not in listed:
+                listed.append(candidate)
+                self.candidates.append(candidate)
+            # A relevant candidate held for review or skipped by a limit was looked at without
+            # confirming the configuration: it no longer stops the search (2026-10-19, second
+            # review: seven jobs stopped on an uncollectable laptop sleeve).
+            if candidate.category in COLLECTABLE and candidate.decision and not (
+                candidate.decision.startswith("COLLECT")
+                or candidate.decision == "DUPLICATE_OF_EARLIER_CANDIDATE"
+            ):
+                job.evaluated.add(strip_variant(candidate.hit.product_url))
+
+    def add_manifest_rows(self, chosen, fetch_allowance: int) -> list[dict[str, str]]:
+        """Manifest rows for this round; a page already requested in this run is not fetched
+        again (the candidate names the earlier request)."""
+        new_rows: list[dict[str, str]] = []
+        for candidate, url, _variant in chosen:
+            key = (candidate.hit.retailer_id, url)
+            candidate.collection_url = url
+            if key in self.requested:
+                candidate.decision = "DUPLICATE_OF_EARLIER_CANDIDATE"
+                candidate.collection_request_id = self.requested[key]
+                continue
+            # Inspections so far plus every collection request of this run stay within
+            # --max-product-fetches.
+            if len(self.manifest_rows) >= fetch_allowance:
+                candidate.decision = "NOT_COLLECTED_BUDGET"
+                candidate.decision_reason = "Product-fetch budget reached before collection."
+                candidate.collection_url = ""
+                continue
+            request_id = (f"disc-{candidate.hit.retailer_id}-{candidate.target.target_id}-"
+                          f"{len(self.manifest_rows) + 1}")
+            row = {
+                "request_id": request_id,
+                "retailer_id": candidate.hit.retailer_id,
+                "product_url": url,
+                "expected_target_id": candidate.target.target_id,
+                "enabled": "TRUE",
+            }
+            self.requested[key] = request_id
+            candidate.collection_request_id = request_id
+            self.manifest_rows.append(row)
+            new_rows.append(row)
+            job = next(j for j in self.jobs if j.key == (candidate.target.target_id,
+                                                         candidate.hit.retailer_id))
+            if job.resumed:
+                job.collection_requests_after_resume += 1
+        for row in self.supplied_report:
+            matches = [c for c in self.candidates if "SUPPLIED_URL" in c.flags
+                       or "ALSO_SUPPLIED_URL" in c.flags]
+            for candidate in matches:
+                if strip_variant(candidate.hit.product_url) == strip_variant(
+                    row["normalized_url"]
+                ):
+                    row["candidate_decision"] = candidate.decision
+                    row["collection_request_id"] = candidate.collection_request_id
+        return new_rows
+
+    def record_collection(self, results: list[dict[str, str]], statuses: dict[str, str]) -> None:
+        """Results of a collection round: evaluate every job's collected candidates."""
+        for row in results:
+            self.results.setdefault(row["request_id"], []).append(row)
+        self.request_status |= statuses
+        for job in self.jobs:
+            job.collected = True
+            outcomes: list[str] = []
+            for candidate in self.by_job.get(job.key, []):
+                request_id = candidate.collection_request_id
+                if not request_id or request_id not in self.request_status:
+                    continue
+                rows = self.results.get(request_id, [])
+                if self.request_status[request_id] in {"SUCCEEDED", "PARTIAL", "FAILED",
+                                                       "NO_OFFERS"}:
+                    job.evaluated.add(strip_variant(candidate.hit.product_url))
+                if not rows:
+                    outcomes.append(f"{candidate.collection_url}: request "
+                                    f"{self.request_status[request_id]}")
+                for row in rows:
+                    attributes = row.get(OFFER_ATTRIBUTES_KEY) or {
+                        name: row.get(f"offer_{name}", "") for name in CORE_MATCH_COLUMNS
+                        if row.get(f"offer_{name}", "")}
+                    outcome, detail = configuration_outcome(
+                        row["match_status"], row["target_id"],
+                        [c for c in row["reason_codes"].split(";") if c],
+                        attributes,
+                        job.target.target_id,
+                        dict(job.target.record) or (
+                            job.target.core | {"model": job.target.model,
+                                               "brand": job.target.brand}),
+                        title=row.get("raw_title", ""),
+                    )
+                    # A listed-spec match for a broad-family job is a suitable offer for it
+                    # (2026-10-20); the weekly report decides the price under that label.
+                    if outcome in {"MATCHED_CONFIGURATION", "LISTED_SPEC_MATCH"} and (
+                        not job.suitable_url
+                    ):
+                        job.suitable_url = row["offer_url"]
+                        job.suitable_observation_id = row["observation_id"]
+                    outcomes.append(f"{row['offer_url']}: {outcome}"
+                                    + (f" ({detail})" if detail else ""))
+            job.candidate_outcomes = list(dict.fromkeys(outcomes))
+
+    def resume_reason(self, job: SearchJob) -> str:
+        held = next((c for c in self.by_job.get(job.key, [])
+                     if strip_variant(c.hit.product_url) == strip_variant(job.plausible_url)
+                     and not c.decision.startswith("COLLECT")
+                     and c.decision != "DUPLICATE_OF_EARLIER_CANDIDATE"), None)
+        if held is not None:
+            return (f"{STOP_PLAUSIBLE} at {job.plausible_url}, but it was not collected "
+                    f"({held.decision}: {held.decision_reason})")
+        return (f"{STOP_PLAUSIBLE} at {job.plausible_url}, but collection did not confirm "
+                f"{job.target.target_id}: " + "; ".join(job.candidate_outcomes or ["no result"]))
+
+    def write_files(self) -> None:
+        out = self.out
+        records = [record for job in self.jobs for record in job.records]
+        write_csv(out / "search_jobs.csv", SEARCH_JOB_COLUMNS,
+                  (job.job_row(len(self.seeds.get(job.key, []))) for job in self.jobs))
+        write_csv(out / "search_requests.csv", SEARCH_RECORD_COLUMNS,
+                  (search_record_row(r) for r in records))
+        hit_rows = [
+            {"target_id": r.query.target_id, "retailer_id": r.query.retailer_id,
+             "tier": r.query.tier, "query": r.query.text, "page_number": str(r.page_number),
+             "position": str(h.position), "product_url": h.product_url,
+             "listed_url": h.listed_url, "title": h.title, "vendor": h.vendor,
+             "product_type": h.product_type, "available": h.available, "price": h.price_text,
+             "tags": "; ".join(h.tags)}
+            for r in records for h in r.hit_items
+        ]
+        write_csv(out / "search_results.csv", [
+            "target_id", "retailer_id", "tier", "query", "page_number", "position",
+            "product_url", "listed_url", "title", "vendor", "product_type", "available", "price",
+            "tags",
+        ], hit_rows)
+        inspection_columns = [
+            "target_id", "retailer_id", "product_url", "outcome", "variants", "retrieved_at",
+            "content_sha256", "evidence_file", "message", "cache",
+        ]
+        write_csv(out / "product_inspections.csv", inspection_columns, (
+            {column: row.get(column, "") for column in inspection_columns}
+            for row in self.inspections
+        ))
+        write_csv(out / "variants.csv", [
+            "target_id", "retailer_id", "product_url", "variant_id", "variant_url",
+            "option_title", "availability", "price", "decision", "reason",
+        ], self.variants)
+        write_csv(out / "candidates.csv", CANDIDATE_COLUMNS,
+                  (candidate_row(c) for c in self.candidates))
+        write_csv(out / "manifest.csv", MANIFEST_COLUMNS,
+                  ({k: row[k] for k in MANIFEST_COLUMNS} for row in self.manifest_rows))
+        write_csv(out / "supplied_urls.csv", SUPPLIED_REPORT_COLUMNS, self.supplied_report)
+
+
+SUPPLIED_REPORT_COLUMNS = (
+    "supplied_id", "retailer_id", "supplied_url", "normalized_url", "removed_parameters",
+    "search_target_hint", "source_file", "assigned_target_ids", "assignment_basis",
+    "found_by_native_search", "candidate_decision", "collection_request_id",
+)
+
+
+class RoundCollector:
+    """Collects each round's new manifest rows: live through collect_and_match.py (one shared
+    request budget), or offline from saved evidence (--replay-only --replay-collection)."""
+
+    def __init__(self, args, out, budget, clock, log, ranks, target_master,
+                 saved_inspections) -> None:
+        self.args = args
+        self.out = out
+        self.budget = budget
+        self.clock = clock
+        self.log = log
+        self.ranks = ranks
+        self.target_master = target_master
+        self.saved_inspections = saved_inspections
+        self.round_dirs: list[Path] = []
+        self.codes: list[int] = []
+        self.backup: dict[str, str] | None = None
+
+    def collect(self, round_number: int, rows: list[dict[str, str]]):
+        """``(match result rows, request_id -> request status)`` for this round's rows."""
+        args, out = self.args, self.out
+        rounds = out / "collection_rounds"
+        rounds.mkdir(exist_ok=True)
+        manifest_path = rounds / f"manifest_round_{round_number}.csv"
+        write_csv(manifest_path, MANIFEST_COLUMNS,
+                  ({k: row[k] for k in MANIFEST_COLUMNS} for row in rows))
+        round_dir = rounds / f"round_{round_number}"
+        if args.replay_only:
+            entries = validate_manifest(
+                [row | {"_row_number": str(i)} for i, row in enumerate(rows, start=2)],
+                self.ranks,
+            )
+            saved_pages = {
+                url: saved_page(entry[0].get("retailer_id", ""), url, entry)
+                for url, entry in self.saved_inspections.items()
+            }
+            outcomes, sources = replay_outcomes(
+                entries, load_saved_collections(args.replay_collection), saved_pages
+            )
+            context = matching_context(
+                self.target_master, target_master_sha256=sha256_file(args.target_master),
+                source_label=str(args.target_master),
+            )
+            write_replayed_collection(round_dir, entries, outcomes, sources,
+                                      matcher_from_validated(self.target_master), context,
+                                      self.ranks)
+            self.log(f"Collection round {round_number} replayed offline: "
+                     f"{dict(Counter(s.split(':', 1)[0] for s in sources.values()))}.")
+        else:
+            if self.backup is None:
+                backup = out / "store_backup_before_collection.sqlite3"
+                self.backup = {"path": str(backup), "sha256": backup_store(args.store, backup)}
+            if len(rows) > self.budget.remaining:
+                self.log("  Total budget smaller than this round's manifest; some rows may fail "
+                         "with REQUEST_BUDGET_EXHAUSTED.")
+            # A fresh Fetcher inside the collector: wait one interval so per-retailer spacing
+            # holds.
+            self.clock.sleep(FetchConfig().min_request_interval_seconds)
+            self.log(f"Collecting {len(rows)} candidate pages (round {round_number}) with "
+                     "collect_and_match.py...")
+            code = load_collector().main([
+                "--live", "--manifest", str(manifest_path),
+                "--target-master", str(args.target_master),
+                "--selected-list", str(args.selected_list),
+                "--contributions", str(args.contributions),
+                "--store", str(args.store), "--output-dir", str(round_dir),
+            ], transport=self.budget, clock=self.clock)
+            self.codes.append(code)
+        self.round_dirs.append(round_dir)
+        results = read_rows(round_dir / "match_results.csv") if (
+            round_dir / "match_results.csv").is_file() else []
+        # Every field each collected page established (brand and secondary hardware included),
+        # for the listed-spec check of broad-family jobs. Re-extracted offline from the round's
+        # own observations; never filled from a target.
+        observations = round_dir / "observations.csv"
+        if results and observations.is_file():
+            try:
+                items = read_observations_csv(observations)
+            except ObservationFileError:
+                items = []  # a round whose pages yielded no observation
+            attributes = {
+                observation_id(item.observation): dict(
+                    extract_offer_attributes(item.observation).values)
+                for item in items
+            }
+            for row in results:
+                row[OFFER_ATTRIBUTES_KEY] = attributes.get(row.get("observation_id", ""), {})
+        statuses = {
+            row["request_id"]: row["request_status"]
+            for row in (read_rows(round_dir / "request_report.csv")
+                        if (round_dir / "request_report.csv").is_file() else [])
+        }
+        return results, statuses
+
+    def summary(self) -> dict:
+        values: dict = {"collection_rounds": len(self.round_dirs)}
+        if self.backup is not None:
+            values["store_backup"] = self.backup
+        if self.codes:
+            values["collection_exit_codes"] = self.codes
+        if self.args.replay_only:
+            values["collection_mode"] = "REPLAY_ONLY (saved observation records and pages)"
+        return values
 
 
 if __name__ == "__main__":

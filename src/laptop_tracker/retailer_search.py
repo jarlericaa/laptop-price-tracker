@@ -29,7 +29,7 @@ import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from html.parser import HTMLParser
-from urllib.parse import quote_plus, urlencode, urljoin, urlsplit
+from urllib.parse import parse_qsl, quote_plus, urlencode, urljoin, urlsplit, urlunsplit
 
 from .adapters import datablitz, laptop_factory, oct, pcc, pcx
 from .offers import clean_text, url_host
@@ -359,7 +359,12 @@ TIER_PART_NUMBER = "2_VERIFIED_PART_NUMBER"
 TIER_MODEL_SPECS = "3_MODEL_CODE_WITH_SPECS"
 TIER_FAMILY = "4_BRAND_FAMILY"
 TIER_FAMILY_SPECS = "5_FAMILY_WITH_SPECS"
-FALLBACK_TIERS = frozenset({TIER_PART_NUMBER, TIER_MODEL_SPECS, TIER_FAMILY, TIER_FAMILY_SPECS})
+# Targets identified by a marketed product name (2026-10-19, second review): no code to search.
+TIER_PRODUCT_NAME = "1_PRODUCT_NAME"
+TIER_NAME_SPECS = "3_PRODUCT_NAME_WITH_SPECS"
+FALLBACK_TIERS = frozenset({TIER_PART_NUMBER, TIER_MODEL_SPECS, TIER_FAMILY, TIER_FAMILY_SPECS,
+                            TIER_NAME_SPECS})
+FIRST_TIERS = frozenset({TIER_MODEL_CODE, TIER_PRODUCT_NAME})
 
 
 def _capacity_words(ram: str, storage: str) -> str:
@@ -374,7 +379,78 @@ def _capacity_words(ram: str, storage: str) -> str:
     return " ".join(words)
 
 
+def _without_repeated_words(text: str) -> str:
+    """``Apple MacBook Neo Apple A18 Pro`` -> ``Apple MacBook Neo A18 Pro``: a word already
+    present earlier is dropped (search text only; never an identity value)."""
+    seen: set[str] = set()
+    kept = []
+    for word in text.split():
+        if word.casefold() in seen:
+            continue
+        seen.add(word.casefold())
+        kept.append(word)
+    return " ".join(kept)
+
+
 def search_queries(
+    target_id: str, retailer_id: str, *, model: str, part_number: str, brand: str, series: str,
+    core: Mapping[str, str] | None = None, kind: str = "MODEL_CODE",
+) -> list[SearchQuery]:
+    """Ordered, de-duplicated queries for one target (see ``_code_queries`` for code targets).
+
+    A target whose catalog model is a product or family name (``kind`` other than
+    ``MODEL_CODE``) has no code to search: its queries are the brand and name, the name with
+    processor and capacities, then the brand and series, each said to be a name, never a code.
+    No code is ever made up from a name. Identical query texts are sent once.
+    """
+    if kind == "MODEL_CODE":
+        queries = _code_queries(target_id, retailer_id, model=model, part_number=part_number,
+                                brand=brand, series=series, core=core)
+    else:
+        queries = _name_queries(target_id, retailer_id, model=model, part_number=part_number,
+                                brand=brand, series=series, core=core or {})
+    if kind == "FAMILY_NAME":
+        # A family name cannot establish one product: two queries gather review leads for the
+        # catalog reconciliation; broader family tiers would only repeat them.
+        queries = [q for q in queries if q.tier in {TIER_PRODUCT_NAME, TIER_NAME_SPECS,
+                                                    TIER_PART_NUMBER}]
+    unique: list[SearchQuery] = []
+    seen: set[str] = set()
+    for query in queries:
+        key = " ".join(query.text.casefold().split())
+        if key and key not in seen:
+            seen.add(key)
+            unique.append(query)
+    return unique
+
+
+def _name_queries(target_id, retailer_id, *, model, part_number, brand, series, core):
+    capacities = _capacity_words(core.get("ram_capacity_gb", ""),
+                                 core.get("storage_capacity_gb", ""))
+    name = model.strip()
+    branded = name if name.casefold().startswith(brand.casefold()) or not brand else (
+        f"{brand} {name}")
+    queries = [SearchQuery(target_id, retailer_id, TIER_PRODUCT_NAME, clean_text(branded), False,
+                           "brand and catalog product name (no manufacturer code recorded)")]
+    if part_number.strip():
+        queries.append(SearchQuery(target_id, retailer_id, TIER_PART_NUMBER, part_number.strip(),
+                                   True, "manufacturer_part_number in TARGET_MASTER"))
+    detailed = _without_repeated_words(clean_text(
+        f"{branded} {core.get('cpu_series', '')} {capacities}"))
+    queries.append(SearchQuery(target_id, retailer_id, TIER_NAME_SPECS, detailed, False,
+                               "product name plus processor, RAM, and storage (fallback)"))
+    family = clean_text(f"{brand} {series}")
+    if series.strip():
+        queries.append(SearchQuery(target_id, retailer_id, TIER_FAMILY, family, False,
+                                   "brand and series (broader fallback)"))
+        queries.append(SearchQuery(
+            target_id, retailer_id, TIER_FAMILY_SPECS, _without_repeated_words(clean_text(
+                f"{family} {core.get('cpu_series', '')} {capacities}")), False,
+            "family plus CPU, RAM, and storage (fallback)"))
+    return queries
+
+
+def _code_queries(
     target_id: str, retailer_id: str, *, model: str, part_number: str, brand: str, series: str,
     core: Mapping[str, str] | None = None,
 ) -> list[SearchQuery]:
@@ -405,10 +481,13 @@ def search_queries(
                                    clean_text(f"{model} {capacities}"), False,
                                    "model code plus RAM and storage (fallback)"))
     family = clean_text(f"{brand} {series}")
-    if family and family.casefold() != model.casefold():
+    # A brand alone ("Lenovo") is not a family: with a blank series these broad queries filled
+    # the 10-result cap with other products and found nothing (2026-10-19, second review).
+    if series.strip() and family.casefold() != model.casefold():
         queries.append(SearchQuery(target_id, retailer_id, TIER_FAMILY, family, False,
                                    "brand and series (broader fallback)"))
-        detailed = clean_text(f"{family} {core.get('cpu_series', '')} {capacities}")
+        detailed = _without_repeated_words(clean_text(
+            f"{family} {core.get('cpu_series', '')} {capacities}"))
         if detailed.casefold() != family.casefold():
             queries.append(SearchQuery(target_id, retailer_id, TIER_FAMILY_SPECS, detailed,
                                        False, "family plus CPU, RAM, and storage (fallback)"))
@@ -475,6 +554,17 @@ def search_record_row(record: SearchRecord) -> dict[str, str]:
         "cache": record.cache,
         "run_reason": record.run_reason,
     }
+
+
+def search_cache_key(url: str) -> str:
+    """One key per distinct search: host case, the search words' case and spacing ignored
+    (``IdeaPad`` and ``Ideapad`` are one search on these stores)."""
+    parts = urlsplit(url)
+    query = [
+        (name, " ".join(value.casefold().split()) if name in {"q", "s"} else value)
+        for name, value in parse_qsl(parts.query, keep_blank_values=True)
+    ]
+    return urlunsplit((parts.scheme, parts.netloc.lower(), parts.path, urlencode(query), ""))
 
 
 def unique_hits(records: Sequence[SearchRecord]) -> list[tuple[SearchHit, list[SearchRecord]]]:
