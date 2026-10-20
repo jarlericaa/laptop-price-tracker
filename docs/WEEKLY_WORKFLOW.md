@@ -38,10 +38,10 @@ flowchart TD
     copies --> store
     store --> reports["Generate weekly price reports"]
     reports --> preview["Review and preview publication"]
-    preview --> output["Sheets: four PILOT_PRICE tabs"]
+    preview --> output["Sheets: five PILOT_PRICE tabs"]
 ```
 
-The `raw` and catalog tabs are inputs. The four `PILOT_PRICE_*` tabs are report outputs. Searching, matching and publishing are separate operations.
+The `raw` and catalog tabs are inputs. The five `PILOT_PRICE_*` tabs are report outputs. Searching, matching and publishing are separate operations.
 
 ## 1. What the Google Sheets tabs mean
 
@@ -57,7 +57,8 @@ The workbook may also contain dated backups and additional manually created revi
 | Other generated `P1_*` tabs | Eligible ranking, exclusions, eligibility review, duplicate conflicts, validation errors, period summary and run log. | Optional `run_phase1.py --write-sheets`; see section 7. |
 | `P1_ELIGIBILITY_DECISIONS` | Existing Sheet copy of eligibility decisions. | The optional P1 writer preserves/merges it. Classification currently reads local `config/eligibility_decisions.csv`, so editing this tab alone does not change classification. |
 | `P1_TOP_100_CONFIGURATIONS` | Published display of the verified configuration-level Top 100. | Separate/manual publication. Neither the build command nor price publisher updates this tab. |
-| `PILOT_PRICE_COMPARISON` | Pilot configurations, retailer prices/links, stock/status labels and lowest price. | `publish_prices.py --write-sheets`. |
+| `PILOT_PRICE_COMPARISON` | Pilot configurations, the dated Shopee snapshot price (link, variation, status, extract date), retailer prices/links, stock/status labels and the lowest retailer prices. | `publish_prices.py --write-sheets`. |
+| `PILOT_PRICE_SUMMARY` | A minimal side-by-side grid: Laptop, Shopee (historical snapshot), DataBlitz, Laptop Factory, PC Express, PC Central, Octagon. The same prices as the comparison; context (snapshot date and listing, exact or listed-spec, stock, bundle, warnings, why a cell is blank) is in cell notes; listed-spec prices are italic. | Same publisher, from the same comparison rows. |
 | `PILOT_PRICE_HISTORY` | Dated pilot observations, stock, matches, prices and changes. | Same publisher, from cumulative local history. |
 | `PILOT_PRICE_REVIEW` | Retailer matching problems and price exclusions in the published history/scope. | Same publisher. Older unresolved observations can remain here. |
 | `PILOT_PRICE_RUN_LOG` | Publication IDs, cutoffs, counts, success/failure and readback results. | Same publisher; retains earlier publications. |
@@ -433,7 +434,9 @@ python publish_prices.py --preview \
   --output-root "$weekly_run/publications"
 ```
 
-**Does:** validates reports and reads the four pilot destination tabs to check existing content/headers. No Sheet changes occur. Check counts, week, cutoff and sales-period label.
+**Does:** validates reports and reads the five pilot destination tabs to check existing content/headers. No Sheet changes occur. Check counts, week, cutoff, sales-period label, the Shopee snapshot count, and that `PILOT_PRICE_SUMMARY` is a new tab or this publisher's. `plan_PILOT_PRICE_SUMMARY.csv` and `plan_PILOT_PRICE_SUMMARY_notes.csv` in the output folder show the summary and every cell note before anything is written.
+
+Since publisher `pilot-sheets-5` (2026-10-20) the comparison shows, after the storage column, the configuration's Shopee snapshot price: the lowest eligible mapped-listing price of the 2026-09-28 sales extract, dated, with its product-page link (it does not select the variation), variation and `model_id`, and status. It is historical, never a current price, and never part of the "Lowest retailer price" or "Lowest in-stock retailer price" minimums. `PILOT_PRICE_SUMMARY` repeats the same prices in seven columns.
 
 Since publisher `pilot-sheets-3` (2026-10-19), `PILOT_PRICE_COMPARISON` has two extra columns per retailer after its observed time: `<Retailer> recheck link (unconfirmed)` (clickable exact URL) and `<Retailer> recheck note` (short reason, plus "+N more in PILOT_PRICE_REVIEW"). They are filled only where that retailer's price is blank. `PILOT_PRICE_REVIEW` lists every recheck page as a "Recheck candidate (unconfirmed)" row with its link, stage, stock/time when known and "not priced". The publisher refuses a recheck row beside a comparable price. The earlier comparison header is still recognised as the publisher's own, so the first write replaces it.
 
@@ -448,7 +451,7 @@ python publish_prices.py --write-sheets \
   --output-root "$weekly_run/publications"
 ```
 
-**Does:** backs up existing pilot tabs locally, writes the three data tabs, records the publication, then verifies values, links and PHP formats by readback.
+**Does:** backs up existing pilot tabs locally, writes the four data tabs (comparison, summary, history, review), records the publication, then verifies values, links, PHP formats and, on the summary, cell notes and italics by readback.
 
 Finish with `Publication SUCCESS` and zero readback issues. Keep the run folder. This publisher does not update `raw`, catalog/mappings, or either Top 100 tab. Its backup is per-pilot-tab JSON, not a full workbook copy.
 
@@ -464,8 +467,8 @@ Finish with `Publication SUCCESS` and zero readback issues. Keep the run folder.
 | `discover_products.py --preview` | No | No | Query plan | No |
 | `discover_products.py --live --collect` | No | Yes | Evidence, observations, matches, store backup | No |
 | `track_prices.py` | No | No | Reports and pending versioned matches in the store | No |
-| `publish_prices.py --preview` | Four pilot tabs | No | Publication plan | No |
-| `publish_prices.py --write-sheets` | Four pilot tabs | No | Plan, backups, publication report | **Four pilot tabs only** |
+| `publish_prices.py --preview` | Five pilot tabs | No | Publication plan | No |
+| `publish_prices.py --write-sheets` | Five pilot tabs | No | Plan, backups, publication report | **Five pilot tabs only** |
 | `run_phase1.py --write-sheets` (optional) | `raw` and P1 decision/log inputs | No | New sales outputs | **Legacy P1 outputs** |
 
 ## 6. Folder structure

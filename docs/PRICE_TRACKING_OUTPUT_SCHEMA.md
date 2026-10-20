@@ -97,10 +97,11 @@ as PHP, and links are cell links on the full URL.
 
 | Tab | One row per | Columns |
 |---|---|---|
-| `PILOT_PRICE_COMPARISON` | Pilot configuration (verified-list order) | Rank, target ID, brand, series, model, screen (in), CPU family, RAM (GB), storage (GB). For each retailer (DataBlitz, Laptop Factory, PC Express, PC Central, Octagon): price (PHP), product link, status, observed (Asia/Singapore). Then the lowest observed price and retailer(s), the lowest in-stock price and retailer(s), comparable retailers, Shopee sales snapshot extract date, reporting week, week status, and report cutoff (Asia/Singapore). Publisher `pilot-sheets-2` (2026-10-15); a tab still carrying the `pilot-sheets-1` header is recognized as its own. |
+| `PILOT_PRICE_COMPARISON` | Pilot configuration (verified-list order) | Rank, target ID, brand, series, model, screen (in), CPU family, RAM (GB), storage (GB). For each retailer (DataBlitz, Laptop Factory, PC Express, PC Central, Octagon): price (PHP), product link, status, observed (Asia/Singapore). Then the lowest observed price and retailer(s), the lowest in-stock price and retailer(s), comparable retailers, Shopee sales snapshot extract date, reporting week, week status, and report cutoff (Asia/Singapore). Publisher `pilot-sheets-2` (2026-10-15); a tab still carrying the `pilot-sheets-1` header is recognized as its own. `pilot-sheets-5` (2026-10-20) adds the five Shopee snapshot columns after the storage column and names the minimums *retailer* minimums ("Lowest retailer price (PHP)", "Lowest in-stock retailer price (PHP)", …); the `pilot-sheets-2` to `-4` headers are recognized and migrated. |
+| `PILOT_PRICE_SUMMARY` | Pilot configuration (the comparison's order and scope) | Exactly seven visible columns: `Laptop` (brand and model · screen · CPU family · installed RAM/storage, extended only where needed to tell configurations apart), `Shopee`, `DataBlitz`, `Laptop Factory`, `PC Express`, `PC Central`, `Octagon`. Every price is the comparison's own cell (Shopee: the snapshot price; retailers: the selected price), as a PHP number; a blank stays blank. Context is in cell notes; listed-spec prices are italic. Publisher `pilot-sheets-5` (2026-10-20); see below. |
 | `PILOT_PRICE_HISTORY` | Observation of a pilot target, or a non-exact observation naming a pilot candidate | Week, retrieval time (Asia/Singapore and UTC), rank, target ID (exact matches only), candidate target(s) (non-exact only), model, retailer, product link (exact only), observed page (non-exact, unlinked), observed and regular price, price type, availability, bundle flag, match status and reasons, outcome, comparison status and reasons, change against the previous comparable observation, latest-for-offer flag, observation ID. |
 | `PILOT_PRICE_REVIEW` | Pilot review item | Category (`Matching problem` or `Matched, excluded from comparison`), review reason, details, week, retrieval time, rank and target ID (exact only) or candidates, retailer, product link or unconfirmed page, observed price, availability, match and comparison statuses and reasons, observation ID. |
-| `PILOT_PRICE_RUN_LOG` | Publication (keyed by publication ID; a repeat updates its row and attempt count) | Status, first and last publication time, reporting week and status, report cutoff, collection start and finish, scope and outcome counts, Shopee sales-period label and run ID, tabs written, readback result, notes, report folder, selected-list, catalog, matching-context, input, and published-content fingerprints, publisher version. |
+| `PILOT_PRICE_RUN_LOG` | Publication (keyed by publication ID; a repeat updates its row and attempt count) | Status, first and last publication time, reporting week and status, report cutoff, collection start and finish, scope and outcome counts, Shopee sales-period label and run ID, tabs written, readback result, notes, report folder, selected-list, catalog, matching-context, input, and published-content fingerprints, publisher version. From `pilot-sheets-5`: summary rows, Shopee snapshot prices and the Shopee snapshot extract date, appended after the publisher version (earlier rows keep them blank). |
 
 Comparison status text:
 - `Comparable price` (`SELECTED`); when the match was not plain labeled specifications, the
@@ -129,12 +130,13 @@ Price cells without a comparable price have no value at all.
 | `weekly_price_series.csv` | One per selected configuration, retailer, and week in the history range | Weekly price status and price, representative offer, previous week's status and price, change, change status, and `representative_offer_changed`. |
 | `price_history.csv` | One per stored observation in the history window | Offer identity, retrieval time, report week, prices, availability, bundle flag, match status and reasons, selected-list membership, comparability status and reasons, `latest_for_offer_in_week`, previous comparable observation and price change, adapter version, page SHA-256, import batch, matching context, catalog SHA-256, and rule version. |
 | `price_review_queue.csv` | One per report-week observation that did not give a selected price | `MATCH_<status>`, `EXACT_TARGET_NOT_IN_SELECTED_LIST`, or `NOT_COMPARABLE`, with reasons. |
-| `configuration_source_ledger.csv` | One per selected configuration and contributing Shopee source | `model_id`, `shop_id`, `item_id`, names, GMV (USD) per period, whether the source is still mapped to the target, and the Shopee snapshot price (PHP) with its explicit sales-period label. |
+| `configuration_source_ledger.csv` | One per selected configuration and contributing Shopee source | `model_id`, `shop_id`, `item_id`, names, GMV (USD) per period, whether the source is still mapped to the target, and the Shopee snapshot price (PHP) with its explicit sales-period label. From 2026-10-20 also `shopee_price_role` (`SELECTED`, `TIED_NOT_SHOWN`, `HIGHER_PRICE`, `NOT_ELIGIBLE: <reason>`) and `shopee_listing_url`; every listing keeps its row. |
+| `shopee_price_selection.csv` | One per selected configuration (2026-10-20) | `rank`, `target_id`, `shopee_price_status`, the selected snapshot price (PHP), link, variation, item name, `model_id`, `shop_id`, `item_id`, eligible and priced source counts, distinct prices, `tied_model_ids`, excluded sources by reason, the explanation, the sales run, extract date and period label, and the rule. |
 | `price_tracking_run_summary.json` | One | Week window, status and label, `as_of`, policy, sales-snapshot labels, input SHA-256 values, selected-list and catalog fingerprints, matching context, store counts before/after, import results, and output counts. |
 
 **Requested fields.** Product fields map to `TARGET_MASTER` columns: `Brand`→`brand`, `Model`→`model`, `Screen Size`→`screen_size_in` (inches), `Resolution`, `Display Type`, `Refresh Rate` (Hz), `CPU_Brand`, `CPU_Series`, `CPU_Generation`, `CPU_Cores`, `RAM_Capacity` (GB), `RAM_Type`, `Storage_Capacity` (GB), `Storage_Type`, `GPU Type`, `GPU_Brand`, `GPU_Model`, `VRAM`, `OS`, `Battery_Capacity`, `Build_Material`. `Series` is added as readable context. Values are the catalog's exact text; blank stays blank.
 
-**Shopee fields.** A configuration can have several Shopee sources, so `Item_ID`, `Model_ID`, `Shop_ID`, and the per-listing `Current_Price` are not collapsed into one listing. The comparison row carries `Shopee_Source_Count`, all `Shopee_Source_Model_IDs`, and `Shopee_Total_GMV_USD` (M-1 + MTD of the contributing sources). Each listing's IDs, GMV, and snapshot price are in `configuration_source_ledger.csv`. These values come from the Phase 4 sales snapshot run `20260928T112328+0800`: M-1 2026-08 (full month) and MTD 2026-09 as extracted on 2026-09-28. They are historical and are not current October marketplace prices.
+**Shopee fields.** A configuration can have several Shopee sources, so `Item_ID`, `Model_ID`, `Shop_ID`, and the per-listing `Current_Price` are not collapsed into one listing in the ledger. From 2026-10-20 the comparison also shows one dated snapshot price per configuration, chosen by a fixed rule (see "Shopee snapshot prices" below). The comparison row carries `Shopee_Source_Count`, all `Shopee_Source_Model_IDs`, and `Shopee_Total_GMV_USD` (M-1 + MTD of the contributing sources). Each listing's IDs, GMV, and snapshot price are in `configuration_source_ledger.csv`. These values come from the Phase 4 sales snapshot run `20260928T112328+0800`: M-1 2026-08 (full month) and MTD 2026-09 as extracted on 2026-09-28. They are historical and are not current October marketplace prices.
 
 ### Unassigned pilot observations (2026-10-13)
 
@@ -283,3 +285,82 @@ Decision record: [DECISIONS.md](DECISIONS.md#listed-spec-comparison-for-broad-fa
 - `coverage.csv`: `LISTED_SPEC_PRICE_AVAILABLE`, `LISTED_SPEC_PRICE_EXCLUDED`, `price_basis`.
 - The matching-rules version is `five-field-exact+listed-spec-fallback/2026-10-20`, and
   `listed_spec.py` is part of the rules fingerprint.
+
+## Shopee snapshot prices and `PILOT_PRICE_SUMMARY` (2026-10-20)
+
+Decision record: [DECISIONS.md](DECISIONS.md#shopee-snapshot-prices-and-the-price-summary-tab-2026-10-20).
+
+**Selection rule** (`shopee_snapshot.py`): the *lowest eligible mapped-listing snapshot price*.
+
+- Eligible listings are the configuration's contributing Shopee sources (the selected list's
+  contribution ledger) that `SOURCE_MODEL_MAP` still maps to the target
+  (`currently_mapped_to_target` is `True`).
+- A valid price has price status `PRICE_OK` and is a finite PHP amount greater than zero.
+  `PRICE_CONFLICT` (several month-to-date prices), blank, zero, negative or unreadable prices,
+  and a missing sales ranking are never used, guessed or averaged.
+- The lowest valid price is shown. On a tie the listing with the higher ranking GMV (USD) is
+  shown, then the lower `model_id`; all tied `model_id`s are recorded.
+- Price, link, variation and IDs come from that one ledger row. The link is
+  `https://shopee.ph/product/<shop_id>/<item_id>`, built only from numeric IDs. It opens the
+  product page and does **not** select the variation, so the variation and `model_id` are shown
+  separately.
+- Configuration statuses: `SNAPSHOT_PRICE`, `NO_MAPPED_SOURCE`, `NO_VALID_SNAPSHOT_PRICE`,
+  `SALES_RANKING_NOT_SUPPLIED`. In the comparison, `NO_CONTRIBUTING_SOURCE` and
+  `SHOPEE_SNAPSHOT_NOT_SUPPLIED` also appear. A blank price always has a status and an
+  explanation.
+
+**`weekly_price_comparison.csv`** appends `Shopee_Price` (PHP, two decimals),
+`Shopee_Listing_URL`, `Shopee_Variation`, `Shopee_Item_Name`, `Shopee_Model_ID`,
+`Shopee_Shop_ID`, `Shopee_Item_ID`, `Shopee_Price_Status`, `Shopee_Price_Detail`,
+`Shopee_Snapshot_Date` (the extract date, e.g. `2026-09-28`) and `Shopee_Snapshot_Label` (sales
+run and period).
+
+- The Shopee price is a historical snapshot. It is never a current price, its stock is not
+  verified, and it is never part of `Lowest_Price`, `Lowest_In_Stock_Price` or
+  `Comparable_Retailer_Count`, which stay retailer-only.
+- `price_tracking_run_summary.json` has a `shopee_snapshot_prices` section: the rule, extract
+  date, run ID, counts by status, ties, several-price configurations and listing roles.
+
+**Publisher (`pilot-sheets-5`).**
+
+- **`PILOT_PRICE_COMPARISON`.** After "Storage (GB)" come "Shopee price (PHP, snapshot)" (PHP
+  number), "Shopee listing link" (cell link), "Shopee variation" (name and `model_id`), "Shopee
+  price status" (rule or reason, plus "not a current price; stock not verified; the link opens
+  the product page, not the variation"), and "Shopee snapshot date" ("2026-09-28 (historical
+  Shopee sales extract; sales run …)").
+  - The minimum headers read "Lowest retailer price …" and "Lowest in-stock retailer price …".
+  - A report written before 2026-10-20 still publishes. Its Shopee cells say "Shopee snapshot
+    not in this report (generated before 2026-10-20)".
+  - Validation recomputes the selection from the report's `configuration_source_ledger.csv`
+    (fingerprinted) and refuses a price, `model_id`, link or date that disagrees.
+- **`PILOT_PRICE_SUMMARY`.** A minimal grid with seven columns: Laptop, Shopee, DataBlitz,
+  Laptop Factory, PC Express, PC Central, Octagon.
+  - **Rows.** One per configuration, in the comparison's order and scope.
+  - **Prices.** Every cell is the comparison's own cell. `build_plan` refuses the publication
+    if any summary price differs from the comparison in value, kind or format. Nothing is
+    reselected or rematched. No cheapest-price column mixes the Shopee snapshot with retailer
+    observations.
+  - **Cell notes.**
+    - Shopee: "HISTORICAL SHOPEE SNAPSHOT — not a current price; stock not verified", the
+      extract date and sales run, the rule and any tie, the listing, the variation with
+      `model_id`, `shop_id` and `item_id`, and the link.
+    - Retailer price: exact product or "LISTED-SPEC MATCH — not an exact product match" with
+      the offer's own details, stock (out-of-stock prices kept under the owner policy), bundle
+      offers, disagreement warnings, other warnings in words, observation time and offer link.
+    - Blank: the comparison's explanation and the first recheck link (unconfirmed, not a
+      price) with "+N more in PILOT_PRICE_REVIEW".
+  - **Header notes.** They explain the Shopee snapshot basis and the italic listed-spec
+    convention, and point to PILOT_PRICE_COMPARISON and PILOT_PRICE_REVIEW for the evidence.
+  - **Layout.**
+    - The header row and the Laptop column are frozen.
+    - The Laptop column is 340 px and wraps; the six price columns are 125 px and right-aligned.
+    - The header is shaded, and data rows have subtle banding (every second row).
+    - The layout is reset on the whole tab at each publication, so a shorter publication
+      leaves no stale bands.
+  - **Notes on this tab only.** Notes and italics are written, cleared and read back on this
+    tab only. The other tabs keep notes that people add.
+- **Run log.** "Summary rows", "Shopee snapshot prices" and "Shopee snapshot extract date" are
+  appended. A run log with the `pilot-sheets-4` header is still the publisher's.
+- **Plan files.** Preview and write folders hold `plan_PILOT_PRICE_SUMMARY.csv` (values) and
+  `plan_PILOT_PRICE_SUMMARY_notes.csv` (cell, column, row label, value, italic flag and note).
+  The publication report counts `planned_cell_notes`.

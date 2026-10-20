@@ -385,3 +385,37 @@ Report: `data/output/listed_spec_2026-10-20/LISTED_SPEC_REPORT.md`.
 - Bounded fresh sample (21 targets, 290 read-only requests, scratch store): 16 exact-product and
   10 listed-spec cells; 14 of 21 configurations priced; protected exact-code cases unchanged;
   publisher preview (read-only) accepted the report.
+
+## Shopee snapshot prices and `PILOT_PRICE_SUMMARY` (2026-10-20)
+
+Decision: [DECISIONS.md](DECISIONS.md#shopee-snapshot-prices-and-the-price-summary-tab-2026-10-20).
+Work folder: `data/output/shopee_summary_2026-10-20/`.
+
+- **Shopee snapshot price.** The lowest eligible mapped-listing snapshot price is carried
+  through:
+  - selection with provenance (`shopee_snapshot.py`), `weekly_price_comparison.csv`, the ledger
+    roles, `shopee_price_selection.csv`, and the run summary;
+  - publisher validation, which recomputes the selection from the fingerprinted ledger;
+  - the Sheets columns (`pilot-sheets-5`).
+- **Summary tab.** `PILOT_PRICE_SUMMARY` is a grid of exactly seven columns, with cell notes,
+  italic listed-spec prices, frozen header and Laptop column, widths and banding. The Cell model
+  gains notes and italics, which are serialized, fingerprinted, backed up, cleared and read back
+  on that tab. The run log appends summary and Shopee columns.
+- **Latest Top 100 run regenerated offline** (`top100_listed_spec_20261020T072033Z`; scratch
+  copy of its store, original cutoff).
+  - The retailer side is identical to the run's report: 28 configurations and 50 cells priced
+    (39 exact, 11 listed-spec), with unchanged minimums and counts.
+  - Shopee snapshot prices for 100 of 100 configurations, 0 missing and 0 conflicting. All 193
+    contributing listings are `PRICE_OK` and still mapped. 19 configurations have a tied lowest
+    price and 24 have several distinct prices.
+  - For 8 configurations the snapshot is below the retailer minimum. The minimum stays
+    retailer-only.
+- **Offline plan and dry run.**
+  - The summary agrees with the comparison cell for cell. It has 7 columns and 100 rows, 11
+    italic listed-spec cells, and 95 blank cells with recheck links.
+  - The dry run publishes to a fake spreadsheet seeded with the run's pilot-sheets-4
+    publication: migration, ownership, guards and readback all pass (`SUCCESS`, 0 issues).
+- **Validation.** Tests went from 1703 to 1729 (+26 in `tests/test_shopee_summary.py`); Ruff
+  and `git diff --check` pass.
+- **Not done.** No Shopee or retailer request, no Sheets access, no history, catalog, mapping
+  or approval change, and no commit.

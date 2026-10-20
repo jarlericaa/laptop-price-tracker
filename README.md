@@ -218,9 +218,10 @@ python publish_prices.py --preview --report-dir <reviewed report folder> --pilot
 python publish_prices.py --write-sheets --report-dir <reviewed report folder> --pilot-scope <scope.csv>
 ```
 
-`publish_prices.py` publishes **reviewed** pilot reports to four dedicated tabs of the configured
-spreadsheet: `PILOT_PRICE_COMPARISON` (prices with clickable retailer links), `PILOT_PRICE_HISTORY`,
-`PILOT_PRICE_REVIEW`, and `PILOT_PRICE_RUN_LOG`. It validates every input before any Sheets
+`publish_prices.py` publishes **reviewed** pilot reports to five dedicated tabs of the configured
+spreadsheet: `PILOT_PRICE_COMPARISON` (prices with clickable retailer links and the dated, historical
+Shopee snapshot price), `PILOT_PRICE_SUMMARY` (the same prices in seven columns, context in cell
+notes), `PILOT_PRICE_HISTORY`, `PILOT_PRICE_REVIEW`, and `PILOT_PRICE_RUN_LOG`. It validates every input before any Sheets
 access. Preview is read-only. A write backs up existing pilot tabs locally, replaces their content
 (so repeats never duplicate rows), and reports `SUCCESS` only after a full cell readback. It never
 collects, rematches, or touches the history store, `raw`, the catalog, or other tabs. The first

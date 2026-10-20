@@ -85,9 +85,10 @@ Publish only after the cycle's reports have been reviewed and reconciled. Never 
 2. Preview:
    `python publish_prices.py --preview --report-dir <reviewed reports> --pilot-scope <scope>`.
    Check the reporting week, cutoff, Shopee label, scope count, outcome counts, and that each of
-   the four tabs is new or already holds this publisher's header.
+   the five tabs is new or already holds this publisher's header.
 3. Publish: the same command with `--write-sheets`. It backs up existing pilot tabs locally,
-   replaces `PILOT_PRICE_COMPARISON`, `PILOT_PRICE_HISTORY`, and `PILOT_PRICE_REVIEW`, verifies
+   replaces `PILOT_PRICE_COMPARISON`, `PILOT_PRICE_SUMMARY`, `PILOT_PRICE_HISTORY`, and
+   `PILOT_PRICE_REVIEW`, verifies
    every cell by readback, and records `SUCCESS` in `PILOT_PRICE_RUN_LOG` only after readback
    passes.
 4. If the status is `PARTIAL_FAILURE` or `READBACK_FAILED`, read

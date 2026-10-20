@@ -250,8 +250,9 @@ python publish_prices.py --write-sheets \
   - history stays within the cutoff, and collected observations are present in the history.
 
   Any issue stops the run and lists every problem.
-- **Destination.** Exactly four tabs in the configured spreadsheet: `PILOT_PRICE_COMPARISON`,
-  `PILOT_PRICE_HISTORY`, `PILOT_PRICE_REVIEW`, `PILOT_PRICE_RUN_LOG`. Names are matched exactly.
+- **Destination.** Exactly five tabs in the configured spreadsheet: `PILOT_PRICE_COMPARISON`,
+  `PILOT_PRICE_SUMMARY` (2026-10-20), `PILOT_PRICE_HISTORY`, `PILOT_PRICE_REVIEW`,
+  `PILOT_PRICE_RUN_LOG`. Names are matched exactly.
   Every write request is checked against those tabs' sheet IDs and allowed operations. An existing
   destination tab whose header was not written by this publisher is refused. `raw`, the catalog
   tabs, `P1_TOP_100_CONFIGURATIONS`, and the `P1_*` outputs are never read or written.
@@ -265,18 +266,19 @@ python publish_prices.py --write-sheets \
      links, and bold. Other destination formatting is kept. It adds a frozen header row and a
      filter.
   4. Reads every cell back and compares values, links, and PHP formats, and checks that no stray
-     cells remain.
+     cells remain. On `PILOT_PRICE_SUMMARY` it also compares cell notes and italics, and a
+     stray note counts as a stray cell.
   5. Updates the run-log row to `SUCCESS`, `READBACK_FAILED`, or `PARTIAL_FAILURE`.
 
   Only `SUCCESS` exits with `0`. Text is sent as literal strings, never formulas. Prices are
   numbers formatted as PHP. Links are cell links on the full URL text, so variant parameters stay
   intact.
-- **Repeats** replace the four tabs' content and update the same run-log row (keyed by a
+- **Repeats** replace the five tabs' content and update the same run-log row (keyed by a
   publication ID derived from the input fingerprints; its attempt count increases), so history is
   never duplicated. The observation store is not opened.
 - **Recovery.** A failure part-way records which tabs were written, in the run log and in
   `data/output/sheet_publications/<UTC time>_write/publication_report.json`. Fix the cause and
-  rerun the same command; it replaces all four tabs. Each request has an HTTP timeout, so a
+  rerun the same command; it replaces all five tabs. Each request has an HTTP timeout, so a
   stalled network call fails rather than hangs.
 - **Backups.** The legacy writer's rule is a separate copy of the whole spreadsheet. The service
   account has only the Sheets scope, and copying a spreadsheet needs Drive access. The publisher
@@ -565,3 +567,32 @@ status remains visible beside selected prices in the comparison tab and in histo
 price can be the lowest price. Other price eligibility rules continue to apply. Regenerate saved
 reports under the new policy in a new directory, review the selections, then preview/publish.
 The selected observation ID determines the status shown, not the status of another offer.
+
+### `PILOT_PRICE_SUMMARY` and the Shopee snapshot price (`pilot-sheets-5`, 2026-10-20)
+
+- **What it is.** A minimal price grid with seven columns: Laptop, Shopee, DataBlitz, Laptop
+  Factory, PC Express, PC Central, Octagon.
+  - It is written whenever the detailed comparison is published, from the same rows in the same
+    order and scope.
+  - Every price is the comparison's own cell, and the plan is refused if any summary price
+    differs from it.
+  - Blanks stay blank, and prices are PHP numbers. There is no cheapest-price column.
+- **Shopee.** The value is a historical snapshot: the lowest eligible mapped-listing price of
+  the sales extract, dated in the header note and in every cell note. Each cell note names the
+  listing, the variation with its `model_id`, and the product-page link (which does not select
+  the variation).
+- **Retailers.** Listed-spec prices are italic. Notes give the basis, stock, bundle terms,
+  warnings, observation time and offer link. A blank's note gives the reason and a recheck link
+  when there is one.
+- **Layout.**
+  - The header row and the Laptop column are frozen. The Laptop column is wide and wraps; the
+    price columns are equal and right-aligned.
+  - The header is shaded and data rows are lightly banded.
+  - Formats are reset on the whole tab at each write, so a smaller scope leaves no stale bands,
+    notes or prices.
+- **Existing spreadsheets.**
+  - A missing summary tab is created. A summary tab with unrelated content is refused before
+    any write.
+  - The `pilot-sheets-4` comparison and run-log headers are recognised and migrated.
+- **Plans.** Preview and write folders contain `plan_PILOT_PRICE_SUMMARY.csv` and
+  `plan_PILOT_PRICE_SUMMARY_notes.csv`.

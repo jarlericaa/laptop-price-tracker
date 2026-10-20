@@ -483,3 +483,44 @@ useful price comparison. Code: `src/laptop_tracker/listed_spec.py`.
     that observation.
 - **Catalog reconciliation** stays useful (specific identities make exact matches), but it is no
   longer a prerequisite for a broad-family comparison. Catalog corrections are not applied.
+
+## Shopee snapshot prices and the price summary tab (2026-10-20)
+
+Requested by the owner on 2026-10-20. The rules below are implementation defaults set within
+that request. Code: `src/laptop_tracker/shopee_snapshot.py` and `sheet_publication.py`
+(`pilot-sheets-5`).
+
+- **Price.** The *lowest eligible mapped-listing snapshot price*: the lowest valid positive PHP
+  snapshot price among the configuration's contributing Shopee listings still mapped to the
+  target.
+  - The price must have status `PRICE_OK`. `PRICE_CONFLICT`, blank, zero, negative or
+    unreadable prices are never used, guessed or averaged.
+  - Ties show the higher-GMV listing, then the lower `model_id`. Tied listings are recorded in
+    `shopee_price_selection.csv`, and every listing keeps its ledger row and role.
+  - A blank always carries a status and an explanation.
+- **Dating.** The price is dated by its sales extract (`2026-09-28`, run
+  `20260928T112328+0800`) wherever it appears. It is labelled "historical", "not a current
+  price" and "stock not verified".
+- **Retailer side.** The price never enters a retailer minimum, the in-stock minimum or the
+  comparable-retailer count. Those columns are renamed "Lowest retailer price …" and "Lowest
+  in-stock retailer price …"; their values are unchanged.
+- **Link.** `https://shopee.ph/product/<shop_id>/<item_id>`, built from verified numeric IDs
+  only. It opens the product page, not the variation, so the variation and `model_id` are shown
+  beside it.
+- **`PILOT_PRICE_SUMMARY`.** A fifth publisher tab: Laptop, Shopee and the five retailers.
+  - **Prices.** Every price is the detailed comparison's own cell, and the publisher refuses
+    any difference. Matching and offer selection are not repeated. There is no cheapest-price
+    column, because one would mix the historical Shopee snapshot with this week's retailer
+    observations.
+  - **Notes, not columns.** Context goes in cell notes (snapshot date and source listing;
+    exact or listed-spec basis; stock; bundle; disagreement warnings; blank-cell explanation
+    and recheck link). Listed-spec prices are italic and their notes say "not an exact product
+    match".
+  - **Notes on this tab only.** Notes and italics are written, cleared and read back on the
+    summary tab only, so notes people add to the other publisher tabs are kept.
+- **Compatibility.**
+  - The `pilot-sheets-2` to `-4` comparison headers and the `pilot-sheets-4` run-log header
+    are still the publisher's own and are migrated on the next write.
+  - A spreadsheet without the summary tab gets one. A summary tab with unrelated content is
+    refused before any write.
+  - Reports written before 2026-10-20 still publish, with "Shopee snapshot not in this report".
