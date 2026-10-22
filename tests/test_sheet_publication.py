@@ -98,7 +98,7 @@ class FakeSpreadsheet:
         next_id = max((s["id"] for s in self.sheets.values()), default=999) + 1
         sheet = {"title": title, "id": next_id, "rows": rows, "cols": cols,
                  "grid": {}, "frozen": 0, "frozen_columns": 0, "filter": None, "widths": {},
-                 "layout": {}}
+                 "heights": {}, "layout": {}, "gridlines_hidden": False}
         self.sheets[title] = sheet
         return sheet
 
@@ -129,9 +129,12 @@ class FakeSpreadsheet:
                 sheet["cols"] = grid.get("columnCount", sheet["cols"])
                 sheet["frozen"] = grid.get("frozenRowCount", sheet["frozen"])
                 sheet["frozen_columns"] = grid.get("frozenColumnCount", sheet["frozen_columns"])
+                sheet["gridlines_hidden"] = grid.get("hideGridlines", sheet["gridlines_hidden"])
             elif kind == "setBasicFilter":
                 rng = payload["filter"]["range"]
                 by_id[rng["sheetId"]]["filter"] = rng
+            elif kind == "clearBasicFilter":
+                by_id[payload["sheetId"]]["filter"] = None
             elif kind == "updateCells" and "range" in payload:
                 fields = payload["fields"]
                 for cell in by_id[payload["range"]["sheetId"]]["grid"].values():
@@ -181,9 +184,11 @@ class FakeSpreadsheet:
                         layout.setdefault((r, c), {}).update(copy.deepcopy(fmt))
             elif kind == "updateDimensionProperties":
                 rng = payload["range"]
-                assert rng["dimension"] == "COLUMNS"
+                sizes = by_id[rng["sheetId"]]["widths" if rng["dimension"] == "COLUMNS"
+                                              else "heights"]
+                assert rng["dimension"] in {"COLUMNS", "ROWS"}
                 for c in range(rng["startIndex"], rng["endIndex"]):
-                    by_id[rng["sheetId"]]["widths"][c] = payload["properties"]["pixelSize"]
+                    sizes[c] = payload["properties"]["pixelSize"]
             else:
                 raise AssertionError(f"unexpected request {kind}")
         if self.after_batch:
@@ -200,6 +205,7 @@ class FakeSpreadsheet:
             {"values": [copy.deepcopy(cells.get((r, c), {})) for c in range(width)]}
             for r in range(height)
         ]
+        columns = max([width, *(c + 1 for c in sheet["widths"])])
         return {
             "sheets": [
                 {
@@ -208,9 +214,18 @@ class FakeSpreadsheet:
                         "title": title,
                         "gridProperties": {"rowCount": sheet["rows"],
                                            "columnCount": sheet["cols"],
-                                           "frozenRowCount": sheet["frozen"]},
+                                           "frozenRowCount": sheet["frozen"],
+                                           "frozenColumnCount": sheet["frozen_columns"],
+                                           "hideGridlines": sheet["gridlines_hidden"]},
                     },
-                    "data": [{"rowData": rows}],
+                    **({"basicFilter": {"range": sheet["filter"]}} if sheet["filter"] else {}),
+                    "data": [{
+                        "rowData": rows,
+                        "columnMetadata": [{"pixelSize": sheet["widths"].get(c, 100)}
+                                           for c in range(columns)],
+                        "rowMetadata": [{"pixelSize": sheet["heights"].get(r, 21)}
+                                        for r in range(height)],
+                    }],
                 }
             ]
         }

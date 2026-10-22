@@ -28,8 +28,11 @@ from test_sheet_publication import (
 
 from laptop_tracker.price_tracking import SOURCE_LEDGER_COLUMNS
 from laptop_tracker.sheet_publication import (
+    BAND_BACKGROUND,
     COMPARISON_TAB,
     DATA_TABS,
+    FILLS,
+    NAVY,
     PUBLISHER_TABS,
     RUN_LOG_HEADER,
     RUN_LOG_HEADER_PILOT_SHEETS_4,
@@ -38,6 +41,7 @@ from laptop_tracker.sheet_publication import (
     SHOPEE_NOT_IN_REPORT,
     SUMMARY_HEADER,
     SUMMARY_TAB,
+    WHITE,
     Cell,
     PublicationInputError,
     TabPlan,
@@ -418,11 +422,16 @@ def test_the_summary_is_created_beside_existing_publisher_tabs(shopee_world, cap
     assert fake.mutations[0] == f"add_worksheet:{SUMMARY_TAB}"
     sheet = fake.sheets[SUMMARY_TAB]
     assert (sheet["frozen"], sheet["frozen_columns"]) == (1, 1)
-    assert sheet["widths"][0] > sheet["widths"][1] == sheet["widths"][6]
+    assert sheet["widths"][0] > sheet["widths"][1] > sheet["widths"][2] == sheet["widths"][6]
     assert sheet["layout"][(1, 0)]["wrapStrategy"] == "WRAP"
     assert sheet["layout"][(1, 4)]["horizontalAlignment"] == "RIGHT"
-    assert "backgroundColor" in sheet["layout"][(2, 0)]
-    assert "backgroundColor" not in sheet["layout"][(1, 0)]
+    # House layout (pilot-sheets-6): every second data row is banded; the Laptop column is
+    # white otherwise, and the price columns keep their tint on banded rows too.
+    assert sheet["layout"][(2, 0)]["backgroundColor"] == BAND_BACKGROUND
+    assert sheet["layout"][(1, 0)]["backgroundColor"] == WHITE
+    assert sheet["layout"][(2, 3)]["backgroundColor"] == FILLS["retailer"]
+    assert sheet["layout"][(0, 0)]["textFormat"]["foregroundColor"] == WHITE
+    assert sheet["layout"][(0, 0)]["backgroundColor"] == NAVY
     assert set(latest_report(shopee_world)["tabs_written"]) == set(PUBLISHER_TABS)
 
 
@@ -438,8 +447,9 @@ def test_preview_lists_the_summary_and_writes_its_notes_plan(shopee_world, capsy
     with (folder / f"plan_{SUMMARY_TAB}_notes.csv").open(encoding="utf-8") as handle:
         notes = list(csv.DictReader(handle))
     assert len(notes) == 7 + 7 * 6
+    # The overview (pilot-sheets-6) notes its twelve headers and each row's target identity.
     assert json.loads((folder / "publication_report.json").read_text())[
-        "planned_cell_notes"] == {SUMMARY_TAB: 49}
+        "planned_cell_notes"] == {SUMMARY_TAB: 49, "PILOT_PRICE_OVERVIEW": 12 + 7}
 
 
 def test_a_summary_tab_with_unrelated_content_is_refused(shopee_world, capsys) -> None:

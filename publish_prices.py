@@ -14,17 +14,24 @@ sys.path.insert(0, str(Path(__file__).resolve().parent / "src"))
 
 from laptop_tracker.sheet_publication import (
     DATA_TABS,
+    OVERVIEW_TAB,
     PUBLISHER_TABS,
+    PUBLISHER_VERSION,
     RUN_LOG_HEADER,
     RUN_LOG_TAB,
     SUMMARY_TAB,
     DestinationError,
     PublicationInputError,
+    adoptable,
     build_plan,
-    check_ownership,
+    destination_problems,
+    displayed_differences,
     load_pilot_report,
     publish,
     read_tab,
+    rollback,
+    snapshot_tab,
+    write_displayed_csv,
     write_plan_csv,
     write_plan_notes_csv,
 )
@@ -37,25 +44,38 @@ HTTP_TIMEOUT_SECONDS = (15.0, 90.0)  # (connect, read/send)
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Publish reviewed Phase 10 pilot price reports (from track_prices.py) to five "
+            "Publish reviewed Phase 10 pilot price reports (from track_prices.py) to six "
             "dedicated tabs: PILOT_PRICE_COMPARISON, PILOT_PRICE_SUMMARY (a minimal price grid "
-            "of the comparison's own prices), PILOT_PRICE_HISTORY, PILOT_PRICE_REVIEW and "
-            "PILOT_PRICE_RUN_LOG. --preview validates and inspects the destination read-only; "
-            "--write-sheets backs up existing publisher tabs locally, replaces their content, "
-            "and verifies every cell by readback. Never fetches retailer pages, reruns matching, "
-            "imports observations, reads raw, or writes any other tab."
+            "of the comparison's own prices), PILOT_PRICE_OVERVIEW (rank, specifications and "
+            "the same prices), PILOT_PRICE_HISTORY, PILOT_PRICE_REVIEW and PILOT_PRICE_RUN_LOG. "
+            "--preview validates and inspects the destination read-only; --write-sheets saves a "
+            "full local snapshot of the existing publisher tabs, replaces their content, and "
+            "verifies every cell by readback; --rollback restores the data tabs from such a "
+            "snapshot. Never fetches retailer pages, reruns matching, imports observations, "
+            "reads raw, or writes any other tab."
         )
     )
     mode = parser.add_mutually_exclusive_group(required=True)
     mode.add_argument("--preview", action="store_true", help="Validate and plan; no writes.")
     mode.add_argument(
-        "--write-sheets", action="store_true", help="Publish to the five pilot tabs."
+        "--write-sheets", action="store_true", help="Publish to the six pilot tabs."
+    )
+    mode.add_argument(
+        "--rollback", type=Path, metavar="PUBLICATION_DIR",
+        help="Restore the data tabs backed up in an earlier --write-sheets publication folder "
+             "(its backup_*.json snapshots). The run log is not rewritten.",
     )
     parser.add_argument(
-        "--report-dir", type=Path, required=True, help="Reviewed track_prices.py report folder."
+        "--report-dir", type=Path, help="Reviewed track_prices.py report folder."
     )
     parser.add_argument(
-        "--pilot-scope", type=Path, required=True, help="Authorized pilot configuration CSV."
+        "--pilot-scope", type=Path, help="Authorized pilot configuration CSV."
+    )
+    parser.add_argument(
+        "--adopt-overview", action="store_true",
+        help=f"Allow replacing the owner-built, formula-linked {OVERVIEW_TAB} (recognised by "
+             "its exact header) with the publisher-managed overview. Its full snapshot is saved "
+             "first; --rollback restores it. Without this option such a tab is refused.",
     )
     parser.add_argument(
         "--collection-dir",
@@ -73,7 +93,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=OUTPUT / "sheet_publications",
         help="Parent of the local publication report folder.",
     )
-    return parser.parse_args(argv)
+    args = parser.parse_args(argv)
+    if args.rollback is None and (args.report_dir is None or args.pilot_scope is None):
+        parser.error("--preview and --write-sheets require --report-dir and --pilot-scope.")
+    if args.rollback is not None and args.adopt_overview:
+        parser.error("--adopt-overview is for --preview or --write-sheets.")
+    return args
 
 
 def open_configured_spreadsheet(read_only: bool):
@@ -109,6 +134,8 @@ def main(
 ) -> int:
     args = parse_args(argv)
     published_at = (now or datetime.now(UTC)).astimezone(UTC)
+    if args.rollback is not None:
+        return run_rollback(args, published_at, spreadsheet_factory)
     mode = "write" if args.write_sheets else "preview"
     collection_dir = args.collection_dir
     if collection_dir is None and (args.report_dir.parent / "collection").is_dir():
@@ -194,6 +221,10 @@ def main(
         f"History observations requiring match review in this week: "
         f"{counts['week_matching_problems']}."
     )
+    local_report["offers_pricing_several_targets"] = report.shared
+    for offer, targets in report.shared.items():
+        print(f"Review: one offer prices {len(targets)} configurations ({', '.join(targets)}): "
+              f"{offer}. Allowed by the listed-spec policy; check for a duplicate target.")
     outside_scope = counts.get("collection_exact_outside_scope", 0)
     if outside_scope:
         print(
@@ -218,28 +249,55 @@ def main(
     expected = {title: plan.tabs[title].header for title in DATA_TABS} | {
         RUN_LOG_TAB: RUN_LOG_HEADER
     }
-    ownership = [p for t in PUBLISHER_TABS if (p := check_ownership(states[t], expected[t]))]
+    adopt = (OVERVIEW_TAB,) if args.adopt_overview else ()
+    ownership, adopted = destination_problems(states, expected, adopt)
     local_report["destination_before"] = {
-        title: {"exists": s.exists, "used_rows": s.used_rows} for title, s in states.items()
+        title: {"exists": s.exists, "used_rows": s.used_rows, "owner_built": adoptable(s)}
+        for title, s in states.items()
     }
+    local_report["publisher_version"] = PUBLISHER_VERSION
     print(f"Destination spreadsheet: {getattr(spreadsheet, 'title', '(configured)')}.")
     for title in PUBLISHER_TABS:
         state = states[title]
         before = f"exists, {state.used_rows} used rows" if state.exists else "new tab"
+        if adoptable(state):
+            before += (", owner-built layout (adopted)" if title in adopted
+                       else ", owner-built layout (needs --adopt-overview)")
         rows = (
             f"1 header + {len(plan.tabs[title].rows)} rows"
             if title in plan.tabs
             else "1 header + earlier publications + this publication"
         )
         print(f"  {title}: {before}; would write {rows}.")
+    if adoptable(states[OVERVIEW_TAB]):
+        # Migration preview: the owner-built overview as displayed now, against the plan.
+        try:
+            snapshot = snapshot_tab(spreadsheet, OVERVIEW_TAB) or {}
+        except Exception as exc:  # The plan is still valid; report the missing preview.
+            snapshot = {}
+            print(f"  (current {OVERVIEW_TAB} could not be read in full: {type(exc).__name__})")
+        if snapshot:
+            write_displayed_csv(run_dir / f"current_{OVERVIEW_TAB}.csv", snapshot)
+            migration = displayed_differences(snapshot, plan.tabs[OVERVIEW_TAB])
+            local_report["overview_migration"] = migration
+            (run_dir / "overview_migration.json").write_text(
+                json.dumps(migration, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+            print(f"  {OVERVIEW_TAB} migration: {migration['cells_compared']} displayed cells "
+                  f"compared, {migration['cells_differing']} differ from the plan; "
+                  f"{migration['current_formula_cells']} formula cell(s) and "
+                  f"{migration['current_note_cells']} note(s) would be replaced.")
     if ownership:
-        local_report |= {"status": "DESTINATION_REFUSED", "issues": ownership}
+        refused = [p for p in ownership if "--adopt-overview" not in p]
+        local_report |= {"status": "DESTINATION_REFUSED" if refused or args.write_sheets
+                         else "PREVIEW_ONLY_ADOPTION_REQUIRED", "issues": ownership}
         for problem in ownership:
-            print(f"Destination refused: {problem}.", file=sys.stderr)
-        return finish(1)
+            print(f"Destination {'refused' if refused or args.write_sheets else 'note'}: "
+                  f"{problem}.", file=sys.stderr)
+        if refused or args.write_sheets:
+            return finish(1)
 
     if not args.write_sheets:
-        local_report["status"] = "PREVIEW_ONLY"
+        local_report.setdefault("status", "PREVIEW_ONLY")
         print("Preview only: no Sheet was changed.")
         return finish(0)
 
@@ -251,6 +309,7 @@ def main(
             published_at=published_at,
             backup_dir=run_dir,
             progress=lambda step: print(f"  ... {step}", flush=True),
+            adopt=adopt,
         )
     except DestinationError as exc:
         local_report |= {"status": "DESTINATION_REFUSED", "error": str(exc)}
@@ -267,8 +326,10 @@ def main(
             for title, gid in outcome.tab_ids.items()
         },
         "backups": sorted(p.name for p in run_dir.glob("backup_*.json")),
+        "adopted_tabs": list(plan.adopted),
         "retry": "Rerun the same --write-sheets command after fixing the cause; it replaces "
-        "all five publisher tabs and updates this publication's run-log row.",
+        f"all {len(PUBLISHER_TABS)} publisher tabs and updates this publication's run-log row.",
+        "rollback": f"python publish_prices.py --rollback {run_dir}",
     }
     print(
         f"Publication {outcome.status}: tabs written {len(outcome.tabs_written)} of "
@@ -281,6 +342,43 @@ def main(
     for issue in outcome.readback_issues[:10]:
         print(f"  Readback: {issue}", file=sys.stderr)
     return finish(0 if outcome.status == "SUCCESS" else 1)
+
+
+def run_rollback(args, started_at: datetime, spreadsheet_factory) -> int:
+    """Restore the data tabs from a publication folder's snapshots (write scope)."""
+    source = args.rollback
+    if not source.is_dir() or not any(source.glob("backup_*.json")):
+        print(f"No backup_*.json snapshots in {source}; nothing was changed.", file=sys.stderr)
+        return 1
+    run_dir = args.output_root / f"{started_at.strftime('%Y%m%dT%H%M%S%fZ')}_rollback"
+    run_dir.mkdir(parents=True, exist_ok=False)
+    report: dict = {"mode": "ROLLBACK", "source": str(source),
+                    "started_at_utc": started_at.isoformat(timespec="seconds")}
+    factory = spreadsheet_factory or open_configured_spreadsheet
+    try:
+        spreadsheet = factory(False)
+        outcome = rollback(spreadsheet, source,
+                           progress=lambda step: print(f"  ... {step}", flush=True))
+    except DestinationError as exc:
+        report |= {"status": "DESTINATION_REFUSED", "error": str(exc)}
+        print(f"Rollback refused: {exc}", file=sys.stderr)
+        code = 1
+    except Exception as exc:  # Access problems are reported without credentials.
+        report |= {"status": "FAILED", "error": f"{type(exc).__name__}: {exc}"}
+        print(f"Rollback failed ({type(exc).__name__}: {exc}).", file=sys.stderr)
+        code = 1
+    else:
+        report |= {"status": outcome.status, "restored": outcome.restored,
+                   "skipped": outcome.skipped, "readback_issues": outcome.issues}
+        print(f"Rollback {outcome.status}: restored {', '.join(outcome.restored) or 'nothing'}.")
+        for line in outcome.skipped + outcome.issues[:10]:
+            print(f"  {line}")
+        code = 0 if outcome.status == "SUCCESS" else 1
+    report["finished_at_utc"] = datetime.now(UTC).isoformat(timespec="seconds")
+    (run_dir / "rollback_report.json").write_text(json.dumps(report, indent=2) + "\n",
+                                                  encoding="utf-8")
+    print(f"Local rollback report: {run_dir}.")
+    return code
 
 
 if __name__ == "__main__":
