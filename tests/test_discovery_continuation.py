@@ -40,9 +40,11 @@ OPI = f"https://{LF_HOST}/product/acer-aspire-ai-14-a14-11m-x3bp-opi/"
 def run(tmp_path: Path, routes, *extra: str, targets="TGT-000001", out="discovery"):
     transport = Routes(routes)
     output = tmp_path / out
+    # These scripted routes predate the identifier-spelling queries (2026-10-22): they are off
+    # unless a test passes --max-identifier-variant-queries itself (the later value wins).
     code = discover.main(
         ["--live", "--targets", targets, "--retailers", "laptop_factory", *inputs(tmp_path),
-         "--output-dir", str(output), *extra],
+         "--output-dir", str(output), "--max-identifier-variant-queries", "0", *extra],
         transport=transport, clock=FakeClock(),
     )
     return code, transport, output

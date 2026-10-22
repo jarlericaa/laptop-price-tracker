@@ -23,6 +23,7 @@ pass fetched pages in, so the shared ``Fetcher`` keeps its timeouts, retries, an
 
 from __future__ import annotations
 
+import dataclasses
 import html
 import json
 import re
@@ -362,9 +363,53 @@ TIER_FAMILY_SPECS = "5_FAMILY_WITH_SPECS"
 # Targets identified by a marketed product name (2026-10-19, second review): no code to search.
 TIER_PRODUCT_NAME = "1_PRODUCT_NAME"
 TIER_NAME_SPECS = "3_PRODUCT_NAME_WITH_SPECS"
+# Identifier spellings (2026-10-22). On 2026-10-20 the complete hyphenated code returned no
+# result at all on Laptop Factory and PC Express for listed products (B12UC-1432PH,
+# E1504FA-NJ1527W, X1404VA-EB2264WSM, 14-ep0445TU, G614PM-TS179WSM), whose titles or URLs show
+# the code. These tiers search the same verified code with spaces for punctuation, then its most
+# distinctive segment. They are search text only: the page must still show the complete code.
+TIER_MODEL_CODE_SPACED = "1_FULL_MODEL_CODE_SPACED"
+TIER_CODE_SEGMENT = "3_MODEL_CODE_SEGMENT"
+# A code target without a recorded series (2026-10-22): brand, recorded processor model and
+# capacities instead of the skipped family tiers.
+TIER_BRAND_CPU_SPECS = "5_BRAND_CPU_MODEL_WITH_SPECS"
 FALLBACK_TIERS = frozenset({TIER_PART_NUMBER, TIER_MODEL_SPECS, TIER_FAMILY, TIER_FAMILY_SPECS,
-                            TIER_NAME_SPECS})
+                            TIER_NAME_SPECS, TIER_MODEL_CODE_SPACED, TIER_CODE_SEGMENT,
+                            TIER_BRAND_CPU_SPECS})
 FIRST_TIERS = frozenset({TIER_MODEL_CODE, TIER_PRODUCT_NAME})
+# Tiers added to a job only when the complete code returned no result (discover_products.py).
+VARIANT_TIERS = frozenset({TIER_MODEL_CODE_SPACED, TIER_CODE_SEGMENT})
+_CODE_PUNCTUATION = re.compile(r"(?<=[0-9A-Za-z])[-/_.](?=[0-9A-Za-z])")
+
+
+def spaced_code(code: str) -> str:
+    """``B12UC-1432PH`` -> ``B12UC 1432PH``; ``""`` when the code has no inner punctuation."""
+    spaced = _CODE_PUNCTUATION.sub(" ", code.strip())
+    return spaced if spaced != code.strip() else ""
+
+
+def distinctive_segment(code: str) -> str:
+    """The most specific segment of a punctuated code that can stand alone as search text.
+
+    The last segment of at least five characters mixing letters and digits (``1432PH`` of
+    ``B12UC-1432PH``, ``ep0445TU`` of ``14-ep0445TU``, ``ANV15`` of ``ANV15-42-R2UH``), or ``""``.
+    It never replaces the code: a result is a candidate only when it shows the complete code.
+    """
+    segments = [s for s in _CODE_PUNCTUATION.split(code.strip()) if s]
+    if len(segments) < 2:
+        return ""
+    for segment in reversed(segments):
+        if len(segment) >= 5 and re.search(r"[A-Za-z]", segment) and re.search(r"\d", segment):
+            return segment
+    return ""
+
+
+def distinctive_cpu_model(cpu_model: str, cpu_series: str) -> str:
+    """A recorded processor model worth searching (``i3-1315U``), not a bare series name."""
+    value = clean_text(cpu_model or "")
+    if not value or value.casefold() == clean_text(cpu_series or "").casefold():
+        return ""
+    return value if re.search(r"\d{3,}", value) else ""
 
 
 def _capacity_words(ram: str, storage: str) -> str:
@@ -392,32 +437,62 @@ def _without_repeated_words(text: str) -> str:
     return " ".join(kept)
 
 
+def _query_key(text: str) -> str:
+    """Case, spacing and dash style are presentation: ``FA607NUQ-RL011W`` and the same code with
+    an en dash are one search. Punctuation that the store may tokenize differently (hyphen
+    versus space) is not folded: the spaced spelling is a deliberate second search."""
+    dashes = re.sub("[‐-―−]", "-", text)
+    return " ".join(dashes.casefold().split())
+
+
+# Query tiers of a recorded manufacturer code on a family- or product-name target.
+_RECORDED_CODE_TIERS = frozenset({TIER_MODEL_CODE, TIER_MODEL_CODE_SPACED, TIER_PART_NUMBER,
+                                  TIER_CODE_SEGMENT})
+
+
 def search_queries(
     target_id: str, retailer_id: str, *, model: str, part_number: str, brand: str, series: str,
-    core: Mapping[str, str] | None = None, kind: str = "MODEL_CODE",
+    core: Mapping[str, str] | None = None, kind: str = "MODEL_CODE", cpu_model: str = "",
+    recorded_code: str = "",
 ) -> list[SearchQuery]:
     """Ordered, de-duplicated queries for one target (see ``_code_queries`` for code targets).
 
     A target whose catalog model is a product or family name (``kind`` other than
-    ``MODEL_CODE``) has no code to search: its queries are the brand and name, the name with
-    processor and capacities, then the brand and series, each said to be a name, never a code.
-    No code is ever made up from a name. Identical query texts are sent once.
+    ``MODEL_CODE``) has no code to search from its name: its queries are the brand and name, the
+    name with processor and capacities, then the brand and series, each said to be a name, never
+    a code. No code is ever made up from a name.
+
+    A broad display name can still record one verified manufacturer code (``recorded_code``,
+    TARGET_MASTER ``manufacturer_model_code``: ``TUF A16`` records ``FA607NUQ-RL011W``). That
+    code is searched first, with the same spellings as a code target (2026-10-22), before any
+    name query; it is the only code ever taken from the catalog, never derived from a name.
+    Queries identical up to case, spacing and dash style are sent once.
     """
+    recorded = clean_text(recorded_code or "")
     if kind == "MODEL_CODE":
         queries = _code_queries(target_id, retailer_id, model=model, part_number=part_number,
-                                brand=brand, series=series, core=core)
+                                brand=brand, series=series, core=core, cpu_model=cpu_model)
     else:
-        queries = _name_queries(target_id, retailer_id, model=model, part_number=part_number,
-                                brand=brand, series=series, core=core or {})
+        queries = []
+        if recorded:
+            queries = [q for q in _code_queries(
+                target_id, retailer_id, model=recorded, part_number=part_number, brand=brand,
+                series="", core=core, cpu_model="")
+                if q.tier in _RECORDED_CODE_TIERS]
+            queries = [dataclasses.replace(q, basis=q.basis.replace(
+                "from TARGET_MASTER", "recorded in TARGET_MASTER manufacturer_model_code "
+                "(the catalog model is a broad name)")) for q in queries]
+        queries += _name_queries(target_id, retailer_id, model=model, part_number=part_number,
+                                 brand=brand, series=series, core=core or {})
     if kind == "FAMILY_NAME":
         # A family name cannot establish one product: two queries gather review leads for the
         # catalog reconciliation; broader family tiers would only repeat them.
         queries = [q for q in queries if q.tier in {TIER_PRODUCT_NAME, TIER_NAME_SPECS,
-                                                    TIER_PART_NUMBER}]
+                                                    TIER_PART_NUMBER} | _RECORDED_CODE_TIERS]
     unique: list[SearchQuery] = []
     seen: set[str] = set()
     for query in queries:
-        key = " ".join(query.text.casefold().split())
+        key = _query_key(query.text)
         if key and key not in seen:
             seen.add(key)
             unique.append(query)
@@ -452,20 +527,25 @@ def _name_queries(target_id, retailer_id, *, model, part_number, brand, series, 
 
 def _code_queries(
     target_id: str, retailer_id: str, *, model: str, part_number: str, brand: str, series: str,
-    core: Mapping[str, str] | None = None,
+    core: Mapping[str, str] | None = None, cpu_model: str = "",
 ) -> list[SearchQuery]:
     """Ordered queries: the complete model code first, then fallbacks.
 
     1. The complete model code from TARGET_MASTER, with no specification filter.
-    2. The verified part number, when TARGET_MASTER records it (owner-verified). Retailer SKUs
+    2. The same code with spaces for its punctuation (2026-10-22), when it has any.
+    3. The verified part number, when TARGET_MASTER records it (owner-verified). Retailer SKUs
        and unverified identifiers are never search terms here.
-    3. The model code with the configuration's RAM and storage (2026-10-19), to narrow a code
+    4. The code's most distinctive segment (2026-10-22), e.g. ``1432PH`` of ``B12UC-1432PH``.
+    5. The model code with the configuration's RAM and storage (2026-10-19), to narrow a code
        search whose results were truncated or showed only other configurations.
-    4. The broader brand and series; 5. the family with CPU, RAM, and storage.
+    6. The broader brand and series; 7. the family with CPU, RAM, and storage; or, with no
+       series recorded, the brand with the recorded processor model and capacities.
 
     Every query after the first runs only while no plausible candidate has been found (decided
     by the caller). Search words are discovery hints; a result is only a candidate, and the
-    configuration's values never fill an offer's missing specification.
+    configuration's values never fill an offer's missing specification. A spelling or segment
+    query relaxes the search text only: a result still needs the complete code in its title to
+    be a plausible candidate, and the matcher decides identity from the page.
     """
     core = core or {}
     model = model.strip()
@@ -473,9 +553,17 @@ def _code_queries(
                                  core.get("storage_capacity_gb", ""))
     queries = [SearchQuery(target_id, retailer_id, TIER_MODEL_CODE, model, True,
                            "complete model code from TARGET_MASTER")]
+    if spaced := spaced_code(model):
+        queries.append(SearchQuery(target_id, retailer_id, TIER_MODEL_CODE_SPACED, spaced, True,
+                                   "complete model code with spaces for punctuation (store "
+                                   "search tokenization)"))
     if part_number.strip():
         queries.append(SearchQuery(target_id, retailer_id, TIER_PART_NUMBER, part_number.strip(),
                                    True, "manufacturer_part_number in TARGET_MASTER"))
+    if segment := distinctive_segment(model):
+        queries.append(SearchQuery(target_id, retailer_id, TIER_CODE_SEGMENT, segment, False,
+                                   "most distinctive segment of the verified model code (search "
+                                   "text only; the complete code must appear on the result)"))
     if capacities:
         queries.append(SearchQuery(target_id, retailer_id, TIER_MODEL_SPECS,
                                    clean_text(f"{model} {capacities}"), False,
@@ -491,6 +579,12 @@ def _code_queries(
         if detailed.casefold() != family.casefold():
             queries.append(SearchQuery(target_id, retailer_id, TIER_FAMILY_SPECS, detailed,
                                        False, "family plus CPU, RAM, and storage (fallback)"))
+    elif brand.strip() and (processor := distinctive_cpu_model(cpu_model,
+                                                                core.get("cpu_series", ""))):
+        queries.append(SearchQuery(
+            target_id, retailer_id, TIER_BRAND_CPU_SPECS,
+            clean_text(f"{brand} {processor} {capacities}"), False,
+            "brand, recorded processor model, RAM and storage (no series recorded; fallback)"))
     return queries
 
 

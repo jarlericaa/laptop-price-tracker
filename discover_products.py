@@ -85,6 +85,7 @@ from laptop_tracker.retailer_search import (
     SEARCH_RECORD_COLUMNS,
     TIER_MODEL_CODE,
     UNSUPPORTED_LAYOUT,
+    VARIANT_TIERS,
     BudgetedTransport,
     SearchLayoutError,
     SearchQuery,
@@ -159,6 +160,8 @@ SEARCH_JOB_COLUMNS = (
     "inspections_after_resume", "collection_requests_after_resume", "discovery_rounds",
     "candidate_outcomes", "suitable_offer_url", "suitable_offer_observation_id",
     "discovery_outcome", "identity_kind",
+    # Adaptive passes (2026-10-22): identifier spellings run, and second-pass collection.
+    "identifier_variant_queries", "second_pass",
 )
 
 
@@ -166,6 +169,13 @@ def positive(value: str) -> int:
     number = int(value)
     if number < 1:
         raise argparse.ArgumentTypeError("must be a positive integer")
+    return number
+
+
+def non_negative(value: str) -> int:
+    number = int(value)
+    if number < 0:
+        raise argparse.ArgumentTypeError("must be zero or a positive integer")
     return number
 
 
@@ -204,6 +214,18 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--max-queries-per-target-retailer", type=positive, default=5,
                         help="Query tiers tried per target and retailer (default 5: code, part "
                              "number, code with RAM/storage, family, family with specs).")
+    parser.add_argument("--max-identifier-variant-queries", type=non_negative, default=2,
+                        help="Extra queries per target and retailer when the complete model "
+                             "code returned no result: the code with spaces for punctuation, "
+                             "then its most distinctive segment (default 2; 0 disables). A "
+                             "result must still show the complete code.")
+    parser.add_argument("--max-second-pass-candidates-per-target-retailer", type=non_negative,
+                        default=0,
+                        help="After a collection round, collect up to this many further "
+                             "relevant candidates that --max-candidates-per-target-retailer "
+                             "skipped, for configurations still without a suitable offer "
+                             "(default 0: off). Bounded by --max-product-fetches and the "
+                             "discovery rounds.")
     parser.add_argument("--max-product-fetches", type=positive, default=20,
                         help="Product-page inspections plus collection fetches (default 20).")
     parser.add_argument("--min-seconds-between-requests", type=float,
@@ -358,16 +380,26 @@ class SearchJob:
     """
 
     def __init__(self, target: SearchTarget, retailer_id: str, max_pages: int,
-                 max_queries: int = 5) -> None:
+                 max_queries: int = 5, max_variant_queries: int = 2) -> None:
         method = SEARCH_METHODS[retailer_id]
         self.target = target
         self.method = method
         self.retailer_id = retailer_id
-        self.all_queries = search_queries(
+        cpu_model = str(target.record.get("cpu_model", "") or "")
+        planned = search_queries(
             target.target_id, retailer_id, model=target.model, part_number=target.part_number,
             brand=target.brand, series=target.series, core=target.core, kind=target.kind,
+            cpu_model="" if cpu_model == "nan" else cpu_model,
+            recorded_code=target.recorded_code,
         )
+        # Identifier spellings (2026-10-22) are adaptive: they join the plan only when the
+        # complete code returned no result at all, within their own small ceiling
+        # (--max-identifier-variant-queries), so a code that searches well costs nothing extra.
+        self.variant_queries = [q for q in planned if q.tier in VARIANT_TIERS][
+            :max_variant_queries]
+        self.all_queries = [q for q in planned if q.tier not in VARIANT_TIERS]
         self.queries = self.all_queries[:max_queries]
+        self.variant_reason = ""
         self.max_pages = max_pages if method.paginated else 1
         self.index = 0
         self.page = 1
@@ -394,6 +426,10 @@ class SearchJob:
         self.supplied = 0
         self.supplied_missed = 0
         self.outcome = ""
+        # Second-pass collection (2026-10-22): candidates beyond the per-round limit.
+        self.second_pass = False
+        self.second_pass_note = ""
+        self.candidate_limit = 0  # 0: --max-candidates-per-target-retailer
 
     @property
     def key(self) -> tuple[str, str]:
@@ -412,15 +448,32 @@ class SearchJob:
     def run_reason(self, query: SearchQuery, page_number: int) -> str:
         if page_number > 1:
             return f"result page {page_number} of the same query"
-        if query.tier in FIRST_TIERS:
-            return ("first query: complete model code without specification filters"
-                    if query.tier == TIER_MODEL_CODE else
-                    "first query: brand and catalog product name (no model code recorded)")
+        if query.tier in FIRST_TIERS and not self.records:
+            if query.tier == TIER_MODEL_CODE:
+                return ("first query: complete model code without specification filters"
+                        + (f" (recorded for the broad catalog name '{self.target.model}')"
+                           if self.target.kind != "MODEL_CODE" else ""))
+            return "first query: brand and catalog product name (no model code recorded)"
         tiers = ", ".join(dict.fromkeys(r.query.tier for r in self.records))
         resumed = (f"resumed after collection: {self.resume_reasons[-1]}; "
                    if self.resumed and len(self.records) == self.resume_record_index else "")
-        return (f"{resumed}no plausible candidate after {tiers}; "
+        variant = (f"{self.variant_reason}; " if query.tier in VARIANT_TIERS else "")
+        return (f"{resumed}{variant}no plausible candidate after {tiers}; "
                 f"{results_summary(self.target, self.records)}")
+
+    def _add_variants(self, record: SearchRecord) -> None:
+        """After the complete-code query: add the identifier spellings when it found nothing."""
+        if (record.query.tier != TIER_MODEL_CODE or not self.variant_queries
+                or self.variant_reason):
+            return
+        code = [r for r in self.records if r.query.tier == TIER_MODEL_CODE]
+        if not code or any(r.outcome != NO_RESULTS for r in code):
+            return
+        self.variant_reason = (f"complete code '{record.query.text}' returned no result; "
+                               "trying its spellings")
+        for offset, query in enumerate(self.variant_queries):
+            self.queries.insert(self.index + offset, query)
+            self.all_queries.insert(self.index + offset, query)
 
     def advance(self, record: SearchRecord) -> None:
         self.records.append(record)
@@ -436,6 +489,7 @@ class SearchJob:
                 "Next result page not read (--max-search-pages).")
         self.page, self.next_url = 1, ""
         self.index += 1
+        self._add_variants(record)
         url = plausible_candidate(self.target, self.records, frozenset(self.evaluated))
         if url:
             self.done, self.stop_reason, self.plausible_url = True, STOP_PLAUSIBLE, url
@@ -565,6 +619,10 @@ class SearchJob:
             "suitable_offer_observation_id": self.suitable_observation_id,
             "discovery_outcome": self.outcome or self.finish_outcome(),
             "identity_kind": self.target.kind,
+            "identifier_variant_queries": ";".join(
+                f"{r.query.tier}:{r.query.text}:{r.outcome}" for r in self.records
+                if r.query.tier in VARIANT_TIERS),
+            "second_pass": self.second_pass_note,
         }
 
 
@@ -858,9 +916,11 @@ def select_and_inspect(candidates, job, fetcher, transport, args, state, evidenc
                 continue
             supplied_count += 1
         else:
-            if chosen >= args.max_candidates_per_target_retailer:
+            if chosen >= (job.candidate_limit or args.max_candidates_per_target_retailer):
                 candidate.decision = "NOT_SELECTED_LIMIT"
-                candidate.decision_reason = "--max-candidates-per-target-retailer reached."
+                candidate.decision_reason = (
+                    "--max-second-pass-candidates-per-target-retailer reached."
+                    if job.second_pass else "--max-candidates-per-target-retailer reached.")
                 continue
             if title_differs and not collect_differences:
                 candidate.decision = "REVIEW_DIFFERENT_CONFIGURATION_BY_TITLE"
@@ -1231,7 +1291,8 @@ def main(argv: list[str] | None = None, *, transport: Transport | None = None,
     log = print
 
     jobs = [SearchJob(target, retailer, args.max_search_pages,
-                      args.max_queries_per_target_retailer)
+                      args.max_queries_per_target_retailer,
+                      args.max_identifier_variant_queries)
             for target in targets for retailer in retailers]
     plan_rows = []
     worst_search = 0
@@ -1251,6 +1312,18 @@ def main(argv: list[str] | None = None, *, transport: Transport | None = None,
                 "max_pages": str(pages), "first_page_url": job.method.first_page_url(query.text),
                 "mechanism": job.method.kind, "notes": job.method.notes,
             })
+        for query in job.variant_queries:
+            worst_search += job.max_pages
+            plan_rows.append({
+                "target_id": query.target_id, "rank": job.target.rank,
+                "retailer_id": query.retailer_id, "order": "after 1", "tier": query.tier,
+                "query": query.text,
+                "verified_identifier": "TRUE" if query.verified_identifier else "FALSE",
+                "runs": "ONLY_IF_COMPLETE_CODE_RETURNED_NO_RESULT",
+                "max_pages": str(job.max_pages),
+                "first_page_url": job.method.first_page_url(query.text),
+                "mechanism": job.method.kind, "notes": query.basis,
+            })
     write_csv(out / "search_plan.csv", list(plan_rows[0]), plan_rows)
     shopify_jobs = sum(job.method.kind != "woocommerce_html" for job in jobs)
     worst_product = (len(jobs) * args.max_candidates_per_target_retailer
@@ -1263,6 +1336,9 @@ def main(argv: list[str] | None = None, *, transport: Transport | None = None,
         "max_product_fetches": args.max_product_fetches,
         "max_queries_per_target_retailer": args.max_queries_per_target_retailer,
         "max_seed_urls_per_target_retailer": args.max_seed_urls_per_target_retailer,
+        "max_identifier_variant_queries": args.max_identifier_variant_queries,
+        "max_second_pass_candidates_per_target_retailer":
+            args.max_second_pass_candidates_per_target_retailer,
         "retry_attempts_per_request": FetchConfig().max_attempts,
         "min_seconds_between_requests_per_retailer": args.min_seconds_between_requests,
         "search_cache_folders": [str(path) for path in args.search_cache],
@@ -1371,17 +1447,39 @@ def main(argv: list[str] | None = None, *, transport: Transport | None = None,
         results, statuses = collection.collect(round_number, new_rows)
         run.record_collection(results, statuses)
         resumable = [job for job in jobs if job.can_resume()]
-        if not resumable:
+        # Second pass (2026-10-22, opt-in): a configuration still without a suitable offer
+        # collects relevant candidates the per-round limit skipped, instead of raising the
+        # limit for every configuration.
+        second = [job for job in jobs
+                  if args.max_second_pass_candidates_per_target_retailer
+                  and job not in resumable and not job.second_pass and not job.suitable_url
+                  and run.second_pass_candidates(job)]
+        if not resumable and not second:
             break
         if round_number == args.max_discovery_rounds:
             for job in resumable:
                 job.round_limit_reached = True
-            log(f"  {len(resumable)} job(s) could resume but --max-discovery-rounds was reached.")
+            for job in second:
+                job.second_pass_note = ("NOT_RUN: --max-discovery-rounds reached with "
+                                        f"{len(run.second_pass_candidates(job))} skipped "
+                                        "relevant candidate(s)")
+            log(f"  {len(resumable)} job(s) could resume and {len(second)} could take a second "
+                "pass, but --max-discovery-rounds was reached.")
             break
         for job in resumable:
             job.resume(run.resume_reason(job), round_number + 1)
             log(f"  resume {job.retailer_id:15} {job.target.target_id}: {job.resume_reasons[-1]}")
-        active = resumable
+        for job in second:
+            waiting = len(run.second_pass_candidates(job))
+            job.second_pass = True
+            job.candidate_limit = args.max_second_pass_candidates_per_target_retailer
+            job.rounds = round_number + 1
+            job.second_pass_note = (f"round {round_number + 1}: up to {job.candidate_limit} of "
+                                    f"{waiting} relevant candidate(s) skipped by the "
+                                    "per-round limit")
+            log(f"  second pass {job.retailer_id:10} {job.target.target_id}: "
+                f"{job.second_pass_note}")
+        active = resumable + second
     for job in jobs:
         job.outcome = job.finish_outcome()
     run.write_files()
@@ -1526,13 +1624,15 @@ class DiscoveryRun:
             return merge_supplied(ranked, job, self.supplied.get(job.key, []),
                                   self.supplied_report)
         known = {strip_variant(c.hit.product_url): c for c in self.by_job.get(job.key, [])}
+        eligible = {id(c) for c in self.second_pass_candidates(job)}
         ranked = []
         for candidate in rank_target_hits(job.target, job.retailer_id, job.records):
             earlier = known.get(strip_variant(candidate.hit.product_url))
             if earlier is None:
                 candidate.discovery_round = round_number
                 ranked.append(candidate)
-            elif earlier.decision == "NOT_SELECTED_LIMIT":
+            elif earlier.decision == "NOT_SELECTED_LIMIT" and (
+                    not job.second_pass or id(earlier) in eligible):
                 ranked.append(earlier)  # Relevant, skipped by a per-round limit: decided again.
         ranked.sort(key=lambda c: c.sort_key)
         next_rank = len(known)
@@ -1541,6 +1641,13 @@ class DiscoveryRun:
                 next_rank += 1
                 candidate.rank = next_rank
         return ranked
+
+    def second_pass_candidates(self, job: SearchJob) -> list[RankedCandidate]:
+        """Relevant pages a per-round candidate limit skipped and nothing has fetched: a
+        collectable category, no title clue stating another configuration (2026-10-22)."""
+        return [c for c in self.by_job.get(job.key, [])
+                if c.decision == "NOT_SELECTED_LIMIT" and c.category in COLLECTABLE
+                and not c.collection_request_id and not configuration_difference(c)]
 
     def add_candidates(self, job: SearchJob, ranked: list[RankedCandidate]) -> None:
         listed = self.by_job.setdefault(job.key, [])

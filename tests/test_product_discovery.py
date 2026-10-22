@@ -43,9 +43,11 @@ from laptop_tracker.product_discovery import (
 )
 from laptop_tracker.retailer_search import (
     SEARCH_METHODS,
+    TIER_CODE_SEGMENT,
     TIER_FAMILY,
     TIER_FAMILY_SPECS,
     TIER_MODEL_CODE,
+    TIER_MODEL_CODE_SPACED,
     TIER_MODEL_SPECS,
     TIER_PART_NUMBER,
     BudgetedTransport,
@@ -197,16 +199,22 @@ def test_queries_run_code_then_verified_part_number_then_family() -> None:
     tiers = [q.tier for q in search_queries("T", "pcx", model="S3607VA-RP181WSM",
                                             part_number="90NB1672-M00DD0", brand="ASUS",
                                             series="Vivobook")]
-    assert tiers == [TIER_MODEL_CODE, TIER_PART_NUMBER, TIER_FAMILY]
+    # The identifier spellings (2026-10-22) follow the complete code in the plan; a job runs
+    # them only when the complete code returned no result.
+    assert tiers == [TIER_MODEL_CODE, TIER_MODEL_CODE_SPACED, TIER_PART_NUMBER,
+                     TIER_CODE_SEGMENT, TIER_FAMILY]
     no_mpn = search_queries("T", "pcx", model="S3607VA-RP181WSM", part_number="",
                             brand="ASUS", series="Vivobook")
-    assert [q.text for q in no_mpn] == ["S3607VA-RP181WSM", "ASUS Vivobook"]
+    assert [q.text for q in no_mpn] == ["S3607VA-RP181WSM", "S3607VA RP181WSM", "RP181WSM",
+                                        "ASUS Vivobook"]
     # The complete code first, without filters; specifications only in later fallbacks.
     core = {"cpu_series": "Core 5", "ram_capacity_gb": "16", "storage_capacity_gb": "1000"}
     full = search_queries("T", "pcx", model="S3607VA-RP181WSM", part_number="", brand="ASUS",
                           series="Vivobook", core=core)
     assert [(q.tier, q.text) for q in full] == [
         (TIER_MODEL_CODE, "S3607VA-RP181WSM"),
+        (TIER_MODEL_CODE_SPACED, "S3607VA RP181WSM"),
+        (TIER_CODE_SEGMENT, "RP181WSM"),
         (TIER_MODEL_SPECS, "S3607VA-RP181WSM 16GB 1TB"),
         (TIER_FAMILY, "ASUS Vivobook"),
         (TIER_FAMILY_SPECS, "ASUS Vivobook Core 5 16GB 1TB"),
@@ -488,9 +496,12 @@ def standard_routes() -> dict[str, TransportResponse | Exception]:
 def run(tmp_path: Path, mode: str, routes, *extra: str) -> tuple[int, Routes, Path]:
     transport = Routes(routes)
     out = tmp_path / "discovery"
+    # Identifier-spelling queries (2026-10-22) are off for these scripted routes unless a test
+    # passes the option itself.
+    variants = () if mode == "--preview" else ("--max-identifier-variant-queries", "0")
     code = discover.main(
         [mode, "--targets", "TGT-000001,TGT-000002", "--retailers", "laptop_factory,pcc",
-         *inputs(tmp_path), "--output-dir", str(out), *extra],
+         *inputs(tmp_path), "--output-dir", str(out), *variants, *extra],
         transport=transport, clock=FakeClock(),
     )
     return code, transport, out
@@ -511,7 +522,8 @@ def test_preview_makes_no_request_and_shows_the_plan(tmp_path: Path, capsys) -> 
         ("TGT-000001", "laptop_factory", TIER_FAMILY),
         ("TGT-000001", "laptop_factory", TIER_FAMILY_SPECS),
     ]
-    assert {r["runs"] for r in plan} == {"ALWAYS", "ONLY_IF_NO_PLAUSIBLE_CANDIDATE"}
+    assert {r["runs"] for r in plan} == {"ALWAYS", "ONLY_IF_NO_PLAUSIBLE_CANDIDATE",
+                                         "ONLY_IF_COMPLETE_CODE_RETURNED_NO_RESULT"}
     summary = json.loads((out / "discovery_summary.json").read_text())
     assert summary["run_status"] == "PREVIEW_ONLY" and summary["requests_sent"] == 0
     assert "Preview only" in capsys.readouterr().out

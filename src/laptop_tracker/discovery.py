@@ -58,7 +58,9 @@ _MARKS = re.compile("[®™℠]")
 # Words that commonly follow a code in a title and are not designations.
 _NOT_A_SUFFIX = frozenset(
     {"LAPTOP", "NOTEBOOK", "GAMING", "OLED", "IPS", "FHD", "QHD", "UHD", "WUXGA", "WIN",
-     "RAM", "SSD", "HDD", "AI", "PC", "BLACK", "BLUE", "GRAY", "GREY", "SILVER", "WHITE"}
+     "RAM", "SSD", "HDD", "AI", "PC", "BLACK", "BLUE", "GRAY", "GREY", "SILVER", "WHITE",
+     # A processor or graphics brand after the code starts the specification list (2026-10-22).
+     "RYZEN", "INTEL", "AMD", "CORE", "ULTRA", "RTX", "GTX"}
 )
 _SEGMENT_BREAK = re.compile(r"[|/,()\[\]]")
 

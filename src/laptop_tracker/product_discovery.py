@@ -353,6 +353,11 @@ def rank_hit(target: SearchTarget, hit: SearchHit, records: list[SearchRecord]) 
     accessory = accessory_reason(title, hit.product_type)
     not_laptop = non_laptop_reason(title, hit.product_type)
     named = name_in_title(title, code) if kind != MODEL_CODE_KIND else ""
+    # A broad name that records one verified manufacturer code (TUF A16 -> FA607NUQ-RL011W,
+    # 2026-10-22): a title, spelling or URL handle showing the complete recorded code is
+    # evidence for it, whatever words surround the name. Another code stays rejected below.
+    recorded = target.recorded_code.strip() if kind != MODEL_CODE_KIND else ""
+    recorded_compact = _compact(recorded) if recorded else ""
     if not_laptop:
         category = NOT_A_LAPTOP
         evidence = not_laptop
@@ -384,6 +389,24 @@ def rank_hit(target: SearchTarget, hit: SearchHit, records: list[SearchRecord]) 
         category = CODE_URL_ONLY
         evidence = "product URL handle"
         reasons.append("Only the product URL handle shows the model code.")
+    elif recorded_compact and any(_compact(t) == recorded_compact for t in title_codes):
+        token = next(t for t in title_codes if _compact(t) == recorded_compact)
+        suffix = _suffix(title, token)
+        category = CODE_WITH_SUFFIX if suffix else FAMILY_SPEC_CANDIDATE
+        evidence = f"title shows this target's recorded code {token}"
+        reasons.append(f"Title shows the complete recorded model code {token}"
+                       + (f" followed by '{suffix}' (meaning unknown; kept, not stripped)"
+                          if suffix else "")
+                       + ". The page's own specifications decide the match.")
+    elif recorded_compact and (spelled := _spelled(title, recorded_compact)):
+        category = CODE_SPELLING
+        evidence = f"title spelling '{spelled}' of the recorded code {recorded}"
+        reasons.append("Title shows the recorded code with different spacing/punctuation: "
+                       f"'{spelled}'.")
+    elif recorded_compact and re.search(rf"(?:^|-){re.escape(recorded.lower())}(?:-|$)", handle):
+        category = CODE_URL_ONLY
+        evidence = "product URL handle shows the recorded code"
+        reasons.append("Only the product URL handle shows the recorded model code.")
     elif named and kind == PRODUCT_NAME_KIND:
         category = NAME_MATCH
         evidence = f"title shows product name '{named}'"
@@ -480,6 +503,9 @@ def is_plausible(candidate: RankedCandidate) -> bool:
     """Shows the complete code (or verified part number) and no contrary configuration clue. A
     family listing needs at least two agreeing title clues as well (2026-10-20): an incomplete
     title is still collected, but does not stop the fallback searches."""
+    if candidate.category == FAMILY_SPEC_CANDIDATE and "recorded code" in candidate.code_evidence:
+        # The complete recorded code is stated: an incomplete title needs no further clues.
+        return not configuration_difference(candidate)
     if candidate.category == FAMILY_SPEC_CANDIDATE:
         agree = sum(value == "AGREES" for value in candidate.clues.values())
         return agree >= 2 and not configuration_difference(candidate)
