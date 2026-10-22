@@ -218,18 +218,22 @@ python publish_prices.py --preview --report-dir <reviewed report folder> --pilot
 python publish_prices.py --write-sheets --report-dir <reviewed report folder> --pilot-scope <scope.csv>
 ```
 
-`publish_prices.py` publishes **reviewed** pilot reports to five dedicated tabs of the configured
+`publish_prices.py` publishes **reviewed** pilot reports to six dedicated tabs of the configured
 spreadsheet: `PILOT_PRICE_COMPARISON` (prices with clickable retailer links and the dated, historical
 Shopee snapshot price), `PILOT_PRICE_SUMMARY` (the same prices in seven columns, context in cell
-notes), `PILOT_PRICE_HISTORY`, `PILOT_PRICE_REVIEW`, and `PILOT_PRICE_RUN_LOG`. It validates every input before any Sheets
-access. Preview is read-only. A write backs up existing pilot tabs locally, replaces their content
-(so repeats never duplicate rows), and reports `SUCCESS` only after a full cell readback. It never
-collects, rematches, or touches the history store, `raw`, the catalog, or other tabs. The first
+notes), `PILOT_PRICE_OVERVIEW` (rank, screen, CPU family, RAM, storage and the same prices in twelve
+columns, since `pilot-sheets-6`), `PILOT_PRICE_HISTORY`, `PILOT_PRICE_REVIEW`, and `PILOT_PRICE_RUN_LOG`. It validates every input before any Sheets
+access. Preview is read-only. A write saves a full local snapshot of the existing pilot tabs, replaces their content
+(so repeats never duplicate rows), applies the house layout, and reports `SUCCESS` only after a full cell readback.
+`--rollback <publication folder>` restores the snapshotted data tabs; the owner-built overview is replaced only with
+`--adopt-overview`. It never collects, rematches, or touches the history store, `raw`, the catalog, or other tabs. The first
 seven-configuration pilot cycle was published on 2026-10-12. See
 [docs/SETUP_AND_OPERATIONS.md](docs/SETUP_AND_OPERATIONS.md#publishing-pilot-results-to-google-sheets-phase-10-manual)
 and [docs/PHASE_10_PILOT.md](docs/PHASE_10_PILOT.md).
 
-`discover_products.py` searches the five retailers for verified configurations within explicit request limits (`--preview` sends nothing), ranks the results with reasons, lists variants only from each page's own structured data, writes a `collect_and_match.py` manifest, and with `--collect` collects and matches those pages. Ranking never assigns a target. See [docs/SETUP_AND_OPERATIONS.md](docs/SETUP_AND_OPERATIONS.md#automatic-product-discovery-phase-10-manual-runs).
+`discover_products.py` searches the five retailers for verified configurations within explicit request limits (`--preview` sends nothing), ranks the results with reasons, lists variants only from each page's own structured data, writes a `collect_and_match.py` manifest, and with `--collect` collects and matches those pages. Ranking never assigns a target. When a complete model code returns no result, it also tries the code's spellings (2026-10-22); `--max-second-pass-candidates-per-target-retailer` (opt-in) collects relevant candidates a per-round limit skipped. See [docs/SETUP_AND_OPERATIONS.md](docs/SETUP_AND_OPERATIONS.md#automatic-product-discovery-phase-10-manual-runs).
+
+`discover_catalog_leads.py` (opt-in, 2026-10-22) reads the sitemaps the retailers advertise in robots.txt, within a hard request ceiling, and writes supplied-URL leads for pages whose URL shows a scoped target's complete model code; discovery re-fetches and re-matches them. `diagnose_blank_cells.py` explains every configuration x retailer cell (furthest stage reached, queries, limits, observed versus comparable price), and `measure_discovery.py` scores a run against the labelled benchmark in `tests/scraping_fixtures/discovery_benchmark/`. All three are offline except `discover_catalog_leads.py --live`. See [docs/DISCOVERY_IMPROVEMENTS_2026-10-22.md](docs/DISCOVERY_IMPROVEMENTS_2026-10-22.md).
 
 `replay_extraction.py` replays a saved collection offline through the current extractor (from the
 observation CSV) and the current adapters (from saved HTML), and writes a before/after comparison;
@@ -292,7 +296,7 @@ The latest live dry run took 57.49 seconds and did not write to any Google Sheet
 ```bash
 python -m pytest -q
 python -m ruff check .
-python -m compileall src run_phase1.py smoke_test.py check_target_master.py check_target_tables.py seed_match_review.py match_offers.py audit_top_100_coverage.py propose_catalog_conventions.py build_verified_top_100.py audit_verified_top_100.py track_prices.py collect_and_match.py publish_prices.py replay_extraction.py discover_candidates.py discover_products.py
+python -m compileall src run_phase1.py smoke_test.py check_target_master.py check_target_tables.py seed_match_review.py match_offers.py audit_top_100_coverage.py propose_catalog_conventions.py build_verified_top_100.py audit_verified_top_100.py track_prices.py collect_and_match.py publish_prices.py replay_extraction.py discover_candidates.py discover_products.py discover_catalog_leads.py diagnose_blank_cells.py measure_discovery.py
 python smoke_test.py
 python run_phase1.py --dry-run
 ```

@@ -419,3 +419,24 @@ Work folder: `data/output/shopee_summary_2026-10-20/`.
   and `git diff --check` pass.
 - **Not done.** No Shopee or retailer request, no Sheets access, no history, catalog, mapping
   or approval change, and no commit.
+
+## Discovery diagnostics, adaptive search, catalog leads and the managed overview (2026-10-22)
+
+- **Baseline reproduced offline.** On the 2026-10-20 Top 100 run: 500 cells, 50 comparable
+  prices, 450 blanks (DataBlitz 86, Laptop Factory 88, PC Express 82, PC Central 97, Octagon
+  97). By stage: no relevant candidate 308, zero results 48, candidate not fetched 41,
+  configuration mismatch 25, match review 23, catalog identity unresolved 3, variant
+  unresolved 2.
+- **Audit leads traced.** Of the 2026-10-21 audit's 23 direct-page "exact" claims, 6 appeared
+  in any search result; 3 more claims are category pages. One "exact" claim (TGT-000017, PC
+  Express) shows a model-claim conflict on the saved page. None of the 12 audit review items was
+  accepted by the matcher.
+- **Replay.** The 2026-10-20 discovery replayed offline with the new code selects the same 96
+  candidates for collection; a live run would add at most 140 identifier-spelling searches and
+  4 brand/CPU searches (73 code jobs whose complete code returned nothing).
+- **Publisher.** A read-only preview against the live spreadsheet planned 100 rows for each
+  price tab; the formula-linked overview displays the same 600 prices as the plan (6 cells
+  differ: the Shopee header and 5 labels where the formula repeated the brand).
+- **Validation.** Tests went from 1729 to 1795; Ruff passes.
+- **Not done.** No retailer request, no Sheets write, no catalog, mapping, history or approval
+  change, and no commit.

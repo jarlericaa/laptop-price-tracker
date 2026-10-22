@@ -524,3 +524,50 @@ that request. Code: `src/laptop_tracker/shopee_snapshot.py` and `sheet_publicati
   - A spreadsheet without the summary tab gets one. A summary tab with unrelated content is
     refused before any write.
   - Reports written before 2026-10-20 still publish, with "Shopee snapshot not in this report".
+
+## Discovery diagnostics, adaptive search, catalog leads and the managed overview (2026-10-22)
+
+Implemented on request; nothing below changes the approved matching or comparable-price policy.
+Items marked **PENDING OWNER DECISION** are proposals with an opt-in switch or a report only.
+
+- **Blank cells are diagnosed, not assumed negative.** `diagnose_blank_cells.py` places every
+  configuration x retailer cell at the furthest stage it reached (not searched, zero results, no
+  relevant candidate, candidate not fetched, fetch error, parsed without price, variant
+  unresolved, match review, configuration mismatch, price known but not comparable, published),
+  with queries, limits, request outcomes and observation IDs. `observed_listing_price` and
+  `owner_policy_comparable_price` are separate columns; only the latter is ever published.
+- **Identifier spellings are adaptive.** When the complete model code returns no result at
+  all, a job also searches the same code with spaces for punctuation and its most distinctive
+  segment (`--max-identifier-variant-queries`, default 2; 0 disables). Search text only: a
+  result is plausible only when its title shows the complete code. Evidence: on 2026-10-20 the
+  hyphenated codes of listed products returned nothing on Laptop Factory and PC Express.
+- **No-series code targets** get one more fallback: brand, recorded processor model and
+  capacities (`5_BRAND_CPU_MODEL_WITH_SPECS`).
+- **Second-pass collection is opt-in** (`--max-second-pass-candidates-per-target-retailer`,
+  default 0). It collects relevant candidates the per-round limit skipped, only for
+  configurations still without a suitable offer and only when no title clue states another
+  configuration.
+- **Sitemap catalog leads are opt-in.** `discover_catalog_leads.py` reads the sitemaps the
+  retailers advertise in robots.txt, after checking robots.txt, within a hard request ceiling,
+  and writes leads in the supplied-URL format: a URL whose handle (or Shopify sitemap title)
+  shows a MODEL_CODE target's complete code. Discovery re-fetches and re-matches each lead; a
+  lead is never a match. Family-name targets get no leads. Live sitemap layouts are **not yet
+  verified**.
+- **`PILOT_PRICE_OVERVIEW` is publisher-managed** (`pilot-sheets-6`): Rank, Laptop, Screen,
+  CPU family, RAM, Storage, Shopee (historical snapshot) and DataBlitz, PC Express, Laptop
+  Factory, PC Central, Octagon prices, each copied from the comparison cell. The owner-built,
+  formula-linked overview found on 2026-10-22 is replaced only with `--adopt-overview`, after a
+  full local snapshot; `--rollback` restores it.
+- **House layout.** The three price tabs are styled by the publisher on every write, reproducing
+  the owner's live look (navy headers, orange Shopee headers, tinted price columns, banding,
+  frozen key columns, hidden gridlines). Before this, the summary layout reset backgrounds and
+  would have left the owner's white header text unreadable. Conditional-format rules are not
+  touched; the comparison column positions they depend on are pinned by a test.
+- **PENDING OWNER DECISION: exact processor number.** `cpu_model` stays a WARNING (approved
+  2026-10-15). `matching.STRICT_CPU_MODEL` is an opt-in matcher override that would send such
+  matches to review; it is not wired into any weekly command.
+- **PENDING OWNER DECISION: one offer pricing several targets.** The listed-spec policy allows
+  an offer that exactly matches a code target (e.g. TGT-000233, HP 14-ep0445TU) to also price a
+  family target with the same listed specifications (TGT-000013, "HP Laptop 14"). The publisher
+  now reports such offers (`offers_pricing_several_targets`); whether the two targets are
+  duplicates is a catalog decision.

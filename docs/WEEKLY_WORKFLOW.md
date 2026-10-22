@@ -38,10 +38,10 @@ flowchart TD
     copies --> store
     store --> reports["Generate weekly price reports"]
     reports --> preview["Review and preview publication"]
-    preview --> output["Sheets: five PILOT_PRICE tabs"]
+    preview --> output["Sheets: six PILOT_PRICE tabs"]
 ```
 
-The `raw` and catalog tabs are inputs. The five `PILOT_PRICE_*` tabs are report outputs. Searching, matching and publishing are separate operations.
+The `raw` and catalog tabs are inputs. The six `PILOT_PRICE_*` tabs are report outputs. Searching, matching and publishing are separate operations.
 
 ## 1. What the Google Sheets tabs mean
 
@@ -59,6 +59,7 @@ The workbook may also contain dated backups and additional manually created revi
 | `P1_TOP_100_CONFIGURATIONS` | Published display of the verified configuration-level Top 100. | Separate/manual publication. Neither the build command nor price publisher updates this tab. |
 | `PILOT_PRICE_COMPARISON` | Pilot configurations, the dated Shopee snapshot price (link, variation, status, extract date), retailer prices/links, stock/status labels and the lowest retailer prices. | `publish_prices.py --write-sheets`. |
 | `PILOT_PRICE_SUMMARY` | A minimal side-by-side grid: Laptop, Shopee (historical snapshot), DataBlitz, Laptop Factory, PC Express, PC Central, Octagon. The same prices as the comparison; context (snapshot date and listing, exact or listed-spec, stock, bundle, warnings, why a cell is blank) is in cell notes; listed-spec prices are italic. | Same publisher, from the same comparison rows. |
+| `PILOT_PRICE_OVERVIEW` | Rank, Laptop, Screen, CPU family, RAM, Storage, Shopee (historical snapshot), DataBlitz, PC Express, Laptop Factory, PC Central, Octagon: one row per configuration in comparison-rank order, every value a numeric copy of the comparison cell; a blank stays blank. Each Laptop cell's note names the target ID; listed-spec prices are italic. | Same publisher since `pilot-sheets-6` (2026-10-22). The earlier owner-built, formula-linked tab is replaced only with `--adopt-overview` (see Step 9). |
 | `PILOT_PRICE_HISTORY` | Dated pilot observations, stock, matches, prices and changes. | Same publisher, from cumulative local history. |
 | `PILOT_PRICE_REVIEW` | Retailer matching problems and price exclusions in the published history/scope. | Same publisher. Older unresolved observations can remain here. |
 | `PILOT_PRICE_RUN_LOG` | Publication IDs, cutoffs, counts, success/failure and readback results. | Same publisher; retains earlier publications. |
@@ -328,6 +329,24 @@ python discover_products.py --preview "${pilot_args[@]}" \
 
 **Does:** validates local inputs and writes a plan. No retailer request, store import or Sheet update occurs. Review queries, scope and limits.
 
+**Adaptive passes (2026-10-22).** `search_plan.csv` also lists, as `ONLY_IF_COMPLETE_CODE_RETURNED_NO_RESULT`, the identifier spellings of each model code: the code with spaces for its punctuation (`B12UC 1432PH`) and its most distinctive segment (`1432PH`). They run only when the complete code returned no result at all, at most `--max-identifier-variant-queries` per job (default 2; `0` turns them off), and a result is still plausible only when its title shows the complete code. A code target without a recorded series also gets `5_BRAND_CPU_MODEL_WITH_SPECS`. To collect relevant candidates that `--max-candidates-per-target-retailer` skipped, for configurations still without a suitable offer, add `--max-second-pass-candidates-per-target-retailer 2` (default `0`, off); it uses the same fetch budget and rounds, and `search_jobs.csv` records it in `second_pass`.
+
+**Optional catalog leads (2026-10-22, live layouts not yet verified).** Store search misses products (Shopify predictive search shows at most 10 results; Laptop Factory's search omitted sold-out products and returned nothing for some complete hyphenated codes). Every store advertises a sitemap in robots.txt. To turn sitemap entries whose URL handle (or Shopify sitemap title) shows a scoped MODEL_CODE target's complete code into discovery leads:
+
+```bash
+python discover_catalog_leads.py --preview --scope-file "$weekly_run/pilot_scope.csv" \
+  --target-master "$weekly_run/inputs/target_master_validated.csv" \
+  --output-dir "$weekly_run/catalog_leads_preview"
+python discover_catalog_leads.py --live --max-total-requests 35 --max-sitemaps-per-retailer 5 \
+  --scope-file "$weekly_run/pilot_scope.csv" \
+  --target-master "$weekly_run/inputs/target_master_validated.csv" \
+  --output-dir "$weekly_run/catalog_leads"
+pilot_args+=(--supplied-urls config/supplied_candidate_urls.csv
+             --supplied-urls "$weekly_run/catalog_leads/catalog_leads.csv")
+```
+
+It reads robots.txt first and requests nothing it disallows, fetches no product page, and writes `catalog_leads.csv` in the supplied-URL format (`supplied_by` = `catalog_sitemap`). Discovery then checks a lead directly only when its own search missed the page, re-fetches and re-matches it; a lead is never a match. Family-name targets get no leads. Inspect `catalog_requests.csv` and `catalog_summary.json` (robots verdict, sitemaps read, leads) the first time, because the live sitemap layouts have not been verified yet. `--from-saved <run>` re-reads a run offline.
+
 ### Step 6 - Search, collect, extract and match
 
 ```bash
@@ -423,6 +442,19 @@ python coverage_report.py \
 
 `coverage.csv` gives one status per pair: `PRICE_AVAILABLE` (comparable offer), `EXACT_PRICE_EXCLUDED`, `AMBIGUOUS_TARGET`, `IDENTITY_CONFLICT` (including the same model code stating another screen or processor: an unresolved discrepancy, never another configuration), `MODEL_UNVERIFIED`, `EXTRACTION_INCOMPLETE` (specifications missing or extraction failed), `SAME_MODEL_DIFFERENT_CONFIGURATION` (only RAM/storage options of the same model code), `DIFFERENT_CONFIGURATION`, `DIFFERENT_MODEL` (a page collected for the configuration turned out to be another model), `FETCH_FAILED` (candidate found, fetching failed), `CANDIDATE_NOT_FETCHED`, `NO_RELEVANT_CANDIDATE` (results were only other models or unrelated), `NO_CANDIDATE_FOUND` (no results), `SEARCH_FAILED`, `DISCOVERY_NOT_ATTEMPTED` (including searches never sent because of a limit), or `UNKNOWN_COVERAGE` (no search record). Since 2026-10-19 an offer explains a pair only through recorded lineage: matched to it, collected by a manifest request made for it, selected for collection as its search candidate (one page evaluated for two configurations keeps both), or a matcher near-match of the same model. A search result rejected for the configuration is kept in `coverage_offers.csv` as `REJECTED_SEARCH_RESULT` (audit only), even when the same page was collected for another configuration. New columns: `relevant_candidates`, `rejected_search_results`, `discovery_outcome`; offer rows carry the `request_id`. Rows for configurations outside the scope appear only when an offer was confirmed for them (`CONFIRMED_OUTSIDE_SCOPE`). Each row has a `current_reason` sentence, `candidate_url`, `differing_fields`, `confirmed_price` and a separate `unconfirmed_candidate_price`, and the discovery `search_stop_reason`. Repeat `--observations`/`--match-results` for earlier collections: the latest observation of each offer decides, older ones stay as history. `coverage_offers.csv` keeps every offer behind it with its relation (`MATCHED` vs search context). "Not found" never means out of stock.
 
+**Per-cell diagnostics (2026-10-22).** One row per configuration x retailer, placed at the furthest stage it reached, with the queries and their outcomes, limits hit (`budget_flags`: result cap, query limit, request budget, candidate limit), best candidate, request outcome, observation ID, `observed_listing_price` (any amount a related page showed) and, separately, `owner_policy_comparable_price` (the published price only). `--audit-leads` overlays an external audit's claims (category-only URLs, URLs claimed for several targets, whether search ever returned the URL) without trusting them:
+
+```bash
+python diagnose_blank_cells.py \
+  --report-dir "$weekly_run/reports" \
+  --discovery-dir "$weekly_run/discovery" \
+  --coverage "$weekly_run/coverage/coverage.csv" \
+  --target-master "$weekly_run/inputs/target_master_validated.csv" \
+  --output-dir "$weekly_run/diagnostics"
+```
+
+Stages: `NOT_SEARCHED`, `SEARCH_FAILED`, `ZERO_RESULTS_AFTER_BOUNDED_SEARCH`, `NO_RELEVANT_CANDIDATE`, `CATALOG_IDENTITY_UNRESOLVED`, `CANDIDATE_DISCOVERED_NOT_FETCHED`, `PAGE_FETCH_ERROR`, `PAGE_PARSED_NO_PRICE`, `VARIANT_UNRESOLVED`, `MATCH_REVIEW_REQUIRED`, `CONFIGURATION_MISMATCH`, `PRICE_KNOWN_NOT_COMPARABLE`, `COMPARABLE_PUBLISHED`. A blank is never evidence that a retailer does not sell the configuration.
+
 ### Step 8 - Preview the tracker update
 
 ```bash
@@ -434,7 +466,9 @@ python publish_prices.py --preview \
   --output-root "$weekly_run/publications"
 ```
 
-**Does:** validates reports and reads the five pilot destination tabs to check existing content/headers. No Sheet changes occur. Check counts, week, cutoff, sales-period label, the Shopee snapshot count, and that `PILOT_PRICE_SUMMARY` is a new tab or this publisher's. `plan_PILOT_PRICE_SUMMARY.csv` and `plan_PILOT_PRICE_SUMMARY_notes.csv` in the output folder show the summary and every cell note before anything is written.
+**Does:** validates reports and reads the six pilot destination tabs (read-only scope) to check existing content/headers. No Sheet changes occur. Check counts, week, cutoff, sales-period label, the Shopee snapshot count, and that `PILOT_PRICE_SUMMARY` and `PILOT_PRICE_OVERVIEW` are new tabs or this publisher's. `plan_<tab>.csv` and `plan_<tab>_notes.csv` in the output folder show every tab and cell note before anything is written. A "Review: one offer prices N configurations" line names a retailer offer priced in several targets' cells (allowed by the listed-spec policy; check for a duplicate target).
+
+**First `pilot-sheets-6` publication: the owner-built overview.** The live `PILOT_PRICE_OVERVIEW` built on 2026-10-20/21 by hand (twelve `FILTER`/`INDEX` formulas over the comparison) is recognised by its exact header and shown as `owner-built layout (needs --adopt-overview)`. The preview then writes `current_PILOT_PRICE_OVERVIEW.csv` (what the tab displays now) and `overview_migration.json` (displayed values compared with the plan, cell by cell, plus the number of formulas and notes that would be replaced). The 2026-10-22 preview found 762 compared cells, 6 differing: the Shopee header and 5 labels where the formula repeated the brand ("HP HP Laptop 14"). Every price agreed. Add `--adopt-overview` to the preview to see the adopted plan; a tab with any other content is refused.
 
 Since publisher `pilot-sheets-5` (2026-10-20) the comparison shows, after the storage column, the configuration's Shopee snapshot price: the lowest eligible mapped-listing price of the 2026-09-28 sales extract, dated, with its product-page link (it does not select the variation), variation and `model_id`, and status. It is historical, never a current price, and never part of the "Lowest retailer price" or "Lowest in-stock retailer price" minimums. `PILOT_PRICE_SUMMARY` repeats the same prices in seven columns.
 
@@ -451,9 +485,22 @@ python publish_prices.py --write-sheets \
   --output-root "$weekly_run/publications"
 ```
 
-**Does:** backs up existing pilot tabs locally, writes the four data tabs (comparison, summary, history, review), records the publication, then verifies values, links, PHP formats and, on the summary, cell notes and italics by readback.
+**Does:** saves a full local snapshot of each existing pilot tab (`backup_<tab>.json`: values and formulas, displayed values, notes, formats, column widths, row heights, frozen panes, filter), writes the five data tabs (comparison, summary, overview, history, review) and their house layout, records the publication, then verifies values, links, PHP formats, frozen panes and column widths and, on the summary and overview, cell notes and italics by readback.
+
+The first `pilot-sheets-6` write needs `--adopt-overview` once (see Step 8); later cycles regenerate the overview with the other tabs and need no flag. The run log records the adopted tab.
 
 Finish with `Publication SUCCESS` and zero readback issues. Keep the run folder. This publisher does not update `raw`, catalog/mappings, or either Top 100 tab. Its backup is per-pilot-tab JSON, not a full workbook copy.
+
+**Rollback.** To restore the data tabs exactly as they were before a publication (including the owner-built overview's formulas and notes):
+
+```bash
+python publish_prices.py --rollback "$weekly_run/publications/<timestamp>_write" \
+  --output-root "$weekly_run/publications"
+```
+
+It restores only tabs backed up in that folder, only when each is still the same sheet (same ID), checks the result by readback and never rewrites the run log. A tab the publication created has no backup and is left as it is (listed as skipped).
+
+**House layout (2026-10-22).** Every write styles the three price tabs the way the owner styled them by hand: navy headers with white text and an orange rule, orange Shopee headers, tinted price columns (Shopee orange, retailers blue, in-stock minimum green), monospaced numbers, muted links, alternate-row banding, hidden gridlines, frozen header row and key columns (comparison: Rank to Model; summary: Laptop; overview: Rank and Laptop), fixed column widths and row heights. Conditional-format rules are not touched; the comparison columns they address (statuses in Q, W, AC, AI, AO; prices in O, U, AA, AG, AM; lowest retailer price in AS) are kept in place by a test.
 
 ## 5. Which commands actually change things?
 
@@ -467,8 +514,11 @@ Finish with `Publication SUCCESS` and zero readback issues. Keep the run folder.
 | `discover_products.py --preview` | No | No | Query plan | No |
 | `discover_products.py --live --collect` | No | Yes | Evidence, observations, matches, store backup | No |
 | `track_prices.py` | No | No | Reports and pending versioned matches in the store | No |
-| `publish_prices.py --preview` | Five pilot tabs | No | Publication plan | No |
-| `publish_prices.py --write-sheets` | Five pilot tabs | No | Plan, backups, publication report | **Five pilot tabs only** |
+| `discover_catalog_leads.py --live` (optional) | No | robots.txt and sitemaps only | Lead CSV, requests, evidence | No |
+| `diagnose_blank_cells.py`, `measure_discovery.py` | No | No | Per-cell diagnostics, metrics | No |
+| `publish_prices.py --preview` | Six pilot tabs | No | Publication plan, overview migration preview | No |
+| `publish_prices.py --write-sheets` | Six pilot tabs | No | Plan, full snapshots, publication report | **Six pilot tabs only** |
+| `publish_prices.py --rollback <folder>` | Backed-up pilot tabs | No | Rollback report | **Backed-up pilot data tabs only** |
 | `run_phase1.py --write-sheets` (optional) | `raw` and P1 decision/log inputs | No | New sales outputs | **Legacy P1 outputs** |
 
 ## 6. Folder structure
