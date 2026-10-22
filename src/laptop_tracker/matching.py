@@ -86,6 +86,11 @@ SECONDARY_SEVERITY: dict[str, str] = {
     "series": WARNING,
     "color": WARNING,
 }
+# PROPOSED, not approved (2026-10-22): an opt-in gate that sends an exact match whose verified
+# processor number differs from the target's (Core 5 220H vs 210H) to review instead of EXACT
+# with SECONDARY_WARNING_CPU_MODEL. Pass it as ``ExactMatcher(..., severity_overrides=...)`` for
+# an impact preview; the owner decides before it becomes policy.
+STRICT_CPU_MODEL: dict[str, str] = {"cpu_model": BLOCKING}
 
 _RESOLUTION = re.compile(r"([0-9]+)\s*[x×]\s*([0-9]+)\Z", re.IGNORECASE)
 
@@ -190,7 +195,21 @@ class ExactMatcher:
     near-match candidates, or ambiguity. An unknown tracking mode is rejected.
     """
 
-    def __init__(self, targets: Iterable[Mapping[str, object]] | pd.DataFrame) -> None:
+    def __init__(
+        self,
+        targets: Iterable[Mapping[str, object]] | pd.DataFrame,
+        *,
+        severity_overrides: Mapping[str, str] | None = None,
+    ) -> None:
+        # ``severity_overrides`` (2026-10-22) is an opt-in diagnostic/review gate, e.g.
+        # ``STRICT_CPU_MODEL``. The approved policy is ``SECONDARY_SEVERITY`` unchanged; callers
+        # that pass overrides must keep their results apart from the approved matching context.
+        overrides = dict(severity_overrides or {})
+        unknown = sorted(set(overrides) - set(SECONDARY_MATCH_COLUMNS))
+        if unknown or any(value not in {BLOCKING, WARNING} for value in overrides.values()):
+            raise ValueError(f"Invalid severity override(s): {', '.join(unknown) or overrides}.")
+        self._severity = {**SECONDARY_SEVERITY, **overrides}
+        self.severity_overrides = overrides
         rows = (
             targets.to_dict(orient="records")
             if isinstance(targets, pd.DataFrame)
@@ -262,7 +281,7 @@ class ExactMatcher:
         for field in SECONDARY_MATCH_COLUMNS:
             offer_value = offer_attributes.get(field)
             target_value = target.row.get(field)
-            severity = SECONDARY_SEVERITY.get(field, BLOCKING)
+            severity = self._severity.get(field, BLOCKING)
             if field in ambiguous_secondary:
                 # Several stated values cannot corroborate one target value.
                 status = EvidenceStatus.CONFLICT
@@ -408,7 +427,7 @@ class ExactMatcher:
         """Blocking fields where the offer and target both state a parseable, different value."""
         fields = []
         for field in SECONDARY_MATCH_COLUMNS:
-            if SECONDARY_SEVERITY.get(field, BLOCKING) != BLOCKING or field in ambiguous_secondary:
+            if self._severity.get(field, BLOCKING) != BLOCKING or field in ambiguous_secondary:
                 continue
             try:
                 offer_key = _secondary_key(field, offer_attributes.get(field))
