@@ -1,0 +1,11 @@
+case_id,retailer_id,model,brand,family,specs,expected_url
+W01,pcx,FA607NUQ-RL011W,ASUS,TUF A16,16GB 512GB,https://pcx.com.ph/products/asus-tuf-gaming-a16-fa607nuq-rl011w-90nr0qf3-m002x0-geforce-rtx-4050-amd-ryzen-7-laptop-mecha-gray
+W02,laptop_factory,14-ep0445TU,HP,Laptop 14,8GB 512GB,https://laptopfactory.com.ph/product/hp-laptop-14-ep0445tu/
+W03,laptop_factory,B12UC-1432PH,MSI,Thin 15,16GB 512GB,https://laptopfactory.com.ph/product/msi-gaming-thin-15-b12uc-1432ph/
+W04,pcx,MacBook Neo MHFC4PP/A,Apple,MacBook Neo,8GB 512GB,https://pcx.com.ph/products/apple-macbook-neo-a18-pro-mhfc4pp-a-laptop-silver
+W05,pcc,MacBook Neo,Apple,MacBook Neo,8GB 256GB,https://pccentralcomputerstore.com/products/apple-macbook-neo-apple-a18-pro-chip-13-retina-ips-display-8gb-unified-memory-touch-id-pc-central
+W06,oct,SF14-51-553D,Acer,Swift,32GB 1TB,https://www.octagon.com.ph/products/acer-swift-sf14-51-553d-core-ultra-5-228v-32gb-1tb-ssd-14-oled-win-11-office-h-s-2021
+W07,oct,FA607NUQ-RL204WSM,ASUS,TUF A16,16GB 512GB,https://www.octagon.com.ph/products/asus-tuf-fa607nuq-rl204wsm-ryzen-7-170-16gb-512gb-ssd-16-fhd-144hz-win-11-rtx4050-6gb
+W08,pcx,15-fc0756au,HP,Laptop 15,8GB 512GB,https://pcx.com.ph/products/hp-15-fc0756au-d07c9pa-amd-ryzen-3-laptop-natural-silver
+W09,datablitz,S3407VA-LY135WSM,ASUS,Vivobook S14,16GB 512GB,https://ecommerce.datablitz.com.ph/products/asus-vivobook-s14-s3407va-ly135wsm-laptop-cool-silver-14-wuxga-1920x1200-ips-core-5-210h-16gb-ram-512gb-ssd-uhd-graphics-windows-11-home-ms-office-home-student-2024-asus-ap4600-backpack
+W10,laptop_factory,X1404VA-EB2264WSM,ASUS,Vivobook 14,8GB 512GB,https://laptopfactory.com.ph/product/asus-vivobook-14-x1404va-eb2264wsm/
