@@ -14,6 +14,7 @@ from urllib.parse import urlsplit
 
 sys.path.insert(0, str(Path(__file__).resolve().parent / "src"))
 
+from laptop_tracker.catalog_index import parse_product_feed
 from laptop_tracker.catalog_leads import (
     CATALOG_SOURCES,
     LEAD_COLUMNS,
@@ -66,10 +67,15 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                         help="Hard ceiling on requests (required with --live).")
     parser.add_argument("--max-sitemaps-per-retailer", type=int, default=5,
                         help="Product sitemaps read per retailer (default 5).")
+    parser.add_argument("--include-product-feed", action="store_true",
+                        help="Cache Laptop Factory's public feed for title/spec clues.")
+    parser.add_argument("--max-feed-pages", type=int, default=20)
     parser.add_argument("--min-seconds-between-requests", type=float,
                         default=FetchConfig().min_request_interval_seconds)
     parser.add_argument("--output-dir", type=Path, required=True, help="New run folder.")
     args = parser.parse_args(argv)
+    if not 1 <= args.max_feed_pages <= 100:
+        parser.error("--max-feed-pages must be between 1 and 100.")
     if args.live and not args.max_total_requests:
         parser.error("--live requires --max-total-requests.")
     if args.min_seconds_between_requests < FetchConfig().min_request_interval_seconds:
@@ -133,7 +139,8 @@ class Session:
                                                            or ""),
                                         "message": f"{error.code}: {error}"[:300]})
             return None
-        name = f"evidence/{page.content_sha256}.{'txt' if kind == 'robots' else 'xml'}"
+        suffix = "txt" if kind == "robots" else "json" if kind == "product_feed" else "xml"
+        name = f"evidence/{page.content_sha256}.{suffix}"
         (self.out / name).write_bytes(page.body)
         self.requests.append(row | {
             "outcome": "FETCHED", "http_status": str(page.status_code),
@@ -168,6 +175,8 @@ def main(argv: list[str] | None = None, *, transport: Transport | None = None,
         "family_or_name_targets_without_leads": len(rows) - len(targets),
         "limits": {"max_total_requests": args.max_total_requests,
                    "max_sitemaps_per_retailer": args.max_sitemaps_per_retailer,
+                   "include_product_feed": args.include_product_feed,
+                   "max_feed_pages": args.max_feed_pages,
                    "min_seconds_between_requests": args.min_seconds_between_requests},
         "retailers": {},
     }
@@ -175,14 +184,17 @@ def main(argv: list[str] | None = None, *, transport: Transport | None = None,
         for retailer in retailers:
             source = CATALOG_SOURCES[retailer]
             host = urlsplit(source.root_sitemap).netloc
+            feed_pages = args.max_feed_pages if (
+                args.include_product_feed and retailer == "laptop_factory") else 0
             summary["retailers"][retailer] = {
                 "would_request": [f"https://{host}/robots.txt", source.root_sitemap,
                                   f"up to {args.max_sitemaps_per_retailer} product sitemaps "
                                   f"matching {source.product_sitemap}"],
-                "worst_case_requests": 2 + args.max_sitemaps_per_retailer}
+                "worst_case_requests": 2 + args.max_sitemaps_per_retailer + feed_pages}
         (out / "catalog_summary.json").write_text(json.dumps(summary, indent=2) + "\n")
+        worst = sum(status["worst_case_requests"] for status in summary["retailers"].values())
         print(f"Preview: {len(targets)} MODEL_CODE target(s) of {len(rows)}; worst case "
-              f"{len(retailers) * (2 + args.max_sitemaps_per_retailer)} requests. Nothing sent.")
+              f"{worst} requests. Nothing sent.")
         return 0
 
     session = Session(args, out, transport, clock)
@@ -241,6 +253,29 @@ def main(argv: list[str] | None = None, *, transport: Transport | None = None,
         for child in children[args.max_sitemaps_per_retailer:]:
             session.requests.append({"retailer_id": retailer, "kind": "product_sitemap",
                                      "url": child, "outcome": "NOT_SENT_SITEMAP_LIMIT"})
+        if args.include_product_feed and retailer == "laptop_factory":
+            status.update(feed_pages_read=0, feed_products=0, feed_complete=False)
+            for number in range(1, args.max_feed_pages + 1):
+                feed_url = (f"https://{host}/wp-json/wc/store/v1/products?per_page=100"
+                            f"&page={number}&orderby=id&order=asc")
+                if not robots_allows(rules, feed_url):
+                    session.requests.append({"retailer_id": retailer, "kind": "product_feed",
+                                             "url": feed_url, "outcome": "ROBOTS_DISALLOWED"})
+                    break
+                raw = session.get(retailer, "product_feed", feed_url)
+                if raw is None:
+                    break
+                try:
+                    products = parse_product_feed(raw, retailer)
+                except ValueError:
+                    session.requests[-1]["message"] = "Invalid public product-feed response"
+                    break
+                status["feed_pages_read"] += 1
+                status["feed_products"] += len(products)
+                session.requests[-1]["entries"] = str(len(products))
+                if len(products) < 100:
+                    status["feed_complete"] = True
+                    break
         status["product_urls"] = len(found)
         mine = catalog_leads(retailer, found, targets, supplied_on=day)
         status["leads"] = len(mine)

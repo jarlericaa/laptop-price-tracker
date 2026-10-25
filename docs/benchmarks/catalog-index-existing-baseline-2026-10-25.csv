@@ -1,0 +1,11 @@
+case_id,existing_catalog_expected_found,native_plus_existing_catalog_found
+W01,True,True
+W02,True,True
+W03,True,True
+W04,False,False
+W05,False,True
+W06,True,True
+W07,True,True
+W08,True,True
+W09,False,True
+W10,True,True
