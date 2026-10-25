@@ -29,7 +29,8 @@ from search_catalog_index import native_search, write_reports
 
 def measure_cached_search(run, output, repeats):
     started = time.perf_counter()
-    index = CatalogIndex.from_run(Path(run["index_run"]))
+    index = CatalogIndex.from_run(Path(run["index_run"]),
+                                 feed_runs=tuple(Path(p) for p in run.get("feed_runs", [])))
     load_seconds = time.perf_counter() - started
     planned = [queries(case, 1)[0] for case in run["cases"]]
     started = time.perf_counter()

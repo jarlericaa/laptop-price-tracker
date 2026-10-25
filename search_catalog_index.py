@@ -160,6 +160,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--max-pages-per-case", type=int, default=3)
     parser.add_argument("--index-run", type=Path,
                         help="Saved discover_catalog_leads.py live run; searched without network")
+    parser.add_argument("--feed-run", type=Path, action="append", default=[],
+                        help="Additional saved public-feed catalog run (repeatable)")
     args = parser.parse_args(argv)
     if not 1 <= args.max_cases <= 100 or not 0 <= args.max_pages_per_case <= 10:
         parser.error("Case/page budgets are outside the supported bounds")
@@ -197,12 +199,13 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("--index-run is required except in replay")
     if args.benchmark_native and not args.live:
         parser.error("--benchmark-native requires --live")
-    source = CatalogIndex.from_run(args.index_run)
+    source = CatalogIndex.from_run(args.index_run, feed_runs=tuple(args.feed_run))
     run = {"started_at": datetime.now(UTC).isoformat(), "cases": cases,
            "cases_sha256": hashlib.sha256(args.cases.read_bytes()).hexdigest(),
            "searches": {}, "pages": {}, "benchmark_native": args.benchmark_native,
            "search_backend": source.backend, "index_run": str(args.index_run.resolve()),
-           "index_entries": len(source.entries), "index_coverage": source.coverage}
+           "index_entries": len(source.entries), "index_coverage": source.coverage,
+           "feed_runs": [str(path.resolve()) for path in args.feed_run]}
     # Save the declared cohort before any search. Expected URLs never enter search requests.
     def save():
         (args.output / "run.json").write_text(json.dumps(run, indent=2) + "\n", encoding="utf-8")
@@ -215,7 +218,8 @@ def main(argv: list[str] | None = None) -> int:
             if args.benchmark_native:
                 records["native"].append(response_record(native_search(query, retailer, fetcher)))
                 save()
-            records["index"].append(response_record(source.search(query)))
+            clues = " ".join(case.get(k, "") for k in ("brand", "family", "specs"))
+            records["index"].append(response_record(source.search(query, clues=clues)))
             save()
         found = []
         for provider in ("index", "native"):

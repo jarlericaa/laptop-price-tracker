@@ -13,6 +13,8 @@ import re
 import time
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
+from decimal import Decimal
+from html import unescape
 from html.parser import HTMLParser
 from pathlib import Path
 from urllib.parse import parse_qsl, unquote, urlencode, urljoin, urlsplit, urlunsplit
@@ -86,7 +88,30 @@ class SearchResponse:
 
 
 def _tokens(text: str) -> list[str]:
+    text = re.sub(r"(\d+(?:\.\d+)?)\s*(GB|TB)\b", lambda m: (
+        format((Decimal(m[1]) * (1000 if m[2].lower() == "tb" else 1)).normalize(), "f") + "GB"
+    ), text, flags=re.I)
     return re.findall(r"[a-z0-9]+", unquote(text).casefold())
+
+
+def parse_product_feed(body: bytes, retailer_id: str) -> list[dict[str, str]]:
+    """Public WooCommerce product metadata for discovery, excluding prices/stock."""
+    if retailer_id != "laptop_factory":
+        raise DiscoveryError("No public product feed configured for this retailer")
+    data = json.loads(body)
+    if not isinstance(data, list) or len(data) > 100:
+        raise DiscoveryError("Unexpected product-feed response")
+    entries = []
+    for item in data:
+        if not isinstance(item, dict) or not isinstance(item.get("name"), str):
+            raise DiscoveryError("Malformed product-feed item")
+        url = product_url(item.get("permalink", ""), retailer_id)
+        text = " ".join(str(item.get(key) or "") for key in (
+            "sku", "short_description", "description"))
+        text = " ".join(unescape(re.sub(r"<[^>]*>", " ", text)).split())[:4000]
+        entries.append({"retailer_id": retailer_id, "url": url,
+                        "title": unescape(item["name"]), "search_text": text, "lastmod": ""})
+    return entries
 
 
 class CatalogIndex:
@@ -106,23 +131,29 @@ class CatalogIndex:
         self.retrieved_at, self.max_results = retrieved_at, max_results
         self.coverage = coverage or {}
         self.entries, self.postings = [], {}
-        seen = set()
+        merged = {}
         for entry in entries:
             retailer = entry["retailer_id"]
             url = product_url(entry["url"], retailer)
-            if (retailer, url) in seen:
-                continue
-            seen.add((retailer, url))
+            key = (retailer, url)
+            # A public feed enriches the same sitemap URL; it cannot replace identity.
+            previous = merged.get(key, {})
+            merged[key] = {**previous, **{k: v for k, v in entry.items() if v or k not in previous},
+                           "url": url}
+        for entry in merged.values():
+            retailer, url = entry["retailer_id"], entry["url"]
             index = len(self.entries)
             self.entries.append({**entry, "url": url})
-            words = _tokens(urlsplit(url).path + " " + entry.get("title", ""))
+            words = _tokens(" ".join([urlsplit(url).path, entry.get("title", ""),
+                                      entry.get("search_text", "")]))
             terms = {"".join(words[i:i + width]) for i in range(len(words))
                      for width in range(1, 4) if i + width <= len(words)}
             for term in terms:
                 self.postings.setdefault((retailer, term), set()).add(index)
 
     @classmethod
-    def from_run(cls, folder: Path, max_results: int = 5) -> CatalogIndex:
+    def from_run(cls, folder: Path, max_results: int = 5, *,
+                 feed_runs: tuple[Path, ...] = ()) -> CatalogIndex:
         """Reparse hash-checked raw responses from discover_catalog_leads.py.
 
         Ignore derived lead/entry CSVs: the caller's target scope and expected URLs
@@ -135,7 +166,7 @@ class CatalogIndex:
         with (folder / "catalog_requests.csv").open(encoding="utf-8-sig", newline="") as handle:
             for record in csv.DictReader(handle):
                 if record["outcome"] != "FETCHED" or record["kind"] not in {
-                    "sitemap_index", "product_sitemap"
+                    "sitemap_index", "product_sitemap", "product_feed"
                 }:
                     continue
                 retailer = record["retailer_id"]
@@ -152,6 +183,11 @@ class CatalogIndex:
                 body = resolved.read_bytes()
                 if hashlib.sha256(body).hexdigest() != record["content_sha256"]:
                     raise DiscoveryError("Saved sitemap hash differs")
+                if record["kind"] == "product_feed":
+                    for entry in parse_product_feed(body, retailer):
+                        entries.append({**entry, "sitemap": record["url"],
+                                        "source_retrieved_at": record["retrieved_at"]})
+                    continue
                 sitemap = parse_sitemap(body)
                 if sitemap.kind == "urlset":
                     for entry in product_entries(source, sitemap):
@@ -159,10 +195,16 @@ class CatalogIndex:
                                         "title": entry.title, "lastmod": entry.lastmod,
                                         "sitemap": record["url"],
                                         "source_retrieved_at": record["retrieved_at"]})
-        return cls(entries, retrieved_at=summary["finished_at_utc"],
-                   coverage=summary["retailers"], max_results=max_results)
+        coverage = summary["retailers"]
+        retrieved_at = summary["finished_at_utc"]
+        for feed_run in feed_runs:
+            extra = cls.from_run(feed_run, max_results)
+            entries.extend(extra.entries)
+            coverage.update(extra.coverage)
+            retrieved_at = max(retrieved_at, extra.retrieved_at)
+        return cls(entries, retrieved_at=retrieved_at, coverage=coverage, max_results=max_results)
 
-    def search(self, query: str) -> SearchResponse:
+    def search(self, query: str, *, clues: str = "") -> SearchResponse:
         started = time.monotonic()
         response = SearchResponse(query, "SEARCH_ERROR", self.retrieved_at)
         scope, separator, words = query.partition(" ")
@@ -179,7 +221,13 @@ class CatalogIndex:
         terms = set(_tokens(words))
         postings = [self.postings.get((retailer, term), set()) for term in terms]
         matches = set.intersection(*postings)
-        ordered = sorted(matches, key=lambda i: self.entries[i]["url"])
+        # Model/name words remain required. Other recorded facts only rank leads;
+        # missing metadata never becomes a configuration match or inferred value.
+        clue_terms = set(_tokens(clues)) - terms
+        ordered = sorted(matches, key=lambda i: (
+            -sum(i in self.postings.get((retailer, term), ()) for term in clue_terms),
+            self.entries[i]["url"],
+        ))
         for index in ordered[:self.max_results]:
             entry = self.entries[index]
             response.results.append({"url": entry["url"], "title": entry.get("title", ""),

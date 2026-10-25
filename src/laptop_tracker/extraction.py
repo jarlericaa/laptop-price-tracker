@@ -9,7 +9,9 @@ Titles, configuration summaries, unlabeled bullet lines, variant option titles, 
 parsed for matching values. A field is extracted only when its trusted rows yield exactly one value
 under the explicit rules below; otherwise it is left missing with a status that explains why, and
 the offer goes to review. Explicit product description screen diagonals may supply inches;
-shared CPU/screen values require a confirmed complete RAM/storage-only variant matrix.
+Shared CPU/screen values require a confirmed complete variant matrix. A colour/storage-only
+matrix also permits the explicitly stated common RAM, when all drive capacities are independently
+listed in Storage-labelled product rows. Unexplained option differences remain unresolved.
 Other prose, shared fields, identifiers, maximums, and title discrepancies remain supporting
 evidence for review and discovery. Nothing here guesses, fuzzily matches, or assigns
 a ``target_id``.
@@ -228,7 +230,7 @@ RETAILER_LABELS: dict[str, RetailerLabels] = {
     ),
     "pcc": RetailerLabels(
         model=_labels("Model"),
-        cpu=_labels("Processor", "CPU"),
+        cpu=_labels("Processor", "CPU", "Chip"),
         display=_labels("Display"),
         memory=_labels("Memory"),
         storage=_labels("Internal Storage", "Storage"),
@@ -1029,61 +1031,118 @@ def _selected_variant(
 
 
 
+@dataclass(frozen=True)
+class _SharedVariantScope:
+    locator: str = ""
+    selected_storage: str = ""
+    fixed_ram: bool = False
+
+
+def _color_storage_option(value: str) -> tuple[str, str] | None:
+    """A fixed product label, known cosmetic colour and one drive-sized capacity.
+
+    Used only inside a complete bound matrix whose capacities are independently
+    stated in Storage-labelled product rows. No target data enters this decision.
+    """
+    colors = _COLOR_WORDS | {"indigo", "blush", "citrus", "midnight", "starlight"}
+    match = re.fullmatch(
+        r"([A-Za-z]+(?: [A-Za-z]+){0,3}) ([A-Za-z]+) (\d+(?:\.\d+)?)\s*(GB|TB)",
+        clean_text(value), re.I,
+    )
+    if match is None or match[2].casefold() not in colors:
+        return None
+    capacity = _gigabytes(match[3], match[4], allow_tb=True)
+    if not 128 <= capacity <= 8192:
+        return None
+    return match[1].casefold(), str(capacity)
+
+
 def _shared_cpu_display_scope(
     scoped: tuple[tuple[str, str, str], ...], labels: RetailerLabels,
     variant_id: str, selected: list[tuple[str, str]],
-) -> str:
-    """Locator of a complete, bound RAM/storage-only matrix, or blank when unproven.
+    storage_rows: list[tuple[str, str]],
+) -> _SharedVariantScope:
+    """A complete bound matrix varying RAM/storage, or confirmed colour/storage.
 
     Variant titles must describe their option values only. They are checked for conflicts,
     never mined for a model or other matching value.
     """
     matrices = [(label, value) for scope, label, value in scoped if scope == VARIANT_DEFINITIONS]
     if len(matrices) != 1:
-        return ""
+        return _SharedVariantScope()
     locator, text = matrices[0]
     try:
         matrix = json.loads(text)
         if not isinstance(matrix, dict) or matrix.get("selected_id") != variant_id:
-            return ""
+            return _SharedVariantScope()
         names, variants = matrix.get("option_names"), matrix.get("variants")
         if not isinstance(names, list) or names != [name for name, _ in selected]:
-            return ""
+            return _SharedVariantScope()
         if not isinstance(variants, list) or len(variants) < 2:
-            return ""
+            return _SharedVariantScope()
         if any(not isinstance(name, str) for name in names):
-            return ""
+            return _SharedVariantScope()
         allowed = labels.selected_memory | labels.selected_storage
         if (
             not names or len(set(names)) != len(names)
-            or any(n.casefold() not in allowed for n in names)
         ):
-            return ""
+            return _SharedVariantScope()
+        compound = len(names) == 1 and names[0].casefold() not in allowed
+        if not compound and any(n.casefold() not in allowed for n in names):
+            return _SharedVariantScope()
+        prefixes, capacities, selected_capacity = set(), set(), ""
         ids: set[str] = set()
         selected_found = False
         for variant in variants:
             if not isinstance(variant, dict):
-                return ""
+                return _SharedVariantScope()
             identity = variant.get("id")
             options, title = variant.get("options"), variant.get("title")
             if not isinstance(identity, str) or not identity or identity in ids:
-                return ""
+                return _SharedVariantScope()
             ids.add(identity)
             if not isinstance(options, list) or len(options) != len(names):
-                return ""
+                return _SharedVariantScope()
             if not all(isinstance(value, str) and value.strip() for value in options):
-                return ""
+                return _SharedVariantScope()
             if not isinstance(title, str) or clean_text(title) != " / ".join(options):
-                return ""
+                return _SharedVariantScope()
             for name, value in zip(names, options, strict=True):
-                parse = _ram if name.casefold() in labels.selected_memory else _storage
-                if len(parse(value)) != 1 or _cpu_series(value) or _screen_size(value):
-                    return ""
+                if compound:
+                    parsed = _color_storage_option(value)
+                    if parsed is None:
+                        return _SharedVariantScope()
+                    prefix, capacity = parsed
+                    prefixes.add(prefix)
+                    capacities.add(capacity)
+                    if identity == variant_id:
+                        selected_capacity = capacity
+                else:
+                    parse = _ram if name.casefold() in labels.selected_memory else _storage
+                    if len(parse(value)) != 1 or _cpu_series(value) or _screen_size(value):
+                        return _SharedVariantScope()
             if identity == variant_id:
                 selected_found = options == [value for _, value in selected]
-        return locator if selected_found else ""
+        if not selected_found:
+            return _SharedVariantScope()
+        if compound:
+            # Both the complete picker and a Storage-labelled product row must state
+            # every capacity. Fixed text and known colours may vary cosmetically;
+            # unexplained hardware, upgrades and capacity guesses cannot pass.
+            stated = set()
+            for _, value in storage_rows:
+                normalized = re.sub(r"(?i)(GB|TB)(?=SSD\b|HDD\b)", r"\1 ", value)
+                scopes = _capacity_scopes(normalized)
+                if scopes.maximums or scopes.optional:
+                    return _SharedVariantScope()
+                stated.update(str(_gigabytes(m[1], m[2], allow_tb=True))
+                              for m in _CAPACITY.finditer(normalized))
+            if len(prefixes) != 1 or not capacities or not capacities <= stated:
+                return _SharedVariantScope()
+            return _SharedVariantScope(locator, selected_capacity, True)
+        return _SharedVariantScope(locator)
     except (ValueError, TypeError, _Unparseable, _MultipleValues):
-        return ""
+        return _SharedVariantScope()
 
 
 def _prose_screen_rows(
@@ -1862,6 +1921,7 @@ def _apply_title_product_name(
     *,
     shared: bool,
     binding: str,
+    shared_locator: str = "",
 ) -> None:
     """Accept one registered product name stated in the title (``Apple MacBook Neo 13" ...``)
     under the title-code rule: no model code in the title, no model claim on the page, exactly
@@ -1870,7 +1930,7 @@ def _apply_title_product_name(
     registered name; nothing is taken from a catalog target."""
     primary = {item.field: item for item in evidence}
     model = primary["model"]
-    if model.status is not ExtractionStatus.MISSING or claims or shared:
+    if model.status is not ExtractionStatus.MISSING or claims or (shared and not shared_locator):
         return
     if binding.startswith("NOT_CONFIRMED") or title_identifiers(offer.raw_title).model_codes:
         return
@@ -1887,6 +1947,8 @@ def _apply_title_product_name(
         return
     title_claims = _title_core_claims(offer.raw_title)
     for item in others:
+        if shared and item.field in {"ram_capacity_gb", "storage_capacity_gb"}:
+            continue  # Bound selected options govern capacities on a shared parent page.
         stated = title_claims.get(item.field, set())
         if stated and stated != {item.value}:
             notes.append(f"TITLE_SPEC_CONFLICT_{item.field.upper()}")
@@ -1894,7 +1956,9 @@ def _apply_title_product_name(
     corroboration = "; ".join(f"{item.field}: {item.source_label}" for item in others)
     evidence[evidence.index(model)] = FieldExtraction(
         "model", ExtractionStatus.EXTRACTED, names[0].name,
-        f"title [{TITLE_PRODUCT_NAME_CORROBORATED}; registered product name; corroborated by "
+        f"title [{TITLE_PRODUCT_NAME_CORROBORATED}; "
+        f"{'SHARED_PRODUCT; ' + shared_locator + '; ' if shared else ''}"
+        f"registered product name; corroborated by "
         f"{corroboration}]",
         offer.raw_title,
     )
@@ -2012,9 +2076,11 @@ def extract_offer_attributes(offer: OfferObservation) -> ExtractedAttributes:
     shared = variant_scoped and _has_variant_prefix(offer, specs)
     binding, variant_id, selected = _selected_variant(scoped)
     bound = shared and binding == "CONFIRMED"
-    shared_locator = (
-        _shared_cpu_display_scope(scoped, labels, variant_id, selected) if bound else ""
+    shared_scope = (
+        _shared_cpu_display_scope(scoped, labels, variant_id, selected, rows(labels.storage))
+        if bound else _SharedVariantScope()
     )
+    shared_locator = shared_scope.locator
 
     evidence: list[FieldExtraction] = []
     supporting: list[FieldExtraction] = []
@@ -2054,7 +2120,7 @@ def extract_offer_attributes(offer: OfferObservation) -> ExtractedAttributes:
                 # (balanced policy, 2026-10-15); title/URL/identifier conflicts are checked later.
                 inheritable = field in {"cpu_series", "screen_size_in"} or (
                     field == "model" and model_codes(item.value) == [item.value]
-                )
+                ) or (field == "ram_capacity_gb" and shared_scope.fixed_ram)
                 if shared_locator and inheritable and not conflict:
                     item = FieldExtraction(
                         field, ExtractionStatus.EXTRACTED, item.value,
@@ -2080,6 +2146,12 @@ def extract_offer_attributes(offer: OfferObservation) -> ExtractedAttributes:
                 # Installed RAM/storage stated by the bound selected variant's own options.
                 item = _extract_field(field, option_rows, parse, required=True, one_row=True)
                 assert item is not None
+            if field == "storage_capacity_gb" and shared_scope.selected_storage:
+                item = FieldExtraction(
+                    field, ExtractionStatus.EXTRACTED, shared_scope.selected_storage,
+                    f"Storage [selected variant {variant_id}; complete colour/storage matrix]",
+                    " | ".join(value for _, value in selected), SCOPE_SELECTED_VARIANT,
+                )
         evidence.append(item)
 
     if details is not None:
@@ -2157,7 +2229,8 @@ def extract_offer_attributes(offer: OfferObservation) -> ExtractedAttributes:
             next(value for scope, _, value in scoped if scope == VARIANT_DEFINITIONS),
             shared_locator,
         )
-        notes.append("SHARED_CPU_DISPLAY_RAM_STORAGE_ONLY")
+        notes.append("SHARED_FIXED_RAM_COLOR_STORAGE_ONLY" if shared_scope.fixed_ram
+                     else "SHARED_CPU_DISPLAY_RAM_STORAGE_ONLY")
 
     primary = {item.field: item for item in evidence}
     scope_note = " [shared product description]" if shared else ""
@@ -2187,9 +2260,10 @@ def extract_offer_attributes(offer: OfferObservation) -> ExtractedAttributes:
             notes.append("SHARED_DESCRIPTION_DIFFERS_RAM_CAPACITY_GB")
     storage = primary["storage_capacity_gb"]
     shared_storage = [s.value for s in supporting if s.field == "storage_capacity_gb"]
-    if bound and storage.status is ExtractionStatus.EXTRACTED and shared_storage and (
+    if (bound and not shared_scope.selected_storage
+            and storage.status is ExtractionStatus.EXTRACTED and shared_storage and (
         storage.value not in shared_storage
-    ):
+    )):
         notes.append("SHARED_DESCRIPTION_DIFFERS_STORAGE_CAPACITY_GB")
 
     # Storage: a drive amount without a capacity unit and transfer rates stay supporting only.
@@ -2321,7 +2395,7 @@ def extract_offer_attributes(offer: OfferObservation) -> ExtractedAttributes:
         shared=shared, shared_locator=shared_locator, binding=binding,
     )
     _apply_title_product_name(offer, evidence, notes, claims,
-                              shared=shared, binding=binding)
+                              shared=shared, binding=binding, shared_locator=shared_locator)
     _model_identifier_conflicts(evidence, notes, identifiers, skus)
     if any(DEDUPLICATED_ROWS in item.source_label for item in evidence):
         notes.append("EQUIVALENT_REPEATED_FACTS_DEDUPLICATED")

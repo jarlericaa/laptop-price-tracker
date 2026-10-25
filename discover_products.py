@@ -17,6 +17,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent / "src"))
 
 from laptop_tracker import evidence_approvals
+from laptop_tracker.catalog_index import CatalogIndex, leads, queries
 from laptop_tracker.collection import (
     MANIFEST_COLUMNS,
     ROUTES,
@@ -255,6 +256,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                              "(search_target_id) or whose model code its URL handle shows; when "
                              "native search misses it, it is checked directly (bounded fallback). "
                              "Never an approved match.")
+    parser.add_argument("--catalog-index-run", type=Path,
+                        help="Search a saved catalog locally and add bounded candidate leads.")
+    parser.add_argument("--catalog-feed-run", type=Path, action="append", default=[],
+                        help="Additional saved public feed (repeatable; no live feed calls).")
     parser.add_argument("--no-supplied-urls", action="store_true",
                         help="Do not read the default supplied-URL file.")
     parser.add_argument("--max-supplied-urls-per-target-retailer", type=positive, default=2)
@@ -1077,6 +1082,33 @@ def check_seed_files(paths) -> None:
             )
 
 
+def indexed_candidate_rows(args, targets, retailers):
+    folder = getattr(args, "catalog_index_run", None)
+    if folder is None:
+        return []
+    source = CatalogIndex.from_run(folder, feed_runs=tuple(
+        getattr(args, "catalog_feed_run", [])))
+    rows = []
+    for target in targets:
+        core = target.core
+        specs = " ".join(filter(None, [core.get("cpu_series", ""),
+                         f"{core['ram_capacity_gb']}GB" if core.get("ram_capacity_gb") else "",
+                         f"{core['storage_capacity_gb']}GB"
+                         if core.get("storage_capacity_gb") else ""]))
+        for retailer in retailers:
+            case = {"retailer_id": retailer, "brand": target.brand, "family": target.series,
+                    "model": target.recorded_code or target.model, "specs": specs}
+            responses = [source.search(q, clues=specs) for q in queries(case, 3)]
+            for number, lead in enumerate(leads(responses, retailer), 1):
+                rows.append({"supplied_id": f"IDX-{target.target_id}-{retailer}-{number}",
+                             "retailer_id": retailer, "url": lead["url"],
+                             "search_target_id": target.target_id,
+                             "supplied_by": "catalog_index",
+                             "supplied_on": lead["search_retrieved_at"],
+                             "notes": "Unconfirmed local catalog candidate; " + lead["query"]})
+    return rows
+
+
 def load_supplied(args, targets, retailers):
     """Supplied known pages per (target, retailer), plus one report row per supplied URL.
 
@@ -1092,8 +1124,12 @@ def load_supplied(args, targets, retailers):
     by_id = {t.target_id: t for t in targets}
     found: dict[tuple[str, str], list[tuple[str, str, str]]] = {}
     report: list[dict[str, str]] = []
-    for path in paths:
-        for row in read_rows(path):
+    sources = [(path, read_rows(path)) for path in paths]
+    indexed = indexed_candidate_rows(args, targets, retailers)
+    if indexed:
+        sources.append((args.catalog_index_run, indexed))
+    for path, rows in sources:
+        for row in rows:
             missing = [c for c in ("supplied_id", "retailer_id", "url") if c not in row]
             if missing:
                 raise ValueError(f"{path} lacks column(s) {', '.join(missing)}.")
@@ -1345,6 +1381,8 @@ def main(argv: list[str] | None = None, *, transport: Transport | None = None,
         "cache_max_age_hours": args.cache_max_age_hours,
         "replay_only": args.replay_only,
         "collect_title_differences": not args.no_collect_title_differences,
+        "catalog_index_run": str(args.catalog_index_run) if args.catalog_index_run else "",
+        "catalog_feed_runs": [str(path) for path in args.catalog_feed_run],
     }
     summary: dict = {
         "description": "Automatic product discovery (bounded search, ranking, collection).",

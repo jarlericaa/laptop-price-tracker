@@ -2,8 +2,8 @@
 
 `search_catalog_index.py` searches saved retailer sitemap data locally, then optionally
 fetches candidate product pages through the existing HTTP fetcher. It requires no
-Codex, ChatGPT, LLM, search API, subscription or API key. Existing discovery and
-matching commands continue to work as before.
+Codex, ChatGPT, LLM, search API, subscription or API key. The index can also feed
+the existing discovery command through the opt-in `--catalog-index-run` flag.
 
 The existing `discover_catalog_leads.py` already collects retailer sitemaps. Its lead
 finder accepts only `MODEL_CODE` targets. This new index reuses the collector's raw
@@ -15,6 +15,11 @@ See the [measured benchmark](benchmarks/catalog-index-2026-10-25.md). On its ten
 predeclared cases: native search found 6/10 links, the index found 9/10, and their
 union found 10/10. Native plus the existing sitemap lead finder covered 9/10 on
 the same saved catalog. These are link-recovery results, not accepted prices.
+
+The [completeness and variant follow-up](benchmarks/variant-completeness-2026-10-25.md)
+records the larger refresh, 48-case discovery comparison, 45-page matching replay
+and Sheets validation. It also documents the narrowly proven colour/storage rule
+added to extraction, with remaining ambiguities kept in review.
 
 ## Refresh once, search many times
 
@@ -29,8 +34,8 @@ the same saved catalog. These are link-recovery results, not accepted prices.
 Refresh traffic is shared across all searches. Local queries use no network. The
 index is rebuilt from the saved XML when the command starts; it is not a separate
 database or running service. A periodic refresh currently reads the selected
-sitemaps again. Conditional HTTP refreshes, public catalog feeds and category-page
-crawling are possible later improvements, not implemented by this PR.
+sitemaps again. An opt-in Laptop Factory public feed adds titles, SKUs and description
+clues. Conditional HTTP refreshes and category-page crawling remain future work.
 
 Sitemaps may omit products, be stale, or exceed a chosen request budget. The run
 retains per-retailer coverage. An unavailable snapshot produces `SEARCH_ERROR`;
@@ -53,14 +58,15 @@ Input CSV columns:
 
 The first query uses the model/name, the second varies punctuation and adds the
 brand, and the optional third uses family/specification clues. At most five results
-are returned per query, with stable URL ordering. Broad names can produce multiple
+are returned per query. Specification clues rank matching links, then URLs break ties.
+Those clues never infer missing fields or approve a configuration. Broad names can produce multiple
 candidates or exhaust that cap. The `site:` prefix in saved query text is a local
 retailer filter; it does not send a search to Google or another service.
 
 Outputs include the query plan, source coverage, result records, `leads.csv`,
 `supplied_urls.csv`, `metrics.json` and `benchmark.csv`. Live page fetching also saves
 raw HTML and hashes. Output directories must be new or empty. Search leads retain
-the original sitemap retrieval time; querying an old index does not refresh it.
+the original sitemap/feed retrieval time; querying an old index does not refresh it.
 
 Only approved HTTPS retailer product URLs are accepted. Shopify collection product
 routes normalize to `/products/<handle>`; tracking is removed and an explicit numeric
@@ -101,8 +107,43 @@ Pass the exported `supplied_urls.csv` to an otherwise normally scoped
 existing `target_id` in the input CSV for a useful search hint. Downstream discovery
 re-fetches and checks leads; a hint is never an approved target association.
 
-This PR adds runnable commands and documentation to the registered SCL repository.
-It does not add a scheduled job or automatically change the production weekly run.
+For direct integration into an existing weekly discovery invocation, add:
+
+```sh
+--catalog-index-run data/output/catalog_index_full_20261025 \
+--catalog-feed-run data/output/catalog_feed_full_20261025
+```
+
+Keep that invocation's validated target master, selected list, contribution ledger,
+scope, request ceilings and `--collect` choices. Local index results enter the same
+supplied-candidate path and its per-target/retailer cap (default two). They are
+re-fetched, variant-checked and matched under existing controls. The catalog flags
+add leads; they do not publish Sheets. Rebuilding price reports and the explicit
+`publish_prices.py --write-sheets` step remain as described in
+[the weekly workflow](WEEKLY_WORKFLOW.md).
+
+To refresh all advertised sitemaps and the optional Laptop Factory feed, increase
+the collector's explicit limits for your chosen scope, for example:
+
+```sh
+.venv/bin/python discover_catalog_leads.py --live \
+  --target-master data/output/current/target_master_validated.csv \
+  --scope-file data/output/current/pilot_scope.csv \
+  --max-total-requests 90 --max-sitemaps-per-retailer 40 \
+  --include-product-feed --max-feed-pages 20 \
+  --output-dir data/output/catalog_fresh
+```
+
+Use your actual fresh input paths and a new output folder. Feed pages share the
+collector's request budget, robots rules and throttle. The raw JSON is saved and
+hash-checked; feed prices/stock never become observations. A separately saved feed
+can be merged with `search_catalog_index.py --feed-run <folder>` or the discovery
+flag above. End-of-feed coverage means the visible public feed ended, not that the
+whole store's inventory is known.
+
+This PR adds runnable commands to the registered SCL repository. It does not add
+a scheduled job or automatically start a production weekly run. A connected-account
+sample Sheet does not supply SCL's unattended service-account credentials.
 
 ## Reproduce the catalog benchmark
 
