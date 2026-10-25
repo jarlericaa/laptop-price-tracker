@@ -205,6 +205,13 @@ def test_benchmark_does_not_remove_unreachable_expected_pages_from_denominator()
     assert report["per_case"][0]["expected_fetch_outcome"] == "FETCH_ERROR"
 
 
+def test_export_never_promotes_a_ground_truth_only_url_to_a_supplied_lead(tmp_path):
+    run = {"cases": [CASE], "searches": {"C1": {"web": [], "native": []}},
+           "pages": {URL: {"outcome": "PRODUCT_PAGE"}}}
+    cli().write_reports(tmp_path, run)
+    assert len((tmp_path / "supplied_urls.csv").read_text().splitlines()) == 1
+
+
 def test_cli_runs_from_a_fresh_checkout_without_an_editable_install(tmp_path):
     cases = tmp_path / "cases.csv"
     cases.write_text("case_id,retailer_id,model\nC1,pcx,FA607NUQ-RL011W\n")

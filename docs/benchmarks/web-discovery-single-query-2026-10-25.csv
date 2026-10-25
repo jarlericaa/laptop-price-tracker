@@ -1,0 +1,11 @@
+case_id,retailer_id,model,expected_url,native_leads,native_expected_found,native_search_calls,native_seconds,native_errors,web_leads,web_expected_found,web_search_calls,web_seconds,web_errors,new_expected_page,expected_fetch_outcome,web_expected_fetched,native_expected_fetched
+W01,pcx,FA607NUQ-RL011W,https://pcx.com.ph/products/asus-tuf-gaming-a16-fa607nuq-rl011w-90nr0qf3-m002x0-geforce-rtx-4050-amd-ryzen-7-laptop-mecha-gray,1,True,1,0.461,0,1,True,1,15.54,0,False,PRODUCT_PAGE,True,True
+W02,laptop_factory,14-ep0445TU,https://laptopfactory.com.ph/product/hp-laptop-14-ep0445tu/,0,False,1,0.652,0,0,False,1,12.124,0,False,PRODUCT_PAGE,False,False
+W03,laptop_factory,B12UC-1432PH,https://laptopfactory.com.ph/product/msi-gaming-thin-15-b12uc-1432ph/,0,False,1,10.112,0,1,True,1,11.032,0,True,PRODUCT_PAGE,True,False
+W04,pcx,MacBook Neo MHFC4PP/A,https://pcx.com.ph/products/apple-macbook-neo-a18-pro-mhfc4pp-a-laptop-silver,1,False,1,0.22,0,1,True,1,11.203,0,True,PRODUCT_PAGE,True,False
+W05,pcc,MacBook Neo,https://pccentralcomputerstore.com/products/apple-macbook-neo-apple-a18-pro-chip-13-retina-ips-display-8gb-unified-memory-touch-id-pc-central,10,True,1,0.703,0,1,True,1,11.137,0,False,PRODUCT_PAGE,True,True
+W06,oct,SF14-51-553D,https://www.octagon.com.ph/products/acer-swift-sf14-51-553d-core-ultra-5-228v-32gb-1tb-ssd-14-oled-win-11-office-h-s-2021,1,True,1,0.453,0,0,False,1,11.282,0,False,PRODUCT_PAGE,False,True
+W07,oct,FA607NUQ-RL204WSM,https://www.octagon.com.ph/products/asus-tuf-fa607nuq-rl204wsm-ryzen-7-170-16gb-512gb-ssd-16-fhd-144hz-win-11-rtx4050-6gb,1,True,1,9.746,0,1,True,1,12.6,0,False,PRODUCT_PAGE,True,True
+W08,pcx,15-fc0756au,https://pcx.com.ph/products/hp-15-fc0756au-d07c9pa-amd-ryzen-3-laptop-natural-silver,1,True,1,0.266,0,1,True,1,13.579,0,False,PRODUCT_PAGE,True,True
+W09,datablitz,S3407VA-LY135WSM,https://ecommerce.datablitz.com.ph/products/asus-vivobook-s14-s3407va-ly135wsm-laptop-cool-silver-14-wuxga-1920x1200-ips-core-5-210h-16gb-ram-512gb-ssd-uhd-graphics-windows-11-home-ms-office-home-student-2024-asus-ap4600-backpack,1,True,1,0.345,0,1,True,1,11.642,0,False,PRODUCT_PAGE,True,True
+W10,laptop_factory,X1404VA-EB2264WSM,https://laptopfactory.com.ph/product/asus-vivobook-14-x1404va-eb2264wsm/,0,False,1,0.501,0,1,True,1,11.098,0,True,PRODUCT_PAGE,True,False

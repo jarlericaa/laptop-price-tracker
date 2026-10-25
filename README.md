@@ -2,6 +2,10 @@
 
 **Start here:** [Weekly workflow, dataflow and commands](docs/WEEKLY_WORKFLOW.md) explains the Sheet tabs, CSVs, weekly refresh, automatic search and publishing step by step.
 
+[Independent web discovery](docs/WEB_DISCOVERY.md) adds opt-in signed-in web search,
+retailer page evidence and a reproducible discovery benchmark. It can supply extra
+candidate URLs to the existing workflow without changing product matching.
+
 This project processes Shopee Electronics data from Google Sheets and produces a ranked list
 of laptop models for future retailer price tracking. The current Python pipeline reads the
 `raw` worksheet, validates and classifies data, detects M-1 and MTD, and generates local ranking
