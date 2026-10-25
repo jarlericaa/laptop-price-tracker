@@ -102,7 +102,7 @@ def test_refused_canonical_keeps_hashable_fetch_evidence():
     assert saved == body and len(record["content_sha256"]) == 64
 
 
-def index_snapshot(tmp_path, *, complete=True):
+def index_snapshot(tmp_path, *, complete=True, extra=b""):
     import csv
     import hashlib
 
@@ -113,7 +113,7 @@ def index_snapshot(tmp_path, *, complete=True):
     <url><loc>https://pcx.com.ph/products/example-laptop</loc><image:image>
     <image:title>ASUS TUF FA607NUQ-RL011W</image:title></image:image></url>
     <url><loc>https://pcx.com.ph/products/macbook-neo-mhfc4pp-a</loc></url>
-    </urlset>'''
+    </urlset>'''.replace(b"</urlset>", extra + b"</urlset>")
     (folder / "products.xml").write_bytes(body)
     with (folder / "catalog_requests.csv").open("w", newline="") as handle:
         fields = ["retailer_id", "kind", "url", "outcome", "evidence_file", "content_sha256",
@@ -176,6 +176,90 @@ def test_catalog_timestamp_is_kept_when_searching_old_saved_sources(tmp_path):
     index = web.CatalogIndex.from_run(index_snapshot(tmp_path))
     found = web.leads([index.search('site:pcx.com.ph FA607NUQ-RL011W')], 'pcx')
     assert found[0]["search_retrieved_at"] == WHEN
+
+
+def test_one_unusable_sitemap_url_does_not_discard_the_index(tmp_path):
+    legacy = b"<url><loc>http://pcx.com.ph/products/legacy-laptop</loc></url>"
+    index = web.CatalogIndex.from_run(index_snapshot(tmp_path, extra=legacy))
+    assert len(index.entries) == 3 and index.rejected_urls == 0
+    found = index.search("site:pcx.com.ph legacy laptop").results
+    assert [r["url"] for r in found] == ["https://pcx.com.ph/products/legacy-laptop"]
+    direct = web.CatalogIndex(
+        [{"retailer_id": "pcx", "url": "https://evil.invalid/products/x", "title": ""},
+         {"retailer_id": "pcx", "url": URL, "title": "Kept"}], retrieved_at=WHEN)
+    assert direct.rejected_urls == 1 and [e["title"] for e in direct.entries] == ["Kept"]
+
+
+def test_joined_query_terms_find_a_handle_that_omits_the_punctuation(tmp_path):
+    handle = b"<url><loc>https://pcx.com.ph/products/hp-15fd0001wm</loc></url>"
+    index = web.CatalogIndex.from_run(index_snapshot(tmp_path, extra=handle))
+    for query in ['site:pcx.com.ph "15-FD0001WM"', "site:pcx.com.ph HP 15 FD0001WM"]:
+        assert [r["url"] for r in index.search(query).results] == [
+            "https://pcx.com.ph/products/hp-15fd0001wm"]
+    assert index.search("site:pcx.com.ph 15 FD0001").outcome == "NO_RESULTS"
+
+
+def test_brand_alone_is_not_a_fallback_query():
+    case = {"retailer_id": "pcx", "model": "X1", "brand": "HP"}
+    assert len(web.queries(case)) == 2
+    assert len(web.queries({**case, "specs": "16GB"})) == 3
+
+
+def test_feed_enriches_a_sitemap_url_without_replacing_its_identity_or_provenance():
+    sitemap = {"retailer_id": "pcx", "url": URL, "title": "Sitemap title",
+               "sitemap": "sitemap-1", "source_retrieved_at": "early"}
+    feed = {"retailer_id": "pcx", "url": URL, "title": "Feed title", "search_text": "extra clue",
+            "sitemap": "feed-1", "source_retrieved_at": "late"}
+    index = web.CatalogIndex([sitemap, feed], retrieved_at=WHEN, coverage={
+        "pcx": {"product_sitemaps_read": 1, "product_sitemaps_listed": 1}})
+    (entry,) = index.entries
+    assert (entry["title"], entry["sitemap"], entry["source_retrieved_at"]) == (
+        "Sitemap title", "sitemap-1", "early")
+    for query in ("site:pcx.com.ph feed title", "site:pcx.com.ph extra clue"):
+        assert len(index.search(query).results) == 1
+
+
+def test_narrower_feed_run_does_not_replace_proven_sitemap_coverage(tmp_path):
+    (tmp_path / "main").mkdir()
+    (tmp_path / "feed").mkdir()
+    main = index_snapshot(tmp_path / "main")
+    feed = index_snapshot(tmp_path / "feed", complete=False)
+    index = web.CatalogIndex.from_run(main, feed_runs=(feed,))
+    assert index.search("site:pcx.com.ph nonexistent").outcome == "NO_RESULTS"
+
+
+def test_rejected_start_leaves_the_output_folder_reusable(tmp_path):
+    cases = tmp_path / "cases.csv"
+    cases.write_text("case_id,retailer_id,model\nC1,pcx,FA607NUQ-RL011W\n")
+    output = tmp_path / "out"
+    with pytest.raises(SystemExit):
+        cli().main(["--cases", str(cases), "--output", str(output)])
+    assert not any(output.iterdir())
+    folder = index_snapshot(tmp_path)
+    (folder / "products.xml").write_bytes(b"changed")
+    with pytest.raises(web.DiscoveryError):
+        cli().main(["--cases", str(cases), "--index-run", str(folder), "--output", str(output)])
+    assert not any(output.iterdir())
+
+
+def test_target_with_an_unusable_name_is_reported_and_other_targets_still_search(tmp_path):
+    from types import SimpleNamespace
+
+    from test_verified_top import load_script
+    discover = load_script("discover_products")
+    folder = index_snapshot(tmp_path)
+
+    def target(target_id, model, brand="ASUS"):
+        return SimpleNamespace(target_id=target_id, model=model, recorded_code="", series="",
+                               brand=brand, core={"cpu_series": "", "ram_capacity_gb": "",
+                                                  "storage_capacity_gb": ""})
+
+    args = SimpleNamespace(catalog_index_run=folder, catalog_feed_run=[])
+    rows, skipped = discover.indexed_candidate_rows(
+        args, [target("T1", 'Apple MacBook Air 13" M4'), target("T2", "nan"),
+               target("T3", "FA607NUQ-RL011W")], ["pcx"])
+    assert [(s["target_id"], s["retailer_id"]) for s in skipped] == [("T1", "pcx"), ("T2", "pcx")]
+    assert [r["search_target_id"] for r in rows] == ["T3"] and rows[0]["url"] == URL
 
 
 def cli():

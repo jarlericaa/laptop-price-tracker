@@ -122,6 +122,14 @@ add leads; they do not publish Sheets. Rebuilding price reports and the explicit
 `publish_prices.py --write-sheets` step remain as described in
 [the weekly workflow](WEEKLY_WORKFLOW.md).
 
+`--catalog-feed-run` requires `--catalog-index-run`. A target whose model cannot form a
+query (blank, `nan`, over 200 characters or containing a double quote) is skipped for the
+index only and appears in the supplied-URL report with the basis
+`CATALOG_QUERY_NOT_FORMED`; other targets continue. A brand-only query is never issued.
+Sitemap URLs the retailer adapter cannot normalize are counted in the index's
+`rejected_urls` (and `index_rejected_urls` in `search_catalog_index.py`'s `run.json`)
+instead of aborting the load.
+
 To refresh all advertised sitemaps and the optional Laptop Factory feed, increase
 the collector's explicit limits for your chosen scope, for example:
 

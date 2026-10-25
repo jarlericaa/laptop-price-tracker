@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import copy
 import json
+import sys
 from dataclasses import replace
 
 import pandas as pd
@@ -110,3 +111,31 @@ def test_title_cpu_conflict_remains_unresolved():
 def test_missing_shared_ram_is_never_taken_from_the_target_or_parent_title():
     rows = tuple(row for row in ROWS if row[0] != "Memory")
     assert matcher().match_observation(page(rows=rows)).status is MatchStatus.REVIEW_REQUIRED
+
+
+def test_title_ram_that_contradicts_the_shared_memory_row_needs_review():
+    # RAM is not a picker option here, so the title is its only independent check.
+    result = matcher().match_observation(page(title=TITLE.replace("8GB", "16GB")))
+    assert result.status is MatchStatus.REVIEW_REQUIRED and result.target_id is None
+    assert "TITLE_SPEC_CONFLICT_RAM_CAPACITY_GB" in result.reason_codes
+
+
+def test_title_storage_does_not_override_the_bound_selected_capacity():
+    result = matcher().match_observation(page(title=TITLE + " | 512GB SSD"))
+    assert result.status is MatchStatus.EXACT and result.target_id == "T-256"
+
+
+@pytest.mark.parametrize("selected,target", [(0, "T-256"), (1, "T-256"), (2, "T-512")])
+def test_multi_word_registered_colours_are_cosmetic(monkeypatch, selected, target):
+    options = ["McbookNeo Sky Blue 256GB", "McbookNeo Space Black 256GB",
+               "McbookNeo Silver 512GB", "McbookNeo Citrus 512GB"]
+    monkeypatch.setattr(sys.modules[__name__], "OPTIONS", options)
+    result = matcher().match_observation(page(selected))
+    assert result.status is MatchStatus.EXACT and result.target_id == target
+
+
+def test_a_colour_phrase_does_not_hide_a_different_product_label(monkeypatch):
+    options = ["McbookNeo Sky Blue 256GB", "OtherBook Space Black 256GB",
+               "McbookNeo Silver 512GB", "McbookNeo Citrus 512GB"]
+    monkeypatch.setattr(sys.modules[__name__], "OPTIONS", options)
+    assert matcher().match_observation(page(0)).status is MatchStatus.REVIEW_REQUIRED

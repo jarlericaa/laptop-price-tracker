@@ -17,7 +17,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent / "src"))
 
 from laptop_tracker import evidence_approvals
-from laptop_tracker.catalog_index import CatalogIndex, leads, queries
+from laptop_tracker.catalog_index import CatalogIndex, DiscoveryError, leads, queries
 from laptop_tracker.collection import (
     MANIFEST_COLUMNS,
     ROUTES,
@@ -259,7 +259,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--catalog-index-run", type=Path,
                         help="Search a saved catalog locally and add bounded candidate leads.")
     parser.add_argument("--catalog-feed-run", type=Path, action="append", default=[],
-                        help="Additional saved public feed (repeatable; no live feed calls).")
+                        help="Additional saved public feed (repeatable; no live feed calls). "
+                             "Requires --catalog-index-run.")
     parser.add_argument("--no-supplied-urls", action="store_true",
                         help="Do not read the default supplied-URL file.")
     parser.add_argument("--max-supplied-urls-per-target-retailer", type=positive, default=2)
@@ -285,6 +286,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                         help="Earlier manually supplied manifest, for a coverage comparison.")
     parser.add_argument("--output-dir", type=Path, required=True, help="New run folder.")
     args = parser.parse_args(argv)
+    if args.catalog_feed_run and not args.catalog_index_run:
+        parser.error("--catalog-feed-run requires --catalog-index-run.")
     if args.live and args.max_total_requests is None:
         parser.error("--live requires --max-total-requests.")
     if args.replay_only and args.collect and not args.replay_collection:
@@ -1083,22 +1086,37 @@ def check_seed_files(paths) -> None:
 
 
 def indexed_candidate_rows(args, targets, retailers):
+    """``(rows, skipped)``: leads from the saved catalog, and the target/retailer pairs whose
+    queries could not be formed (named, never fatal to the other targets)."""
     folder = getattr(args, "catalog_index_run", None)
     if folder is None:
-        return []
+        return [], []
     source = CatalogIndex.from_run(folder, feed_runs=tuple(
         getattr(args, "catalog_feed_run", [])))
-    rows = []
+
+    def text(value) -> str:
+        value = " ".join(str(value or "").split())
+        return "" if value.casefold() in {"nan", "none"} else value
+
+    rows, skipped = [], []
     for target in targets:
         core = target.core
-        specs = " ".join(filter(None, [core.get("cpu_series", ""),
-                         f"{core['ram_capacity_gb']}GB" if core.get("ram_capacity_gb") else "",
+        specs = " ".join(filter(None, [text(core.get("cpu_series", "")),
+                         f"{core['ram_capacity_gb']}GB" if text(core.get("ram_capacity_gb"))
+                         else "",
                          f"{core['storage_capacity_gb']}GB"
-                         if core.get("storage_capacity_gb") else ""]))
+                         if text(core.get("storage_capacity_gb")) else ""]))
         for retailer in retailers:
-            case = {"retailer_id": retailer, "brand": target.brand, "family": target.series,
-                    "model": target.recorded_code or target.model, "specs": specs}
-            responses = [source.search(q, clues=specs) for q in queries(case, 3)]
+            case = {"retailer_id": retailer, "brand": text(target.brand),
+                    "family": text(target.series),
+                    "model": text(target.recorded_code) or text(target.model), "specs": specs}
+            try:
+                planned = queries(case, 3)
+            except DiscoveryError as error:
+                skipped.append({"target_id": target.target_id, "retailer_id": retailer,
+                                "reason": str(error)})
+                continue
+            responses = [source.search(q, clues=specs) for q in planned]
             for number, lead in enumerate(leads(responses, retailer), 1):
                 rows.append({"supplied_id": f"IDX-{target.target_id}-{retailer}-{number}",
                              "retailer_id": retailer, "url": lead["url"],
@@ -1106,7 +1124,7 @@ def indexed_candidate_rows(args, targets, retailers):
                              "supplied_by": "catalog_index",
                              "supplied_on": lead["search_retrieved_at"],
                              "notes": "Unconfirmed local catalog candidate; " + lead["query"]})
-    return rows
+    return rows, skipped
 
 
 def load_supplied(args, targets, retailers):
@@ -1125,9 +1143,19 @@ def load_supplied(args, targets, retailers):
     found: dict[tuple[str, str], list[tuple[str, str, str]]] = {}
     report: list[dict[str, str]] = []
     sources = [(path, read_rows(path)) for path in paths]
-    indexed = indexed_candidate_rows(args, targets, retailers)
+    indexed, skipped = indexed_candidate_rows(args, targets, retailers)
     if indexed:
         sources.append((args.catalog_index_run, indexed))
+    for item in skipped:
+        report.append({
+            "supplied_id": f"IDX-{item['target_id']}-{item['retailer_id']}-skipped",
+            "retailer_id": item["retailer_id"], "supplied_url": "", "normalized_url": "",
+            "removed_parameters": "", "search_target_hint": item["target_id"],
+            "source_file": str(args.catalog_index_run), "assigned_target_ids": "",
+            "assignment_basis": "CATALOG_QUERY_NOT_FORMED: " + item["reason"],
+            "found_by_native_search": "", "candidate_decision": "",
+            "collection_request_id": "",
+        })
     for path, rows in sources:
         for row in rows:
             missing = [c for c in ("supplied_id", "retailer_id", "url") if c not in row]

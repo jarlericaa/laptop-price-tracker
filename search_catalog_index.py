@@ -190,21 +190,23 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     if not args.cases:
         parser.error("--cases is required except in replay")
-    cases = read_cases(args.cases)
-    if len(cases) > args.max_cases:
-        parser.error("Cases exceed --max-cases; choose the cohort explicitly")
-    plan = [{"case_id": c["case_id"], "queries": queries(c, args.max_queries)} for c in cases]
-    (args.output / "plan.json").write_text(json.dumps(plan, indent=2) + "\n", encoding="utf-8")
     if not args.index_run:
         parser.error("--index-run is required except in replay")
     if args.benchmark_native and not args.live:
         parser.error("--benchmark-native requires --live")
+    cases = read_cases(args.cases)
+    if len(cases) > args.max_cases:
+        parser.error("Cases exceed --max-cases; choose the cohort explicitly")
+    plan = [{"case_id": c["case_id"], "queries": queries(c, args.max_queries)} for c in cases]
     source = CatalogIndex.from_run(args.index_run, feed_runs=tuple(args.feed_run))
+    # Written only once every input is proven usable, so a failed start can be rerun.
+    (args.output / "plan.json").write_text(json.dumps(plan, indent=2) + "\n", encoding="utf-8")
     run = {"started_at": datetime.now(UTC).isoformat(), "cases": cases,
            "cases_sha256": hashlib.sha256(args.cases.read_bytes()).hexdigest(),
            "searches": {}, "pages": {}, "benchmark_native": args.benchmark_native,
            "search_backend": source.backend, "index_run": str(args.index_run.resolve()),
            "index_entries": len(source.entries), "index_coverage": source.coverage,
+           "index_rejected_urls": source.rejected_urls,
            "feed_runs": [str(path.resolve()) for path in args.feed_run]}
     # Save the declared cohort before any search. Expected URLs never enter search requests.
     def save():

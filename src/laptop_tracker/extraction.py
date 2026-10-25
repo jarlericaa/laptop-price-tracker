@@ -1041,20 +1041,31 @@ class _SharedVariantScope:
 def _color_storage_option(value: str) -> tuple[str, str] | None:
     """A fixed product label, known cosmetic colour and one drive-sized capacity.
 
+    Colours are the single-word list plus every colour in the reviewed product-name
+    registry, including multi-word ones such as ``Sky Blue``. The longest trailing
+    colour phrase is removed and the remaining label must match across all options.
     Used only inside a complete bound matrix whose capacities are independently
     stated in Storage-labelled product rows. No target data enters this decision.
     """
-    colors = _COLOR_WORDS | {"indigo", "blush", "citrus", "midnight", "starlight"}
+    colours = {(word,) for word in _COLOR_WORDS}
+    for entry in default_registry().product_names():
+        colours.update(tuple(colour.casefold().split()) for colour in entry.colours)
     match = re.fullmatch(
-        r"([A-Za-z]+(?: [A-Za-z]+){0,3}) ([A-Za-z]+) (\d+(?:\.\d+)?)\s*(GB|TB)",
-        clean_text(value), re.I,
+        r"([A-Za-z]+(?: [A-Za-z]+)*) (\d+(?:\.\d+)?)\s*(GB|TB)", clean_text(value), re.I,
     )
-    if match is None or match[2].casefold() not in colors:
+    if match is None:
         return None
-    capacity = _gigabytes(match[3], match[4], allow_tb=True)
-    if not 128 <= capacity <= 8192:
+    words = match[1].casefold().split()
+    for width in (3, 2, 1):
+        if len(words) > width and tuple(words[-width:]) in colours:
+            label = words[:-width]
+            break
+    else:
         return None
-    return match[1].casefold(), str(capacity)
+    capacity = _gigabytes(match[2], match[3], allow_tb=True)
+    if not 1 <= len(label) <= 4 or not 128 <= capacity <= 8192:
+        return None
+    return " ".join(label), str(capacity)
 
 
 def _shared_cpu_display_scope(
@@ -1947,8 +1958,8 @@ def _apply_title_product_name(
         return
     title_claims = _title_core_claims(offer.raw_title)
     for item in others:
-        if shared and item.field in {"ram_capacity_gb", "storage_capacity_gb"}:
-            continue  # Bound selected options govern capacities on a shared parent page.
+        if shared and "[selected variant" in item.source_label:
+            continue  # A bound picker option governs this field on a shared parent page.
         stated = title_claims.get(item.field, set())
         if stated and stated != {item.value}:
             notes.append(f"TITLE_SPEC_CONFLICT_{item.field.upper()}")

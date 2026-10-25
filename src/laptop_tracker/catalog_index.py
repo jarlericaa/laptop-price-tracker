@@ -62,8 +62,9 @@ def queries(case: dict[str, str], limit: int = 3) -> list[str]:
     alternatives = [f'site:{host} "{model}"']
     spaced = re.sub(r"[-–—/]", " ", model)
     alternatives.append(f"site:{host} {case.get('brand', '')} {spaced}".strip())
+    # Brand alone would match the retailer's whole brand range; require a real clue.
     broader = " ".join(case.get(k, "") for k in ("brand", "family", "specs")).strip()
-    if broader:
+    if case.get("family", "").strip() or case.get("specs", "").strip():
         alternatives.append(f"site:{host} {broader}")
     result = []
     seen = set()
@@ -92,6 +93,28 @@ def _tokens(text: str) -> list[str]:
         format((Decimal(m[1]) * (1000 if m[2].lower() == "tb" else 1)).normalize(), "f") + "GB"
     ), text, flags=re.I)
     return re.findall(r"[a-z0-9]+", unquote(text).casefold())
+
+
+def _term_groups(words: list[str]):
+    """Segmentations of query words into runs of up to three adjacent words, each run joined.
+
+    ``15 fd0001wm`` also yields ``15fd0001wm``, the form a retailer handle may use. Long
+    queries fall back to the words as written.
+    """
+    if len(words) > 8:
+        yield list(words)
+        return
+
+    def split(start: int):
+        if start == len(words):
+            yield []
+            return
+        for width in (1, 2, 3):
+            if start + width <= len(words):
+                for rest in split(start + width):
+                    yield ["".join(words[start:start + width]), *rest]
+
+    yield from split(0)
 
 
 def parse_product_feed(body: bytes, retailer_id: str) -> list[dict[str, str]]:
@@ -131,15 +154,31 @@ class CatalogIndex:
         self.retrieved_at, self.max_results = retrieved_at, max_results
         self.coverage = coverage or {}
         self.entries, self.postings = [], {}
-        merged = {}
+        self.rejected_urls = 0
+        merged: dict[tuple[str, str], dict[str, str]] = {}
         for entry in entries:
             retailer = entry["retailer_id"]
-            url = product_url(entry["url"], retailer)
-            key = (retailer, url)
-            # A public feed enriches the same sitemap URL; it cannot replace identity.
-            previous = merged.get(key, {})
-            merged[key] = {**previous, **{k: v for k, v in entry.items() if v or k not in previous},
-                           "url": url}
+            try:
+                url = product_url(entry["url"], retailer)
+            except DiscoveryError:
+                self.rejected_urls += 1  # One unusable URL must not discard the whole index.
+                continue
+            previous = merged.get((retailer, url))
+            if previous is None:
+                merged[(retailer, url)] = {**entry, "url": url}
+                continue
+            # A public feed enriches the same sitemap URL. The first source keeps the
+            # identity, title and provenance; later titles and text only add search clues.
+            for name, value in entry.items():
+                if name == "url" or not value:
+                    continue
+                if name == "search_text" or (
+                    name == "title" and previous.get("title") and value != previous["title"]
+                ):
+                    previous["search_text"] = " ".join(
+                        filter(None, [previous.get("search_text", ""), value]))
+                elif not previous.get(name):
+                    previous[name] = value
         for entry in merged.values():
             retailer, url = entry["retailer_id"], entry["url"]
             index = len(self.entries)
@@ -191,7 +230,9 @@ class CatalogIndex:
                 sitemap = parse_sitemap(body)
                 if sitemap.kind == "urlset":
                     for entry in product_entries(source, sitemap):
-                        entries.append({"retailer_id": retailer, "url": entry.loc,
+                        url = SEARCH_METHODS[retailer].canonical_product_url(
+                            entry.loc, source.root_sitemap)
+                        entries.append({"retailer_id": retailer, "url": url,
                                         "title": entry.title, "lastmod": entry.lastmod,
                                         "sitemap": record["url"],
                                         "source_retrieved_at": record["retrieved_at"]})
@@ -200,7 +241,14 @@ class CatalogIndex:
         for feed_run in feed_runs:
             extra = cls.from_run(feed_run, max_results)
             entries.extend(extra.entries)
-            coverage.update(extra.coverage)
+            for retailer, status in extra.coverage.items():
+                current = coverage.get(retailer)
+                if current is None or (status.get("product_sitemaps_read", 0)
+                                       > current.get("product_sitemaps_read", 0)):
+                    coverage[retailer] = {**(current or {}), **status}
+                else:  # Never let a narrower run replace the sitemap coverage already proven.
+                    coverage[retailer] = {**current, **{
+                        k: v for k, v in status.items() if k.startswith("feed_")}}
             retrieved_at = max(retrieved_at, extra.retrieved_at)
         return cls(entries, retrieved_at=retrieved_at, coverage=coverage, max_results=max_results)
 
@@ -219,8 +267,10 @@ class CatalogIndex:
             response.error = "Retailer sitemap snapshot is unavailable; absence is unproven"
             return response
         terms = set(_tokens(words))
-        postings = [self.postings.get((retailer, term), set()) for term in terms]
-        matches = set.intersection(*postings)
+        matches: set[int] = set()
+        for group in _term_groups(_tokens(words)):
+            matches |= set.intersection(
+                *(self.postings.get((retailer, term), set()) for term in set(group)))
         # Model/name words remain required. Other recorded facts only rank leads;
         # missing metadata never becomes a configuration match or inferred value.
         clue_terms = set(_tokens(clues)) - terms
