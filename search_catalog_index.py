@@ -1,4 +1,4 @@
-"""Opt-in independent search discovery and reproducible native-search benchmark."""
+"""Search a cached retailer catalog; optionally fetch pages or benchmark native search."""
 
 from __future__ import annotations
 
@@ -13,10 +13,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent / "src"))
 
-from laptop_tracker.retailer_search import SEARCH_METHODS
-from laptop_tracker.scraping import Fetcher, FetchError, ScrapeRequest
-from laptop_tracker.web_discovery import (
-    CodexSearch,
+from laptop_tracker.catalog_index import (
+    CatalogIndex,
     DiscoveryError,
     SearchResponse,
     fetch_product,
@@ -26,6 +24,8 @@ from laptop_tracker.web_discovery import (
     queries,
     response_record,
 )
+from laptop_tracker.retailer_search import SEARCH_METHODS
+from laptop_tracker.scraping import Fetcher, FetchError, ScrapeRequest
 
 
 def read_cases(path: Path) -> list[dict[str, str]]:
@@ -74,7 +74,7 @@ def metrics(cases: list[dict], searches: dict, pages: dict) -> dict:
         expected = product_url(case["expected_url"], retailer) if case.get("expected_url") else ""
         result = {"case_id": case_id, "retailer_id": retailer, "model": case["model"],
                   "expected_url": expected}
-        for provider in ("native", "web"):
+        for provider in ("native", "index"):
             responses = [SearchResponse(**r) for r in searches.get(case_id, {}).get(provider, [])]
             found = leads(responses, retailer)
             urls = [lead["url"] for lead in found]
@@ -84,10 +84,10 @@ def metrics(cases: list[dict], searches: dict, pages: dict) -> dict:
             result[provider + "_seconds"] = round(sum(r.elapsed_seconds for r in responses), 3)
             result[provider + "_errors"] = sum(r.outcome not in {"RESULTS", "NO_RESULTS"}
                                                for r in responses)
-        result["new_expected_page"] = result["web_expected_found"] and not result[
+        result["new_expected_page"] = result["index_expected_found"] and not result[
             "native_expected_found"]
         result["expected_fetch_outcome"] = pages.get(expected, {}).get("outcome", "NOT_FETCHED")
-        result["web_expected_fetched"] = result["web_expected_found"] and result[
+        result["index_expected_fetched"] = result["index_expected_found"] and result[
             "expected_fetch_outcome"] == "PRODUCT_PAGE"
         result["native_expected_fetched"] = result["native_expected_found"] and result[
             "expected_fetch_outcome"] == "PRODUCT_PAGE"
@@ -95,13 +95,13 @@ def metrics(cases: list[dict], searches: dict, pages: dict) -> dict:
     labelled = [row for row in results if row["expected_url"]]
     return {"case_count": len(cases), "labelled_cases": len(labelled),
             "native_expected_found": sum(r["native_expected_found"] for r in labelled),
-            "web_expected_found": sum(r["web_expected_found"] for r in labelled),
-            "combined_expected_found": sum(r["native_expected_found"] or r["web_expected_found"]
+            "index_expected_found": sum(r["index_expected_found"] for r in labelled),
+            "combined_expected_found": sum(r["native_expected_found"] or r["index_expected_found"]
                                             for r in labelled),
             "new_expected_pages": sum(r["new_expected_page"] for r in labelled),
-            "web_expected_fetched": sum(r["web_expected_fetched"] for r in labelled),
+            "index_expected_fetched": sum(r["index_expected_fetched"] for r in labelled),
             "native_expected_fetched": sum(r["native_expected_fetched"] for r in labelled),
-            "web_errors": sum(r["web_errors"] for r in results),
+            "index_errors": sum(r["index_errors"] for r in results),
             "native_errors": sum(r["native_errors"] for r in results),
             "fetched_product_pages": sum(p.get("outcome") == "PRODUCT_PAGE"
                                          for p in pages.values()),
@@ -110,6 +110,7 @@ def metrics(cases: list[dict], searches: dict, pages: dict) -> dict:
 
 def write_reports(output: Path, run: dict) -> dict:
     report = metrics(run["cases"], run["searches"], run["pages"])
+    report["search_backend"] = run.get("search_backend", "legacy_unspecified")
     (output / "metrics.json").write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
     with (output / "benchmark.csv").open("w", newline="", encoding="utf-8") as handle:
         writer = csv.DictWriter(handle, fieldnames=list(report["per_case"][0]))
@@ -132,16 +133,16 @@ def write_reports(output: Path, run: dict) -> dict:
         ])
         writer.writeheader()
         for case in run["cases"]:
-            records = run["searches"].get(case["case_id"], {}).get("web", [])
+            records = run["searches"].get(case["case_id"], {}).get("index", [])
             for index, lead in enumerate(leads(
                 [SearchResponse(**r) for r in records], case["retailer_id"]
             ), 1):
                 writer.writerow({
-                    "supplied_id": f"WEB-{case['case_id']}-{index}",
+                    "supplied_id": f"IDX-{case['case_id']}-{index}",
                     "retailer_id": case["retailer_id"], "url": lead["url"],
                     "search_target_id": case.get("target_id", ""),
-                    "supplied_by": "web_discovery", "supplied_on": lead["search_retrieved_at"],
-                    "notes": "Unconfirmed discovery lead; query: " + lead["query"],
+                    "supplied_by": "catalog_index", "supplied_on": lead["search_retrieved_at"],
+                    "notes": "Unconfirmed catalog-index lead; query: " + lead["query"],
                 })
     return report
 
@@ -157,8 +158,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--max-queries", type=int, choices=(1, 2, 3), default=2)
     parser.add_argument("--max-cases", type=int, default=20)
     parser.add_argument("--max-pages-per-case", type=int, default=3)
-    parser.add_argument("--search-timeout", type=int, default=120)
-    parser.add_argument("--codex", default="codex")
+    parser.add_argument("--index-run", type=Path,
+                        help="Saved discover_catalog_leads.py live run; searched without network")
     args = parser.parse_args(argv)
     if not 1 <= args.max_cases <= 100 or not 0 <= args.max_pages_per_case <= 10:
         parser.error("Case/page budgets are outside the supported bounds")
@@ -192,36 +193,38 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("Cases exceed --max-cases; choose the cohort explicitly")
     plan = [{"case_id": c["case_id"], "queries": queries(c, args.max_queries)} for c in cases]
     (args.output / "plan.json").write_text(json.dumps(plan, indent=2) + "\n", encoding="utf-8")
-    if not args.live:
-        print(f"Preview: {len(cases)} cases; {sum(len(p['queries']) for p in plan)} "
-              "maximum CLI invocations; no searches or retailer requests sent.")
-        return 0
-    source = CodexSearch(args.codex, args.search_timeout)
+    if not args.index_run:
+        parser.error("--index-run is required except in replay")
+    if args.benchmark_native and not args.live:
+        parser.error("--benchmark-native requires --live")
+    source = CatalogIndex.from_run(args.index_run)
     run = {"started_at": datetime.now(UTC).isoformat(), "cases": cases,
            "cases_sha256": hashlib.sha256(args.cases.read_bytes()).hexdigest(),
-           "searches": {}, "pages": {}, "benchmark_native": args.benchmark_native}
-    # Save the declared cohort before any search. Expected URLs never enter search prompts.
+           "searches": {}, "pages": {}, "benchmark_native": args.benchmark_native,
+           "search_backend": source.backend, "index_run": str(args.index_run.resolve()),
+           "index_entries": len(source.entries), "index_coverage": source.coverage}
+    # Save the declared cohort before any search. Expected URLs never enter search requests.
     def save():
         (args.output / "run.json").write_text(json.dumps(run, indent=2) + "\n", encoding="utf-8")
     save()
     fetcher = Fetcher()
     for case in cases:
         case_id, retailer = case["case_id"], case["retailer_id"]
-        records = run["searches"][case_id] = {"web": [], "native": []}
+        records = run["searches"][case_id] = {"index": [], "native": []}
         for query in queries(case, args.max_queries):
             if args.benchmark_native:
                 records["native"].append(response_record(native_search(query, retailer, fetcher)))
                 save()
-            records["web"].append(response_record(source.search(query)))
+            records["index"].append(response_record(source.search(query)))
             save()
         found = []
-        for provider in ("web", "native"):
+        for provider in ("index", "native"):
             found.extend(leads([SearchResponse(**r) for r in records[provider]], retailer))
         urls = list(dict.fromkeys(lead["url"] for lead in found))[:args.max_pages_per_case]
         # Ground-truth reachability is evaluated separately, never seeded into discovered leads.
         if case.get("expected_url"):
             urls.append(product_url(case["expected_url"], retailer))
-        for url in dict.fromkeys(urls):
+        for url in dict.fromkeys(urls) if args.live else ():
             if url in run["pages"]:
                 continue
             page, body = fetch_product(url, retailer, fetcher)
@@ -234,13 +237,13 @@ def main(argv: list[str] | None = None) -> int:
             save()
         print(f"Completed {case_id}: " + ", ".join(
             f"{p} {len(leads([SearchResponse(**r) for r in records[p]], retailer))} leads"
-            for p in ("native", "web")), flush=True)
+            for p in ("native", "index")), flush=True)
     run["finished_at"] = datetime.now(UTC).isoformat()
     save()
     summary = write_reports(args.output, run)
     print(json.dumps({k: v for k, v in summary.items() if k != "per_case"}))
     return 1 if all(r["outcome"] not in {"RESULTS", "NO_RESULTS"}
-                    for c in run["searches"].values() for r in c["web"]) else 0
+                    for c in run["searches"].values() for r in c["index"]) else 0
 
 
 if __name__ == "__main__":
