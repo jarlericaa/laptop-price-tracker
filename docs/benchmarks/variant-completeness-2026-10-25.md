@@ -104,12 +104,23 @@ publisher. It verifies separate 256GB and 512GB prices, write/readback success a
 preservation of a protected input tab. Its prices are synthetic fixtures, separate
 from the live observations above.
 
-A separate temporary native Google Sheet was created in the user's connected
-account with the six actual observations, comparison metrics and unresolved cases.
-Its values and timestamps were read back, then its exported workbook was rendered
-to verify conversion. This proves the sample upload through the connected account.
-It does not configure unattended Sheets credentials on SCL or update the original
-production tracker. The original tracker still returns permission denied.
+A separate temporary native Google Sheet contains the six actual observations,
+comparison metrics and unresolved cases. Its values and timestamps were read back,
+then its exported workbook was rendered to verify conversion.
+
+The original tracker also received a scoped update through a newly authorized
+connected account: PC Central prices for the two existing MacBook Neo targets now
+appear in its summary, comparison and overview. The 512GB price is PHP 52,999 and
+the 256GB price PHP 47,999. Same-row lowest-price totals and comparable-retailer
+counts were updated. Original observation times and stock statuses were retained,
+with the existing price/latest-observation tie-break (the selected 256GB colour is
+out of stock; other colours at that price are in stock). The six source observations,
+benchmarks and unresolved cases are retained in dated validation tabs.
+
+Readback verified all planned values/notes and preserved checked non-target cells
+and catalog fields. This is a two-configuration addendum, not a full tracker refresh.
+It does not configure unattended Sheets credentials on SCL or append production
+database history. The connector write is distinct from the offline publisher test.
 
 Validation on SCL: **1,859 tests passed**, full Ruff check and diff checks passed.
 Environment: Python 3.11.15, pandas 2.3.3. The existing pandas 3.1.0 baseline failure
