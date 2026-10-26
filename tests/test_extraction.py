@@ -203,6 +203,7 @@ def test_laptop_factory_extracts_a_complete_labeled_core() -> None:
         "storage_capacity_gb": "512",
         "resolution": "1920x1200",
         "display_type": "IPS",
+        "cpu_model": "X1-26-100",  # exact processor model (2026-10-22)
     }
     assert extracted.reason_codes == ()
     cpu = next(item for item in extracted.evidence if item.field == "cpu_series")
@@ -280,6 +281,7 @@ def test_octagon_single_variant_uses_tech_specification_rows() -> None:
         "model": (E, "EX14-0001PH"),
         "screen_size_in": (E, "14"),
         "cpu_series": (E, "Core i5"),
+        "cpu_model": (E, "Core i5-13420H"),
         "ram_capacity_gb": (E, "8"),
         "storage_capacity_gb": (E, "512"),
         "resolution": (E, "1920x1200"),
@@ -322,6 +324,7 @@ def test_pc_central_single_variant_extracts_model_and_secondary_details() -> Non
         "refresh_rate_hz": "165",
         # "RTX 5050" in the title is a secondary claim (2026-10-19, independent review).
         "gpu_model": "RTX 5050",
+        "cpu_model": "Core 5 210H",
     }
 
 
@@ -338,6 +341,7 @@ def test_pc_express_layout_and_total_capacity_must_agree() -> None:
         "model": (E, "14-EX0001TU"),
         "screen_size_in": (E, "14"),
         "cpu_series": (E, "Core 5"),
+        "cpu_model": (E, "Core 5 120U"),
         "ram_capacity_gb": (E, "16"),
         "storage_capacity_gb": (E, "512"),
         "brand": (E, "ExampleBrand"),

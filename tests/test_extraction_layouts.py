@@ -152,6 +152,7 @@ def test_datablitz_model_row_and_agreeing_inch_sizes_extract() -> None:
         "storage_capacity_gb": (E, "512"),
         "resolution": (E, "1920x1200"),
         "display_type": (E, "IPS"),
+        "cpu_model": (E, "X1-26-100"),
     }
     result = ExactMatcher([TARGET]).match_observation(page)
     assert (result.status, result.target_id) == (MatchStatus.EXACT, "TGT-000001")

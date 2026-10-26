@@ -22,6 +22,7 @@ from decimal import Decimal
 from html.parser import HTMLParser
 from urllib.parse import urlsplit
 
+from ..offer_terms import purchase_restriction_items, scan_purchase_restrictions
 from ..offers import (
     IDENTIFIER,
     Availability,
@@ -93,7 +94,9 @@ class PCXAdapter:
     retailer_code = RETAILER_CODE
     # Bump when parsing rules change; recorded in every observation's source metadata.
     # pcx-2 (2026-10-13): adds identifier provenance as scoped evidence; parsing is unchanged.
-    adapter_version = "pcx-4"
+    # pcx-5 (2026-10-22): records purchase-block statements (for example "Promo Price Applicable
+    # for Cash Payments Only") as PURCHASE_TERMS scoped evidence; prices are unchanged.
+    adapter_version = "pcx-5"
     allowed_hosts = frozenset({HOST})
     # Explicit project-owner authorization; not a claim of retailer consent.
     live_use_approved = True
@@ -160,6 +163,11 @@ class PCXAdapter:
             identifiers.append((IDENTIFIER, "product form product-id", value))
         for value in dict.fromkeys(parsed.form_variant_ids):
             identifiers.append((IDENTIFIER, "product form variant id", value))
+        # Purchase-block statements the page makes under the price or in the description. Only
+        # restriction wording is kept (never other prose); it does not touch identity or price.
+        restrictions = purchase_restriction_items(
+            scan_purchase_restrictions("\n".join(parsed.notes))
+        )
         details = OfferDetails(
             retailer_product_id=_digits(parsed.product_ids)
             or _agreed([_text(node.get("productID")) for node in products], "product ID"),
@@ -175,7 +183,7 @@ class PCXAdapter:
             raw_categories=tuple(dict.fromkeys(parsed.types + parsed.categories)),
             bundle_flag=bool(bundle_evidence),
             bundle_evidence=bundle_evidence,
-            scoped_evidence=tuple(dict.fromkeys(identifiers)),
+            scoped_evidence=tuple(dict.fromkeys((*identifiers, *restrictions))),
         )
         return [
             ParsedOffer(
@@ -522,6 +530,7 @@ class _Element:
     template: bool = False
     main: bool = False
     description: bool = False
+    richtext: bool = False
     hidden: bool = False
     price_role: str = ""
     buffer: list[str] | None = None
@@ -556,6 +565,8 @@ class _ProductPageParser(HTMLParser):
         self.variant_ids = 0
         self.variant_markup = False
         self.description_rows: list[tuple[str, str]] = []
+        # Paragraph and list text under the price and in the description (restriction scan).
+        self.notes: list[str] = []
         self.canonical = ""
         self._block: _PriceBlock | None = None
         self._row: list[str] | None = None
@@ -574,6 +585,7 @@ class _ProductPageParser(HTMLParser):
                 "t4s-tab-content" in classes and attributes.get("id", "").startswith("t4s-tab-des")
             )
             or bool(parent and parent.description),
+            richtext="t4s-pr__richtext" in classes or bool(parent and parent.richtext),
             hidden=bool(classes & _HIDDEN_CLASSES)
             or "hidden" in attributes
             or "t4s-badge-price" in classes
@@ -606,6 +618,8 @@ class _ProductPageParser(HTMLParser):
             self._capture(element, lambda text: self.titles.append(clean_text(text)))
         elif "metafield-rich_text_field" in classes:
             self._capture(element, self._set_summary)
+        elif tag in {"p", "li"} and element.richtext:
+            self._capture(element, lambda text: self.notes.append(clean_text(text)))
         elif tag == "div" and "t4s-product-price" in classes and self._block is None:
             block = _PriceBlock()
             self.price_blocks.append(block)
@@ -641,7 +655,9 @@ class _ProductPageParser(HTMLParser):
             self._capture(element, lambda text: self.categories.append(clean_text(text)))
 
     def _description_tag(self, element: _Element) -> None:
-        if element.tag == "tr":
+        if element.tag in {"p", "li"}:
+            self._capture(element, lambda text: self.notes.append(clean_text(text)))
+        elif element.tag == "tr":
             self._row = []
             element.on_close = self._finish_row
         elif element.tag in {"td", "th"} and self._row is not None:

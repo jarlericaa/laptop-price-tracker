@@ -36,7 +36,13 @@ from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
 
-from .conventions import NormalizedName, model_codes, normalize_product_name, product_name_tokens
+from .conventions import (
+    NormalizedName,
+    model_codes,
+    normalize_product_name,
+    product_name_tokens,
+    strip_apple_part_numbers,
+)
 
 REGISTRY_PATH = Path(__file__).resolve().parents[2] / "config" / "product_name_registry.csv"
 REGISTRY_COLUMNS = ("brand", "name", "identity_kind", "colours", "evidence", "reviewed_on")
@@ -112,19 +118,22 @@ class ProductNameRegistry:
         return (entry for entry in self.entries if entry.identity_kind == PRODUCT_NAME)
 
     def normalize_model_name(self, text: str) -> NormalizedName | None:
-        """The registered product name a model-name wording states, with only a repeated brand
-        and a registered colour in parentheses removed; ``None`` when the wording is anything
-        else (it is then compared as written)."""
-        tokens = product_name_tokens(text)
+        """The registered product name a model-name wording states, with only a repeated brand,
+        a registered colour in parentheses and an Apple part number (``MacBook Neo (MHFC4PP/A)``,
+        2026-10-22) removed; ``None`` when the wording is anything else (it is then compared as
+        written). The part numbers are returned beside the name, never dropped."""
+        stripped, parts = strip_apple_part_numbers(text)
+        tokens = product_name_tokens(stripped)
         for entry in self.product_names():
             name_tokens = entry.tokens
             if not _contains(tokens, name_tokens):
                 continue
             colour = next((c for c in entry.colours
                            if _contains(tokens, product_name_tokens(c))), "")
-            result = normalize_product_name(text, brand=entry.brand, color=colour)
+            result = normalize_product_name(stripped, brand=entry.brand, color=colour)
             if product_name_tokens(result.value) == name_tokens:
-                return NormalizedName(text, entry.name, result.removed)
+                removed = (*result.removed, *(f"Apple part number ({part})" for part in parts))
+                return NormalizedName(text, entry.name, removed, parts)
         return None
 
     def title_product_names(self, title: str) -> list[RegisteredName]:

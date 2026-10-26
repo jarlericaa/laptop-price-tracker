@@ -17,6 +17,12 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent / "src"))
 
 from laptop_tracker import evidence_approvals
+from laptop_tracker.category_fallback import (
+    FALLBACK_REQUEST_COLUMNS,
+    FallbackCoordinator,
+    fallback_code,
+    load_saved_index,
+)
 from laptop_tracker.collection import (
     MANIFEST_COLUMNS,
     ROUTES,
@@ -162,6 +168,8 @@ SEARCH_JOB_COLUMNS = (
     "discovery_outcome", "identity_kind",
     # Adaptive passes (2026-10-22): identifier spellings run, and second-pass collection.
     "identifier_variant_queries", "second_pass",
+    # Catalog-index fallback (2026-10-22): what it did, and why when it did not run.
+    "fallback",
 )
 
 
@@ -219,6 +227,15 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                              "code returned no result: the code with spaces for punctuation, "
                              "then its most distinctive segment (default 2; 0 disables). A "
                              "result must still show the complete code.")
+    parser.add_argument("--max-fallback-requests-per-retailer", type=non_negative, default=0,
+                        help="Bounded fallback when every native query tier of a target with a "
+                             "verified manufacturer code (its model, or a recorded "
+                             "manufacturer_model_code) found no plausible candidate: read the "
+                             "retailer's public sitemap index (robots.txt first) and look the "
+                             "complete code up in product URLs. Counts robots.txt, the root "
+                             "sitemap and the product sitemaps for each retailer, once per run, "
+                             "within --max-total-requests (default 0: off). Entries are "
+                             "candidate locations only; --search-cache replays saved responses.")
     parser.add_argument("--max-second-pass-candidates-per-target-retailer", type=non_negative,
                         default=0,
                         help="After a collection round, collect up to this many further "
@@ -430,6 +447,10 @@ class SearchJob:
         self.second_pass = False
         self.second_pass_note = ""
         self.candidate_limit = 0  # 0: --max-candidates-per-target-retailer
+        # Catalog-index fallback (2026-10-22): its own records, never mixed into the native
+        # search records (pages sent, tiers run and stop reasons describe native search only).
+        self.fallback_records: list[SearchRecord] = []
+        self.fallback_token = ""
 
     @property
     def key(self) -> tuple[str, str]:
@@ -554,7 +575,23 @@ class SearchJob:
                          else "RESULT_CAP_REACHED")
         if self.supplied_missed:
             notes.append("NATIVE_SEARCH_MISSED_SUPPLIED_URL")
+        if self.fallback_token:
+            notes.append(self.fallback_token)
         return ";".join(notes) or "COMPLETE"
+
+    def needs_fallback(self) -> bool:
+        """Native search is finished without a plausible candidate and the target has a verified
+        code to look up; the fallback runs once per job."""
+        return (self.done and not self.fallback_token and self.stop_reason != STOP_PLAUSIBLE
+                and bool(fallback_code(self.target)))
+
+    def fallback_summary(self) -> str:
+        if not self.fallback_records:
+            return "" if not self.fallback_token else self.fallback_token
+        record = self.fallback_records[-1]
+        return " | ".join(filter(None, (
+            self.fallback_token, f"{record.hits} location(s)" if record.hits else "",
+            record.message)))
 
     def finish_outcome(self) -> str:
         """How discovery ended for this configuration (identity only)."""
@@ -623,6 +660,7 @@ class SearchJob:
                 f"{r.query.tier}:{r.query.text}:{r.outcome}" for r in self.records
                 if r.query.tier in VARIANT_TIERS),
             "second_pass": self.second_pass_note,
+            "fallback": self.fallback_summary(),
         }
 
 
@@ -806,6 +844,31 @@ def run_searches(jobs, fetcher, transport, args, evidence_dir: Path, log, *,
         ):
             job.stop_reason = STOP_REPLAY
     return sent
+
+
+def run_fallbacks(jobs, coordinator: FallbackCoordinator, log) -> int:
+    """Catalog-index fallback for jobs whose native search ended without a plausible candidate.
+
+    One index per retailer is fetched (or replayed) on first need and shared; each job then
+    looks its verified code up in it. Hits are candidate locations in the job's own fallback
+    records: ranking, collection and matching decide, exactly as for a search result. Returns
+    the number of jobs that looked.
+    """
+    looked = 0
+    for job in jobs:
+        if not job.needs_fallback():
+            continue
+        token, record = coordinator.lookup(
+            job.target, job.retailer_id, native_stop=job.stop_reason,
+            native_coverage=job.search_coverage(),
+            retailer_failing=job.stop_reason == STOP_RETAILER)
+        job.fallback_token = token
+        if record is not None:
+            job.fallback_records.append(record)
+        looked += 1
+        log(f"  fallback {job.retailer_id:15} {job.target.target_id}: {token}"
+            + (f" ({record.hits} location(s))" if record is not None and record.hits else ""))
+    return looked
 
 
 def _inspect(job, url, fetcher, transport, args, state, evidence_dir, log):
@@ -1337,6 +1400,7 @@ def main(argv: list[str] | None = None, *, transport: Transport | None = None,
         "max_queries_per_target_retailer": args.max_queries_per_target_retailer,
         "max_seed_urls_per_target_retailer": args.max_seed_urls_per_target_retailer,
         "max_identifier_variant_queries": args.max_identifier_variant_queries,
+        "max_fallback_requests_per_retailer": args.max_fallback_requests_per_retailer,
         "max_second_pass_candidates_per_target_retailer":
             args.max_second_pass_candidates_per_target_retailer,
         "retry_attempts_per_request": FetchConfig().max_attempts,
@@ -1359,6 +1423,9 @@ def main(argv: list[str] | None = None, *, transport: Transport | None = None,
             "search_requests_cap": min(worst_search, args.max_search_requests),
             "worst_case_product_fetches": worst_product,
             "product_fetch_cap": min(worst_product, args.max_product_fetches),
+            # At most one index per retailer that has a target with a verified code.
+            "worst_case_fallback_requests": args.max_fallback_requests_per_retailer * len({
+                job.retailer_id for job in jobs if fallback_code(job.target)}),
         },
         "input_sha256": {str(p): sha256_file(p) for p in (
             args.target_master, args.selected_list, args.contributions,
@@ -1395,6 +1462,11 @@ def main(argv: list[str] | None = None, *, transport: Transport | None = None,
         f"{len(saved_inspections)} product pages; historical seed URLs: "
         f"{sum(len(v) for v in seeds.values())}; supplied URLs: {len(supplied_report)}.")
     state = {"product_fetches": 0, "saved_inspections": saved_inspections}
+    fallback = FallbackCoordinator(
+        fetcher=fetcher, transport=budget, evidence_dir=evidence_dir,
+        per_retailer_limit=args.max_fallback_requests_per_retailer,
+        saved=load_saved_index(args.search_cache, args.cache_max_age_hours, now),
+        replay_only=args.replay_only, user_agent=config.user_agent, log=log)
     run = DiscoveryRun(out, jobs, seeds, supplied, supplied_report)
     collection = RoundCollector(args, out, budget, clock, log, ranks, target_master,
                                 saved_inspections)
@@ -1408,6 +1480,8 @@ def main(argv: list[str] | None = None, *, transport: Transport | None = None,
         searches_sent += run_searches(active, fetcher, budget, args, evidence_dir, log,
                                       saved=saved_searches, answered=answered,
                                       sent_before=searches_sent)
+        run_fallbacks(active, fallback, log)
+        run.fallback_requests = fallback.requests
         log("Ranking and inspecting candidates...")
         round_manifest: list[tuple[RankedCandidate, str, str]] = []
         for job in active:
@@ -1513,6 +1587,20 @@ def main(argv: list[str] | None = None, *, transport: Transport | None = None,
         },
         "discovery_outcomes": dict(Counter(job.outcome for job in jobs)),
         "search_coverage": dict(Counter(job.search_coverage() for job in jobs)),
+        "fallback": {
+            "policy": "Opt-in (--max-fallback-requests-per-retailer). After every native query "
+                      "tier of a target with a verified code ended without a plausible "
+                      "candidate, the retailer's public sitemap index is read once (robots.txt "
+                      "first) and the complete code is looked up in product URLs and sitemap "
+                      "titles. Entries are candidate locations only.",
+            "requests_sent": fallback.requests_sent,
+            "requests_by_retailer": dict(fallback.sent),
+            "jobs": dict(Counter(job.fallback_token or "NOT_ELIGIBLE_NO_VERIFIED_CODE_OR_"
+                                 "PLAUSIBLE_NATIVE_CANDIDATE" for job in jobs)),
+            "indexes": {retailer: {"status": index.status, "message": index.message,
+                                   "product_urls": len(index.entries)}
+                        for retailer, index in fallback.indexes.items()},
+        },
         "historical_seed_urls": sum(len(v) for v in seeds.values()),
         "supplied_urls": dict(Counter(row["assignment_basis"] for row in supplied_report)),
         "candidates": dict(Counter(c.category for c in all_candidates)),
@@ -1611,6 +1699,7 @@ class DiscoveryRun:
         self.variants: list[dict[str, str]] = []
         self.results: dict[str, list[dict[str, str]]] = {}  # request_id -> match result rows
         self.request_status: dict[str, str] = {}
+        self.fallback_requests: list[dict[str, str]] = []
         self.rounds = 1
 
     def round_candidates(self, job: SearchJob, round_number: int) -> list[RankedCandidate]:
@@ -1618,7 +1707,8 @@ class DiscoveryRun:
         results new to this job, plus earlier relevant candidates a per-round limit skipped."""
         if round_number == 1:
             ranked = merge_seeds(
-                rank_target_hits(job.target, job.retailer_id, job.records), job.target,
+                rank_target_hits(job.target, job.retailer_id,
+                                 job.records + job.fallback_records), job.target,
                 job.retailer_id, self.seeds.get(job.key, []),
             )
             return merge_supplied(ranked, job, self.supplied.get(job.key, []),
@@ -1626,7 +1716,8 @@ class DiscoveryRun:
         known = {strip_variant(c.hit.product_url): c for c in self.by_job.get(job.key, [])}
         eligible = {id(c) for c in self.second_pass_candidates(job)}
         ranked = []
-        for candidate in rank_target_hits(job.target, job.retailer_id, job.records):
+        for candidate in rank_target_hits(job.target, job.retailer_id,
+                                          job.records + job.fallback_records):
             earlier = known.get(strip_variant(candidate.hit.product_url))
             if earlier is None:
                 candidate.discovery_round = round_number
@@ -1767,7 +1858,9 @@ class DiscoveryRun:
 
     def write_files(self) -> None:
         out = self.out
-        records = [record for job in self.jobs for record in job.records]
+        records = [record for job in self.jobs for record in job.records + job.fallback_records]
+        write_csv(out / "fallback_requests.csv", FALLBACK_REQUEST_COLUMNS,
+                  self.fallback_requests)
         write_csv(out / "search_jobs.csv", SEARCH_JOB_COLUMNS,
                   (job.job_row(len(self.seeds.get(job.key, []))) for job in self.jobs))
         write_csv(out / "search_requests.csv", SEARCH_RECORD_COLUMNS,

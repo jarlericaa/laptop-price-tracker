@@ -33,6 +33,7 @@ from .conventions import (
     model_codes,
     normalize_hyphens,
     parse_text,
+    processor_models,
     title_identifiers,
     title_model_codes,
 )
@@ -1554,12 +1555,14 @@ def named_resolutions(text: str, *, precise: bool = True) -> dict[str, str]:
 
 
 def _title_secondary_claims(title: str) -> dict[str, set[str]]:
-    """Secondary hardware a title states explicitly: one discrete GPU model, the panel type,
-    and the resolution (numeric, or a standard name). Never mandatory; unstated stays unknown."""
+    """Secondary hardware a title states explicitly: one discrete GPU model, the exact
+    processor model, the panel type, and the resolution (numeric, or a standard name). Never
+    mandatory; unstated stays unknown."""
     text = _parse_text(title)
     numeric = _resolution(text)
     return {
         "gpu_model": canonical_gpu_models(text),
+        "cpu_model": {model.display for model in processor_models(text)},
         "display_type": _display_type(text),
         "resolution": numeric or set(named_resolutions(text).values()),
     }
@@ -1698,6 +1701,10 @@ def _apply_title_secondary(
             notes.append(f"TITLE_SUPPLIED_{field.upper()}")
             continue
         item = evidence[present[field]]
+        if field == "cpu_model":
+            # A title/specification processor difference is reported by CPU_NUMBER_TITLE_DIFFERS
+            # and the page's own specification row is the value compared (2026-10-22).
+            continue
         if item.status is ExtractionStatus.EXTRACTED and not _same_secondary(
             field, item.value, value
         ):
@@ -1834,7 +1841,10 @@ def _normalize_model_name(
 ) -> None:
     """A model-name wording that is a registered product name plus a repeated brand and/or a
     registered colour (``Apple Macbook Neo (Citrus)``) is that product name; the original
-    wording stays as supporting evidence. Codes and unregistered names are unchanged."""
+    wording stays as supporting evidence. An Apple part number in the wording
+    (``MacBook Neo (MHFC4PP/A)``, 2026-10-22) is removed from the compared name and kept as
+    separate part-number evidence, never as identity. Codes and unregistered names are
+    unchanged."""
     index, model = next((i, e) for i, e in enumerate(evidence) if e.field == "model")
     if model.status is not ExtractionStatus.EXTRACTED or model_codes(model.value):
         return
@@ -1851,6 +1861,12 @@ def _normalize_model_name(
         "model", ExtractionStatus.SUPPORTING, model.value,
         f"{model.source_label} [original wording, kept]", model.source_text,
     ))
+    for part in normalized.part_numbers:
+        supporting.append(FieldExtraction(
+            "part_number_candidate", ExtractionStatus.SUPPORTING, part,
+            f"{model.source_label} [Apple part number in the model wording; retailer part number, "
+            "manufacturer role unverified; never used for identity]", model.source_text,
+        ))
     notes.append(MODEL_NAME_NORMALIZED)
 
 
@@ -2141,6 +2157,27 @@ def extract_offer_attributes(offer: OfferObservation) -> ExtractedAttributes:
         elif len(gpus) > 1:
             evidence.append(FieldExtraction("gpu_model", ExtractionStatus.AMBIGUOUS,
                                             "; ".join(gpus), label, text))
+
+    # The exact processor model an installed-processor row states (2026-10-22): a secondary
+    # specification, compared only when the target records a full processor number too. Only
+    # the installed wording counts ("up to" capability clauses are family options); a family
+    # name without its number states no model. A shared description needs the same proven scope
+    # as its processor family.
+    if cpu_rows and (not shared or shared_locator):
+        installed = [(label, _cpu_scopes(value)[0]) for label, value in cpu_rows]
+        models = {
+            model.display: model
+            for _, value in installed for model in processor_models(value, bare_apple=True)
+        }
+        if models:
+            tag = f" [SHARED_PRODUCT; {shared_locator}]" if shared else ""
+            sources = [(label, value) for label, value in cpu_rows
+                       if processor_models(_cpu_scopes(value)[0], bare_apple=True)]
+            label = "; ".join(dict.fromkeys(label for label, _ in sources)) + tag
+            text = " | ".join(value for _, value in sources)
+            status = ExtractionStatus.EXTRACTED if len(models) == 1 else ExtractionStatus.AMBIGUOUS
+            evidence.append(FieldExtraction("cpu_model", status, "; ".join(sorted(models)),
+                                            label, text))
 
     prose = _prose_screen_rows(scoped)
     if not shared or (

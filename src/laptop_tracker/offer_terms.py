@@ -15,6 +15,14 @@ reads the offer's own wording for evidence of the purchase terms and classifies 
 - ``PURCHASE_TERMS_UNKNOWN``: bundle wording without evidence of what the price covers.
 - ``BUNDLE_NOT_CHECKED``: the adapter did not check for bundles and no wording says anything.
 
+Purchase-block restrictions (2026-10-22). A correct product match does not establish an
+unrestricted price. Adapters record statements such as "Promo Price Applicable for Cash Payments
+Only" as ``PURCHASE_TERMS`` scoped evidence (kind, scope ``PRICE`` or ``PAGE``, wording). A
+``PRICE``-scoped restriction excludes the price from comparison (reason ``RESTRICTED_PRICE``)
+under every policy; a ``PAGE``-scoped one is kept as evidence only. Whether a cash-only promo
+price should count is an owner policy question: until it is decided the default is exclusion,
+with the wording kept.
+
 Nothing here changes identity, a target assignment, or the stored observation; the effect is
 reported separately from matching. ``BUNDLE_FLAG_POLICY`` reproduces the earlier rule (every
 checked bundle comparable at its package price with a ``BUNDLE_OFFER`` note).
@@ -23,10 +31,10 @@ checked bundle comparable at its package price with a ``BUNDLE_OFFER`` note).
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from .conventions import model_codes
-from .offers import PRODUCT_DESCRIPTION, OfferObservation, clean_text
+from .offers import PRODUCT_DESCRIPTION, PURCHASE_TERMS, OfferObservation, clean_text
 
 PURCHASE_TERMS_POLICY = "purchase-terms/2026-10-19"
 BUNDLE_FLAG_POLICY = "bundle-flag/2026-10-15"
@@ -50,6 +58,16 @@ TERMS_EXCLUSION: dict[str, str] = {
     BUNDLE_NOT_CHECKED: "BUNDLE_STATUS_UNKNOWN",
 }
 TERMS_NOTE: dict[str, str] = {INCLUDED_ITEMS: "INCLUDED_ITEMS_OFFER"}
+
+# Purchase-block restriction kinds (2026-10-22) and where a statement applies.
+CASH_ONLY = "CASH_ONLY"
+PAYMENT_METHOD_LIMITED = "PAYMENT_METHOD_LIMITED"
+MEMBER_ONLY = "MEMBER_ONLY"
+TRADE_IN_REQUIRED = "TRADE_IN_REQUIRED"
+RESTRICTION_KINDS = (CASH_ONLY, PAYMENT_METHOD_LIMITED, MEMBER_ONLY, TRADE_IN_REQUIRED)
+PRICE_SCOPE = "PRICE"  # The statement is about the displayed price: it blocks comparison.
+PAGE_SCOPE = "PAGE"  # A page-level remark: recorded, never blocking.
+RESTRICTED_REASON = "RESTRICTED_PRICE"
 
 # Ordinary inclusions: software, service, and small accessories that come with a laptop.
 _ORDINARY = (
@@ -93,12 +111,28 @@ _PACKAGE_STATEMENT = re.compile(
     rf"{_SIZE}{_MAJOR_PLUS}\b",
     re.I,
 )
+# "Promo Price Applicable for Cash Payments Only" (PC Express, 2026-10-22). Plain mentions of
+# cash ("cash on delivery", "cash back") are not restrictions.
+_CASH_ONLY = (
+    r"\bcash[\s-]?only\b|\bcash\s+(?:payments?|purchases?|transactions?|basis)\s+only\b"
+    r"|\b(?:applicable|valid|available|good|effective)\s+(?:for|with|on|to)\s+cash\b[^.;|]{0,30}"
+    r"\bonly\b|\bonly\s+(?:for|with|on|to)\s+cash\b|\bpay(?:ments?)?\s+(?:in\s+)?cash\s+only\b"
+)
+_PAYMENT_LIMITED = (
+    r"\binstall?ments?\s+(?:only|price)\b|\b(?:straight|0\s*%)\s+install?ment\s+price\b"
+    r"|\bfinancing\s+(?:only|price)\b|\b(?:credit\s+)?card\s+(?:only|price)\b"
+    r"|\b(?:with|via|thru|through)\s+(?:home\s+credit|billease|atome|tendopay)\b"
+)
+_MEMBER_ONLY = r"\bmembers?(?:hip)?\s+(?:price|only)\b|\bloyalty\s+price\b"
+_TRADE_IN = r"\btrade[\s-]?in\b"
 _RESTRICTED = re.compile(
-    r"\btrade[\s-]?in\b|\binstall?ments?\s+(?:only|price)\b|\b(?:straight|0\s*%)\s+"
-    r"install?ment\s+price\b|\bfinancing\s+(?:only|price)\b|\b(?:credit\s+)?card\s+(?:only|"
-    r"price)\b|\bmembers?(?:hip)?\s+(?:price|only)\b|\b(?:with|via|thru|through)\s+(?:home\s+"
-    r"credit|billease|atome|tendopay)\b|\bloyalty\s+price\b",
-    re.I,
+    "|".join((_TRADE_IN, _PAYMENT_LIMITED, _MEMBER_ONLY, _CASH_ONLY)), re.I
+)
+_RESTRICTION_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
+    (CASH_ONLY, re.compile(_CASH_ONLY, re.I)),
+    (PAYMENT_METHOD_LIMITED, re.compile(_PAYMENT_LIMITED, re.I)),
+    (MEMBER_ONLY, re.compile(_MEMBER_ONLY, re.I)),
+    (TRADE_IN_REQUIRED, re.compile(_TRADE_IN, re.I)),
 )
 _CONDITION = re.compile(
     r"\b(?:with|upon)\s+(?:the\s+)?(?:minimum\s+)?purchase\s+of\s+(?!(?:this|the|any|each|every"
@@ -122,12 +156,66 @@ _TERM = re.compile(r"^(?:title|variant)\s+term\s+([A-Z]+):\s*(.*)$")
 
 
 @dataclass(frozen=True)
+class PurchaseRestriction:
+    """One purchase-block statement a page makes (2026-10-22): its kind, whether it is about the
+    displayed price or only the page, and the retailer's wording as written."""
+
+    kind: str
+    scope: str
+    evidence_text: str
+
+    @property
+    def label(self) -> str:
+        return f"{self.kind} ({self.scope})"
+
+
+@dataclass(frozen=True)
 class OfferTerms:
     category: str
     # "source: wording" for each statement that decided the category, raw text kept.
     evidence: tuple[str, ...] = ()
     # Inclusions the page states, as written.
     included_items: tuple[str, ...] = ()
+    # Restrictions an adapter recorded as PURCHASE_TERMS evidence (all scopes).
+    restrictions: tuple[PurchaseRestriction, ...] = ()
+
+
+_RESTRICTION_LABEL = re.compile(r"^([A-Z_]+) \((PRICE|PAGE)\)$")
+
+
+def scan_purchase_restrictions(text: str) -> tuple[PurchaseRestriction, ...]:
+    """Restriction statements in page prose, one per kind found (an adapter's capture helper).
+
+    A statement that names a price (``Promo Price Applicable for Cash Payments Only``) is
+    ``PRICE``-scoped and blocks comparison; one that does not is a ``PAGE`` remark. Plain
+    mentions of cash or installments ("cash on delivery", "0% installment available") are not
+    restrictions.
+    """
+    found = []
+    for sentence in map(clean_text, _sentences(text)):
+        for kind, pattern in _RESTRICTION_PATTERNS:
+            if pattern.search(sentence):
+                scope = PRICE_SCOPE if _PRICE_WORDS.search(sentence) else PAGE_SCOPE
+                found.append(PurchaseRestriction(kind, scope, sentence))
+    return tuple(dict.fromkeys(found))
+
+
+def purchase_restriction_items(
+    restrictions: tuple[PurchaseRestriction, ...],
+) -> tuple[tuple[str, str, str], ...]:
+    """``scoped_evidence`` items (``PURCHASE_TERMS``, label, wording) for an adapter to keep."""
+    return tuple((PURCHASE_TERMS, item.label, item.evidence_text) for item in restrictions)
+
+
+def purchase_restrictions(observation: OfferObservation) -> tuple[PurchaseRestriction, ...]:
+    """The restrictions an adapter recorded for the offer, read back from its own evidence."""
+    details = observation.details
+    found = []
+    for scope, label, value in () if details is None else details.scoped_evidence:
+        match = _RESTRICTION_LABEL.match(label) if scope == PURCHASE_TERMS else None
+        if match and match[1] in RESTRICTION_KINDS:
+            found.append(PurchaseRestriction(match[1], match[2], value))
+    return tuple(dict.fromkeys(found))
 
 
 def _sentences(text: str) -> list[str]:
@@ -172,7 +260,26 @@ def _components(evidence: tuple[str, ...]) -> list[str] | None:
 
 
 def classify_offer_terms(observation: OfferObservation) -> OfferTerms:
-    """Classify what the displayed price buys, from the offer's own wording only."""
+    """Classify what the displayed price buys, from the offer's own wording only.
+
+    A ``PRICE``-scoped purchase restriction recorded by the adapter (2026-10-22) makes the
+    price ``RESTRICTED_PRICE`` whatever else the wording says; the other evidence is kept.
+    """
+    terms = _classify_wording(observation)
+    captured = purchase_restrictions(observation)
+    blocking = [item for item in captured if item.scope == PRICE_SCOPE]
+    if blocking and terms.category != RESTRICTED_PRICE:
+        evidence = (*(f"{item.label}: {item.evidence_text}" for item in blocking),
+                    *terms.evidence)
+        terms = replace(terms, category=RESTRICTED_PRICE, evidence=evidence)
+    elif blocking:
+        evidence = (*(f"{item.label}: {item.evidence_text}" for item in blocking),
+                    *terms.evidence)
+        terms = replace(terms, evidence=tuple(dict.fromkeys(evidence)))
+    return replace(terms, restrictions=captured)
+
+
+def _classify_wording(observation: OfferObservation) -> OfferTerms:
     details = observation.details
     flag = None if details is None else details.bundle_flag
     bundle_evidence = () if details is None else details.bundle_evidence
@@ -273,6 +380,9 @@ def terms_price_effect(
         raise ValueError(f"Unknown offer terms policy: {policy}")
     if policy == BUNDLE_FLAG_POLICY or terms is None:
         reasons = () if bundle_flag in {"TRUE", "FALSE"} else ("BUNDLE_STATUS_UNKNOWN",)
+        if terms is not None and any(r.scope == PRICE_SCOPE for r in terms.restrictions):
+            # An adapter-recorded price restriction applies under every policy (2026-10-22).
+            reasons = (*reasons, RESTRICTED_REASON)
         return reasons, ("BUNDLE_OFFER",) if bundle_flag == "TRUE" else ()
     reason = TERMS_EXCLUSION.get(terms.category)
     note = TERMS_NOTE.get(terms.category)

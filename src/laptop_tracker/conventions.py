@@ -99,6 +99,39 @@ def is_part_number_shape(token: str) -> bool:
     return any(shape.fullmatch(token.strip()) for shape in _PART_NUMBER_SHAPES)
 
 
+# Apple part numbers (2026-10-22): ``M``, four letters or digits, a one- or two-letter region
+# code, ``/`` and a letter (``MHFC4PP/A``, ``MC6T4X/A``). Retailers write them after a name
+# (``MacBook Neo (MHFC4PP/A)``; saved DataBlitz Neo titles end ``(Silver) (MHFC4PP/A)``). They vary
+# by colour and capacity, so they are retailer part-number evidence, never a model value and never
+# identity. Upper case only; the whole token must stand alone.
+_APPLE_PART_NUMBER = re.compile(r"(?<![A-Za-z0-9/])M[0-9A-Z]{4}[A-Z]{1,2}/[A-Z](?![A-Za-z0-9/])")
+
+
+def apple_part_numbers(text: str) -> list[str]:
+    """Distinct Apple part numbers in ``text``, in order and as written."""
+    return list(dict.fromkeys(_APPLE_PART_NUMBER.findall(text)))
+
+
+def is_apple_part_number(token: str) -> bool:
+    return _APPLE_PART_NUMBER.fullmatch(token.strip()) is not None
+
+
+def strip_apple_part_numbers(text: str) -> tuple[str, tuple[str, ...]]:
+    """``(text without its Apple part numbers, those part numbers)``.
+
+    Only the part-number tokens, the brackets left empty around them, and separators left at
+    either end go; every other word, number and parenthesis stays as written. Text with no Apple
+    part number is returned unchanged.
+    """
+    parts = apple_part_numbers(text)
+    if not parts:
+        return text, ()
+    value = _APPLE_PART_NUMBER.sub(" ", text)
+    value = re.sub(r"\(\s*\)|\[\s*\]", " ", value)
+    value = re.sub(r"^[\s/|,;:-]+|[\s/|,;:-]+$", "", re.sub(r"\s+", " ", value))
+    return value, tuple(parts)
+
+
 # Included-accessory codes (2026-10-19). Bundle titles list the extras after the laptop, joined by
 # "+" or "|" ("... | MS Office Home 2024 + MS 365 Basic + Acer Entry Run Rate Backpack E-1620-P").
 # A code in such an item segment, written after an accessory noun, in a segment that does not name
@@ -178,6 +211,8 @@ class NormalizedName:
     original: str
     value: str
     removed: tuple[str, ...]
+    # Apple part numbers removed from the wording (2026-10-22); kept by the caller as evidence.
+    part_numbers: tuple[str, ...] = ()
 
 
 def normalize_product_name(text: str, *, brand: str = "", color: str = "") -> NormalizedName:
@@ -349,3 +384,124 @@ def canonical_gpu_models(text: str) -> set[str]:
         else:
             found.add(f"Radeon RX {match[5]}{(match[6] or '').upper()}")
     return found
+
+
+# Exact processor models (2026-10-22). ``cpu_series`` names a family (``Core 5``, ``Ryzen 7``);
+# the exact model is the processor number (``Core 5 210H``, ``Ryzen 7 170``) and is what tells
+# two same-family processors apart. A model is recognized only when its number is stated in full;
+# a family, a generation ("12th Gen"), or a capacity ("512GB") never is. Presentation (case,
+# spacing, a hyphen between tier and number, "Intel(R) Core(TM)", the word "processor") does not
+# change the model; the number and its suffix always do (``7735HS`` and ``7735H`` differ).
+@dataclass(frozen=True)
+class ProcessorModel:
+    key: str  # canonical comparison form (casefolded display)
+    display: str  # canonical presentation, e.g. "Core i3-1315U"
+    family: str  # the cpu_series form it belongs to, e.g. "Core i3"
+    text: str  # the wording as stated, for provenance
+
+
+# A number glued to a capacity or storage word is a capacity ("Ryzen 7 512GB"), not a model.
+_NOT_A_CAPACITY = r"(?!\s*(?:GB|TB|MB|SSD|HDD|RAM|DDR|LPDDR|NVMe|PCIe)\b)"
+_NOT_UNIT = r"(?![GTM]B\b)"
+_ModelForm = Callable[[re.Match[str]], tuple[str, str]]
+_PROCESSOR_PATTERNS: tuple[tuple[re.Pattern[str], _ModelForm], ...] = (
+    # Intel Core iN-NNNN[X]: "i5-13420H", "i5 12450H", "Core i3-1315U", "i7-1165G7", "i3-N305".
+    (
+        re.compile(
+            r"(?<![A-Za-z0-9-])(?:Core\s+)?i([3579])\s*-?\s*"
+            r"(N[0-9]{3}|[0-9]{4,5}" + _NOT_UNIT + r"(?:[A-Z]{1,2}[0-9]?)?)(?![A-Za-z0-9])"
+            + _NOT_A_CAPACITY,
+            re.I,
+        ),
+        lambda m: (f"Core i{m[1]}-{m[2].upper()}", f"Core i{m[1]}"),
+    ),
+    # Core Ultra N NNNX: "Core Ultra 7 155H", "Core Ultra 5 Processor 125H".
+    (
+        re.compile(r"\bCore\s+Ultra\s+([3579])\s*-?\s*(?:processor\s+)?([0-9]{3}" + _NOT_UNIT
+                   + r"[A-Z]{1,2})\b",
+                   re.I),
+        lambda m: (f"Core Ultra {m[1]} {m[2].upper()}", f"Core Ultra {m[1]}"),
+    ),
+    # Core N NNNX (2024 naming): "Core 5 210H", "Core 5-210H", "Core 5 processor 220H".
+    (
+        re.compile(
+            r"\bCore\s+([3579])\s*-?\s*(?:processor\s+)?([0-9]{3}" + _NOT_UNIT
+            + r"[A-Z]{1,2})\b",
+            re.I,
+        ),
+        lambda m: (f"Core {m[1]} {m[2].upper()}", f"Core {m[1]}"),
+    ),
+    # Ryzen AI N [HX] NNN: "Ryzen AI 9 HX 370", "Ryzen AI 7 350".
+    (
+        re.compile(r"\bRyzen\s+AI\s+([3579])\s+(?:(HX|H|U)\s*)?([0-9]{3})\b", re.I),
+        lambda m: (f"Ryzen AI {m[1]} " + (f"{m[2].upper()} " if m[2] else "") + m[3],
+                   f"Ryzen AI {m[1]}"),
+    ),
+    # Ryzen N NNN[X]: "Ryzen 7 7735HS", "Ryzen 5 7520U", short "Ryzen 7 170" (no suffix).
+    (
+        re.compile(
+            r"\bRyzen\s+([3579])\s+([0-9]{3,4}" + _NOT_UNIT
+            + r"(?:[A-Z]{1,2}(?:3D)?)?)(?![A-Za-z0-9])" + _NOT_A_CAPACITY,
+            re.I,
+        ),
+        lambda m: (f"Ryzen {m[1]} {m[2].upper()}", f"Ryzen {m[1]}"),
+    ),
+    # Apple chips with their modifier: "Apple M4 Pro", "M4 Max chip", "Apple A18 Pro chip".
+    (
+        re.compile(r"\bApple\s+([MA][0-9]{1,2})(?:\s+(Pro|Max|Ultra))?\b", re.I),
+        lambda m: (f"Apple {m[1].upper()}" + (f" {m[2].title()}" if m[2] else ""),
+                   f"Apple {m[1].upper()}" + (f" {m[2].title()}" if m[2] else "")),
+    ),
+    (
+        re.compile(r"(?<![A-Za-z0-9.])([MA][0-9]{1,2})(?:\s+(Pro|Max|Ultra))?\s+chip\b", re.I),
+        lambda m: (f"Apple {m[1].upper()}" + (f" {m[2].title()}" if m[2] else ""),
+                   f"Apple {m[1].upper()}" + (f" {m[2].title()}" if m[2] else "")),
+    ),
+    (
+        re.compile(r"\bIntel\s+(?:Processor\s+)?N([0-9]{2,3})\b", re.I),
+        lambda m: (f"Intel N{m[1]}", f"Intel N{m[1]}"),
+    ),
+    (
+        re.compile(r"\bCeleron\s+(N[0-9]{4})\b", re.I),
+        lambda m: (f"Celeron {m[1].upper()}", f"Celeron {m[1].upper()}"),
+    ),
+    (
+        re.compile(r"(?<![A-Za-z0-9-])(X1[EP]?-[0-9]{2}-[0-9]{3})(?![A-Za-z0-9-])", re.I),
+        lambda m: (m[1].upper(), "Snapdragon X"),
+    ),
+)
+_BARE_APPLE_MODEL = re.compile(
+    r"(?<![A-Za-z0-9.])([MA][0-9]{1,2})(?:\s+(Pro|Max|Ultra))?(?![A-Za-z0-9])", re.I
+)
+
+
+def processor_models(text: str, *, bare_apple: bool = False) -> list[ProcessorModel]:
+    """Exact processor models stated in ``text``, in order of appearance, one per distinct model.
+
+    ``bare_apple`` also reads a bare Apple chip name (``M5``, ``A18 Pro``); set it only for a
+    value already known to be a processor statement (a CPU row, the catalog's ``cpu_model``).
+    Nothing is inferred from a family, and nothing is taken from outside ``text``.
+    """
+    parsed = parse_text(text)
+    found: dict[str, tuple[int, ProcessorModel]] = {}
+    spans: list[tuple[int, int]] = []
+
+    def add(match: re.Match[str], key_form: tuple[str, str]) -> None:
+        display, family = key_form
+        if any(start < match.end() and match.start() < end for start, end in spans):
+            return  # inside a wording already read by an earlier rule
+        spans.append((match.start(), match.end()))
+        found.setdefault(display.casefold(), (match.start(), ProcessorModel(
+            display.casefold(), display, family, match[0].strip())))
+
+    for pattern, form in _PROCESSOR_PATTERNS:
+        for match in pattern.finditer(parsed):
+            add(match, form(match))
+    if bare_apple:
+        for match in _BARE_APPLE_MODEL.finditer(parsed):
+            number = match[1]
+            if not re.fullmatch(r"M[1-9]|A1[0-9]", number, re.I):
+                continue
+            display = f"Apple {number.upper()}" + (f" {match[2].title()}" if match[2] else "")
+            add(match, (display, display))
+    return [model for _, model in sorted(found.values(), key=lambda item: item[0])]

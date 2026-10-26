@@ -34,6 +34,16 @@ from .discovery import _NOT_A_SUFFIX, _compact, normalize
 from .normalization import CORE_MATCH_COLUMNS, core_value_key
 from .offers import clean_text
 from .retailer_search import SearchHit, SearchMethod, SearchRecord
+from .variant_axes import (
+    PageStatements,
+    VariantAxes,
+    VariantReading,
+    known_colors,
+    option_names_from_html,
+    read_axes,
+    statements_from_html,
+    variant_rows_from_html,
+)
 
 # Candidate categories, in priority order. A historical verified URL is a page that matched this
 # configuration exactly in an earlier collection; it is a seed to re-check, never a match.
@@ -633,6 +643,10 @@ class VariantInfo:
     title: str
     available: str
     price: str
+    # Option values (option1..3) and the page-metadata reading of them (2026-10-22): installed
+    # capacities and colour as the option axes establish them, with basis and scope.
+    options: tuple[str, ...] = ()
+    reading: VariantReading | None = None
 
 
 @dataclass
@@ -641,6 +655,9 @@ class ProductInspection:
     outcome: str  # SINGLE_VARIANT, MULTI_VARIANT, NO_STRUCTURED_OFFERS, UNREADABLE
     variants: list[VariantInfo] = field(default_factory=list)
     message: str = ""
+    # Option axes of the page and its page-level memory/storage statements (2026-10-22).
+    axes: VariantAxes | None = None
+    statements: PageStatements | None = None
     # The page says its variant options are named (Shopify ``data-has-only-default-variant=
     # "false"``): its adapter needs the ``?variant=`` URL even for a single variant.
     named_options: bool = False
@@ -751,30 +768,107 @@ def inspect_product_page(method: SearchMethod, product_url: str, text: str) -> P
     if len(variants) < len(distinct):
         return ProductInspection(product_url, "UNREADABLE", variants,
                                  "Some JSON-LD offers have no usable variant URL.")
-    return ProductInspection(product_url, "MULTI_VARIANT", variants)
+    statements = statements_from_html(text)
+    rows = variant_rows_from_html(text)
+    axes = read_axes(
+        option_names_from_html(text),
+        [(v.variant_id, rows.get(v.variant_id, ("", ()))[1]) for v in variants],
+        statements, known_colors(),
+    )
+    variants = [
+        VariantInfo(v.variant_id, v.url, v.title, v.available, v.price,
+                    rows.get(v.variant_id, ("", ()))[1], axes.readings.get(v.variant_id))
+        for v in variants
+    ]
+    return ProductInspection(product_url, "MULTI_VARIANT", variants, axes=axes,
+                             statements=statements)
+
+
+@dataclass(frozen=True)
+class VariantEvaluation:
+    """One variant judged against one target, with a stable reason code (2026-10-22)."""
+
+    decision: str  # COLLECT, ALTERNATIVE, REVIEW
+    reason: str
+    code: str
+    ram: str  # AGREES / DIFFERS (...) / NOT_STATED, from option text or option axes
+    storage: str
+
+
+def _combine(field_name: str, title_state: str, reading_value: str, target: SearchTarget,
+             ) -> tuple[str, str]:
+    """``(state, source)`` of one field: the option title's own words, else the axis reading."""
+    if not reading_value:
+        return title_state, "option title"
+    wanted = target.core[field_name]
+    state = "AGREES" if _same(field_name, reading_value, wanted) else f"DIFFERS ({reading_value})"
+    if title_state == "NOT_STATED":
+        return state, "option axis"
+    if title_state.startswith("DIFFERS") == state.startswith("DIFFERS"):
+        return title_state, "option title and axis"
+    return "CONFLICT", "option title and axis"
+
+
+def variant_evaluation(variant: VariantInfo, target: SearchTarget) -> VariantEvaluation:
+    """Decide one variant. Its own option text, or the option axes the page's metadata
+    establishes (bare capacities under an option whose role the page states), name its RAM and
+    storage; a page-level memory statement may rule a configuration out, but never selects a
+    variant on its own."""
+    if not variant.title and not variant.options:
+        return VariantEvaluation("REVIEW", "Variant has no option title on the page.",
+                                 "REVIEW_NO_OPTION_TITLE", "NOT_STATED", "NOT_STATED")
+    clues = clue_comparison(title_clues(variant.title), target) if variant.title else {}
+    reading = variant.reading
+    ram, ram_source = _combine("ram_capacity_gb", clues.get("ram_capacity_gb", "NOT_STATED"),
+                               reading.ram if reading else "", target)
+    storage, storage_source = _combine(
+        "storage_capacity_gb", clues.get("storage_capacity_gb", "NOT_STATED"),
+        reading.storage if reading else "", target)
+    shared_ram = bool(reading and reading.ram_scope == "PRODUCT_LEVEL_UNIFORM"
+                      and ram_source == "option axis")
+    if "CONFLICT" in {ram, storage}:
+        return VariantEvaluation(
+            "REVIEW", "The option title and the option axes read a capacity differently "
+            f"(RAM {ram}, storage {storage}).", "REVIEW_AXIS_CONFLICT", ram, storage)
+    if ram.startswith("DIFFERS") or storage.startswith("DIFFERS"):
+        return VariantEvaluation("ALTERNATIVE", (
+            f"Different configuration: RAM {ram}, storage {storage} (target RAM "
+            f"{target.core['ram_capacity_gb']}, storage {target.core['storage_capacity_gb']}); "
+            "kept as a same-product alternative."), "ALTERNATIVE_DIFFERENT_CONFIGURATION",
+            ram, storage)
+    via = f" (read from {storage_source}: {reading.storage_basis})" if (
+        reading and reading.storage and storage_source == "option axis") else ""
+    if ram == "AGREES" and storage == "AGREES" and not shared_ram:
+        return VariantEvaluation("COLLECT", "Option title states the target RAM and storage."
+                                 + via, "COLLECT_RAM_AND_STORAGE", ram, storage)
+    if storage == "AGREES":
+        # RAM may also be a page-level statement that agrees: it never selects, it rules out.
+        note = (" RAM " + ("is stated for every variant by the page and agrees"
+                           if shared_ram and ram == "AGREES" else "is not an option"))
+        return VariantEvaluation("COLLECT", "Option "
+                                 + ("axis" if storage_source == "option axis" else "title")
+                                 + " states the target storage;" + note + "." + via,
+                                 "COLLECT_STORAGE_" + ("AXIS" if storage_source == "option axis"
+                                                       else "TITLE"), ram, storage)
+    if ram == "AGREES" and not shared_ram and storage == "NOT_STATED":
+        return VariantEvaluation("COLLECT", "Option title states the target RAM; storage is not "
+                                 "an option.", "COLLECT_RAM_TITLE", ram, storage)
+    unresolved = reading.codes if reading else ()
+    if any(code.startswith("CAPACITY_") for code in unresolved):
+        return VariantEvaluation(
+            "REVIEW", "The option's bare capacity has no established role: "
+            + ", ".join(c for c in unresolved if c.startswith("CAPACITY_"))
+            + " (the page's Storage statement must list it and no Memory statement may).",
+            "REVIEW_CAPACITY_ROLE_UNESTABLISHED", ram, storage)
+    return VariantEvaluation(
+        "REVIEW", f"Option title does not identify the configuration (RAM {ram}, storage "
+        f"{storage}).", "REVIEW_NOT_IDENTIFYING", ram, storage)
 
 
 def variant_decision(variant: VariantInfo, target: SearchTarget) -> tuple[str, str]:
-    """Collect only a variant whose own option title states the target RAM and storage."""
-    clues = clue_comparison(title_clues(variant.title), target) if variant.title else {}
-    ram = clues.get("ram_capacity_gb", "NOT_STATED")
-    storage = clues.get("storage_capacity_gb", "NOT_STATED")
-    if not variant.title:
-        return "REVIEW", "Variant has no option title on the page."
-    if ram.startswith("DIFFERS") or storage.startswith("DIFFERS"):
-        return "ALTERNATIVE", (
-            f"Different configuration: RAM {ram}, storage {storage} (target RAM "
-            f"{target.core['ram_capacity_gb']}, storage {target.core['storage_capacity_gb']}); "
-            "kept as a same-product alternative."
-        )
-    if ram == "AGREES" and storage == "AGREES":
-        return "COLLECT", "Option title states the target RAM and storage."
-    if ram == "AGREES" and storage == "NOT_STATED":
-        return "COLLECT", "Option title states the target RAM; storage is not an option."
-    if storage == "AGREES" and ram == "NOT_STATED":
-        return "COLLECT", "Option title states the target storage; RAM is not an option."
-    return "REVIEW", f"Option title does not identify the configuration (RAM {ram}, storage " \
-                     f"{storage})."
+    """``(decision, reason)`` of a variant: see ``variant_evaluation``."""
+    evaluation = variant_evaluation(variant, target)
+    return evaluation.decision, evaluation.reason
 
 
 # Manifest and coverage

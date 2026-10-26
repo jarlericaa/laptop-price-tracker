@@ -24,7 +24,10 @@ extracted evidence (never values supplied from the target that initiated a searc
   code on the page (a recorded code is an identity requirement and is never bypassed);
 - no material secondary specification the target records (GPU, panel, resolution, ...) is
   contradicted or made ambiguous by the page. A secondary field the target does not record stays
-  unknown and never blocks.
+  unknown and never blocks. The exact processor model is one of them (2026-10-22): when the
+  target records a full processor number (``Ryzen 7 170``) and the page, or the title when the
+  page rows state none, names a different one (``Ryzen 7 7735HS``), the offer is not compared.
+  A family-only value on either side is unknown.
 
 Several family targets can fit one offer. Ambiguity rule: targets with a verified secondary
 conflict are already excluded; among the rest, the most specific family name stated in the title
@@ -45,7 +48,7 @@ from dataclasses import dataclass, field
 
 import pandas as pd
 
-from .conventions import model_codes, product_name_tokens, title_identifiers
+from .conventions import model_codes, processor_models, product_name_tokens, title_identifiers
 from .normalization import CORE_MATCH_COLUMNS, core_value_key, is_blank, text_key
 from .product_names import FAMILY_NAME, ProductNameRegistry, default_registry
 from .target_master import CONFIGURATION, effective_tracking_mode
@@ -208,7 +211,7 @@ def check_target(
 ) -> ListedSpecCheck:
     """Whether ``attributes`` (the offer's EXTRACTED values) and ``title`` match the listed
     specifications of one target (see the module docstring)."""
-    from .matching import verified_secondary_difference
+    from .matching import states_exact_processor, verified_secondary_difference
 
     target_id = _text(target, "target_id")
     codes = set(reason_codes)
@@ -274,6 +277,11 @@ def check_target(
         return fail(LISTED_SPECS_DIFFER, "; ".join(
             f"{name}: offer {offer} vs target {wanted}" for name, offer, wanted in differences),
             differences=tuple(differences))
+    # The processor model the page rows state; when they state none, the one model the title
+    # names (a direct caller passes the title only). Several title models are not used.
+    stated = dict(attributes)
+    if not _text(stated, "cpu_model") and len(title_cpu := processor_models(title)) == 1:
+        stated["cpu_model"] = title_cpu[0].display
     secondary = []
     for name in material_secondary_fields():
         target_value = _text(target, name)
@@ -281,8 +289,10 @@ def check_target(
             continue  # unknown for the target: never a block
         unresolved = f"AMBIGUOUS_{name.upper()}" in codes or (
             f"TITLE_SPEC_CONFLICT_{name.upper()}" in codes)
-        if unresolved or verified_secondary_difference(name, attributes.get(name), target_value):
-            secondary.append(f"{name}: offer {_text(attributes, name) or 'unresolved'} vs "
+        if name == "cpu_model" and unresolved:
+            unresolved = states_exact_processor(target_value)  # else: unknown, not a conflict
+        if unresolved or verified_secondary_difference(name, stated.get(name), target_value):
+            secondary.append(f"{name}: offer {_text(stated, name) or 'unresolved'} vs "
                              f"target {target_value}")
     if secondary:
         return fail(SECONDARY_CONFLICT, "; ".join(secondary))

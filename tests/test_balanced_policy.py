@@ -414,14 +414,22 @@ def test_a_verified_material_hardware_conflict_blocks() -> None:
     assert "SECONDARY_CONFLICT_GPU_MODEL" in result.reason_codes
 
 
-def test_os_and_processor_number_differences_are_warnings() -> None:
+def test_os_difference_is_a_warning_and_a_processor_number_difference_blocks() -> None:
+    # 2026-10-22: a verified exact-processor disagreement is blocking (it was a warning; see
+    # tests/test_exact_cpu.py). The operating system stays a nonblocking warning.
     attributes = {k: v for k, v in VIVO.items() if k not in {"target_id", "status"}}
+    only_os = ExactMatcher([VIVO | {"os": "Windows 11 Home"}]).match(
+        pcx("x"), attributes | {"os": "Windows 11 Pro"}
+    )
+    assert only_os.status is MatchStatus.EXACT
+    assert set(only_os.warnings) == {"SECONDARY_WARNING_OS"}
     target = VIVO | {"os": "Windows 11 Home", "cpu_model": "Core 5 210H"}
     result = ExactMatcher([target]).match(
         pcx("x"), attributes | {"os": "Windows 11 Pro", "cpu_model": "Core 5 220H"}
     )
-    assert result.status is MatchStatus.EXACT
-    assert set(result.warnings) == {"SECONDARY_WARNING_OS", "SECONDARY_WARNING_CPU_MODEL"}
+    assert result.status is MatchStatus.REVIEW_REQUIRED
+    assert "SECONDARY_CONFLICT_CPU_MODEL" in result.reason_codes
+    assert set(result.warnings) == {"SECONDARY_WARNING_OS"}
     conflicts = {e.field for e in result.evidence if e.status is EvidenceStatus.CONFLICT}
     assert conflicts == {"os", "cpu_model"}
 

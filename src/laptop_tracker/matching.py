@@ -76,8 +76,10 @@ SECONDARY_SEVERITY: dict[str, str] = {
     "vram": BLOCKING,
     "manufacturer_model_code": BLOCKING,
     "manufacturer_part_number": BLOCKING,
-    # Same-family processor numbers are visible differences, never identical CPUs.
-    "cpu_model": WARNING,
+    # A verified exact-processor disagreement (both sides state a full processor number, the
+    # numbers differ) blocks automatic comparison even when the family agrees (2026-10-22;
+    # earlier a WARNING). A missing or family-only value on either side never conflicts.
+    "cpu_model": BLOCKING,
     "cpu_generation": WARNING,
     "cpu_cores": WARNING,
     "os": WARNING,
@@ -86,11 +88,12 @@ SECONDARY_SEVERITY: dict[str, str] = {
     "series": WARNING,
     "color": WARNING,
 }
-# PROPOSED, not approved (2026-10-22): an opt-in gate that sends an exact match whose verified
-# processor number differs from the target's (Core 5 220H vs 210H) to review instead of EXACT
-# with SECONDARY_WARNING_CPU_MODEL. Pass it as ``ExactMatcher(..., severity_overrides=...)`` for
-# an impact preview; the owner decides before it becomes policy.
+# Severity overrides for ``ExactMatcher(..., severity_overrides=...)`` (impact previews).
+# ``STRICT_CPU_MODEL`` is the default since 2026-10-22 (kept for callers that pass it);
+# ``LEGACY_CPU_MODEL_WARNING`` restores the earlier policy, in which a processor-number
+# contradiction (Core 5 220H vs 210H) was an EXACT match with SECONDARY_WARNING_CPU_MODEL.
 STRICT_CPU_MODEL: dict[str, str] = {"cpu_model": BLOCKING}
+LEGACY_CPU_MODEL_WARNING: dict[str, str] = {"cpu_model": WARNING}
 
 _RESOLUTION = re.compile(r"([0-9]+)\s*[x×]\s*([0-9]+)\Z", re.IGNORECASE)
 
@@ -166,7 +169,26 @@ def _secondary_key(field: str, value: object) -> str | tuple[int, int] | int | N
         forms = canonical_gpu_models(str(value))
         if len(forms) == 1:
             return forms.pop().casefold()
+    if field == "cpu_model":
+        # One exact processor model, whatever its presentation ("i5 12450H", "Intel(R) Core(TM)
+        # i5-12450H"); the number and suffix are never normalized away. A value that states no
+        # full processor number (a family, "Core 5", "Ryzen 7") is unknown here, never a
+        # difference; several models are an unresolved statement (2026-10-22).
+        from .conventions import processor_models
+
+        models = processor_models(str(value), bare_apple=True)
+        if len(models) > 1:
+            raise ValueError("several processor models")
+        return models[0].key if models else None
     return text_key(value)
+
+
+def states_exact_processor(value: object) -> bool:
+    """True when ``value`` names one full processor model (a family or blank does not)."""
+    try:
+        return _secondary_key("cpu_model", value) is not None
+    except ValueError:
+        return True  # several models: stated, and unresolved
 
 
 def verified_secondary_difference(field: str, left: object, right: object) -> bool:
@@ -283,6 +305,8 @@ class ExactMatcher:
             target_value = target.row.get(field)
             severity = self._severity.get(field, BLOCKING)
             if field in ambiguous_secondary:
+                if field == "cpu_model" and not states_exact_processor(target_value):
+                    continue  # nothing exact recorded for the target: unknown, not a conflict
                 # Several stated values cannot corroborate one target value.
                 status = EvidenceStatus.CONFLICT
             else:

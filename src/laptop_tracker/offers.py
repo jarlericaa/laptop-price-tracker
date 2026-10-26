@@ -72,8 +72,12 @@ ENUMERATED_VARIANT = "ENUMERATED_VARIANT"  # Another variant listed by the page;
 PRODUCT_DESCRIPTION = "PRODUCT_DESCRIPTION"  # Marketing/description prose (not a spec row).
 VARIANT_DEFINITIONS = "VARIANT_DEFINITIONS"  # Complete product-picker option matrix and locator.
 IDENTIFIER = "IDENTIFIER"  # A product, SKU, barcode, or part identifier and where it appeared.
+# A purchase-block statement the page makes (2026-10-22): "<KIND> (<PRICE|PAGE>)" and its wording,
+# for example cash-payment-only promo prices. Never a specification and never identity evidence.
+PURCHASE_TERMS = "PURCHASE_TERMS"
 EVIDENCE_SCOPES = frozenset({
-    SELECTED_VARIANT, ENUMERATED_VARIANT, PRODUCT_DESCRIPTION, IDENTIFIER, VARIANT_DEFINITIONS
+    SELECTED_VARIANT, ENUMERATED_VARIANT, PRODUCT_DESCRIPTION, IDENTIFIER, VARIANT_DEFINITIONS,
+    PURCHASE_TERMS,
 })
 
 
