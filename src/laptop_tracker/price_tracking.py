@@ -112,7 +112,7 @@ from .verified_top import CONTRIBUTING, money
 
 REPORTING_TIMEZONE = "Asia/Singapore"
 REPORTING_CURRENCY = "PHP"
-MATCHING_RULES_VERSION = "five-field-exact+listed-spec-fallback/2026-10-20"
+MATCHING_RULES_VERSION = "five-field-exact+listed-spec-fallback+bound-color-storage/2026-10-25"
 # Modules whose code defines matching outcomes; their bytes fingerprint the rule version.
 RULE_MODULES: tuple[ModuleType, ...] = (
     normalization, conventions, evidence_approvals, extraction, matching, product_names,

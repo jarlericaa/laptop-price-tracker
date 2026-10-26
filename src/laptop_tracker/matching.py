@@ -760,7 +760,7 @@ def match_basis_from_codes(reason_codes: Iterable[str]) -> str:
         tags.append("MODEL_NAME_PRESENTATION_NORMALIZED")
     if any(code.startswith("OWNER_APPROVED_") for code in codes):
         tags.append("OWNER_APPROVED_INTERPRETATION")
-    if "SHARED_CPU_DISPLAY_RAM_STORAGE_ONLY" in codes:
+    if codes & {"SHARED_CPU_DISPLAY_RAM_STORAGE_ONLY", "SHARED_FIXED_RAM_COLOR_STORAGE_ONLY"}:
         tags += ["SELECTED_VARIANT", "SHARED_PRODUCT"]
     return "+".join(tags) or "LABELED_SPECIFICATION"
 
@@ -769,6 +769,7 @@ def match_basis_from_codes(reason_codes: Iterable[str]) -> str:
 _BOOKKEEPING_CODES = frozenset({
     "MISSING_CORE_FIELDS", "INCOMPLETE_OR_INVALID_CORE_FIELDS",
     "MULTI_VARIANT_SHARED_DESCRIPTION", "SHARED_CPU_DISPLAY_RAM_STORAGE_ONLY",
+    "SHARED_FIXED_RAM_COLOR_STORAGE_ONLY",
     "EQUIVALENT_REPEATED_FACTS_DEDUPLICATED", "TITLE_MODEL_CORROBORATED",
     "TITLE_PRODUCT_NAME_CORROBORATED", "MODEL_NAME_PRESENTATION_NORMALIZED",
 })

@@ -17,6 +17,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent / "src"))
 
 from laptop_tracker import evidence_approvals
+from laptop_tracker.catalog_index import CatalogIndex, DiscoveryError, leads, queries
 from laptop_tracker.category_fallback import (
     FALLBACK_REQUEST_COLUMNS,
     FallbackCoordinator,
@@ -272,6 +273,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                              "(search_target_id) or whose model code its URL handle shows; when "
                              "native search misses it, it is checked directly (bounded fallback). "
                              "Never an approved match.")
+    parser.add_argument("--catalog-index-run", type=Path,
+                        help="Search a saved catalog locally and add bounded candidate leads.")
+    parser.add_argument("--catalog-feed-run", type=Path, action="append", default=[],
+                        help="Additional saved public feed (repeatable; no live feed calls). "
+                             "Requires --catalog-index-run.")
     parser.add_argument("--no-supplied-urls", action="store_true",
                         help="Do not read the default supplied-URL file.")
     parser.add_argument("--max-supplied-urls-per-target-retailer", type=positive, default=2)
@@ -297,6 +303,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                         help="Earlier manually supplied manifest, for a coverage comparison.")
     parser.add_argument("--output-dir", type=Path, required=True, help="New run folder.")
     args = parser.parse_args(argv)
+    if args.catalog_feed_run and not args.catalog_index_run:
+        parser.error("--catalog-feed-run requires --catalog-index-run.")
     if args.live and args.max_total_requests is None:
         parser.error("--live requires --max-total-requests.")
     if args.replay_only and args.collect and not args.replay_collection:
@@ -1140,6 +1148,48 @@ def check_seed_files(paths) -> None:
             )
 
 
+def indexed_candidate_rows(args, targets, retailers):
+    """``(rows, skipped)``: leads from the saved catalog, and the target/retailer pairs whose
+    queries could not be formed (named, never fatal to the other targets)."""
+    folder = getattr(args, "catalog_index_run", None)
+    if folder is None:
+        return [], []
+    source = CatalogIndex.from_run(folder, feed_runs=tuple(
+        getattr(args, "catalog_feed_run", [])))
+
+    def text(value) -> str:
+        value = " ".join(str(value or "").split())
+        return "" if value.casefold() in {"nan", "none"} else value
+
+    rows, skipped = [], []
+    for target in targets:
+        core = target.core
+        specs = " ".join(filter(None, [text(core.get("cpu_series", "")),
+                         f"{core['ram_capacity_gb']}GB" if text(core.get("ram_capacity_gb"))
+                         else "",
+                         f"{core['storage_capacity_gb']}GB"
+                         if text(core.get("storage_capacity_gb")) else ""]))
+        for retailer in retailers:
+            case = {"retailer_id": retailer, "brand": text(target.brand),
+                    "family": text(target.series),
+                    "model": text(target.recorded_code) or text(target.model), "specs": specs}
+            try:
+                planned = queries(case, 3)
+            except DiscoveryError as error:
+                skipped.append({"target_id": target.target_id, "retailer_id": retailer,
+                                "reason": str(error)})
+                continue
+            responses = [source.search(q, clues=specs) for q in planned]
+            for number, lead in enumerate(leads(responses, retailer), 1):
+                rows.append({"supplied_id": f"IDX-{target.target_id}-{retailer}-{number}",
+                             "retailer_id": retailer, "url": lead["url"],
+                             "search_target_id": target.target_id,
+                             "supplied_by": "catalog_index",
+                             "supplied_on": lead["search_retrieved_at"],
+                             "notes": "Unconfirmed local catalog candidate; " + lead["query"]})
+    return rows, skipped
+
+
 def load_supplied(args, targets, retailers):
     """Supplied known pages per (target, retailer), plus one report row per supplied URL.
 
@@ -1155,8 +1205,22 @@ def load_supplied(args, targets, retailers):
     by_id = {t.target_id: t for t in targets}
     found: dict[tuple[str, str], list[tuple[str, str, str]]] = {}
     report: list[dict[str, str]] = []
-    for path in paths:
-        for row in read_rows(path):
+    sources = [(path, read_rows(path)) for path in paths]
+    indexed, skipped = indexed_candidate_rows(args, targets, retailers)
+    if indexed:
+        sources.append((args.catalog_index_run, indexed))
+    for item in skipped:
+        report.append({
+            "supplied_id": f"IDX-{item['target_id']}-{item['retailer_id']}-skipped",
+            "retailer_id": item["retailer_id"], "supplied_url": "", "normalized_url": "",
+            "removed_parameters": "", "search_target_hint": item["target_id"],
+            "source_file": str(args.catalog_index_run), "assigned_target_ids": "",
+            "assignment_basis": "CATALOG_QUERY_NOT_FORMED: " + item["reason"],
+            "found_by_native_search": "", "candidate_decision": "",
+            "collection_request_id": "",
+        })
+    for path, rows in sources:
+        for row in rows:
             missing = [c for c in ("supplied_id", "retailer_id", "url") if c not in row]
             if missing:
                 raise ValueError(f"{path} lacks column(s) {', '.join(missing)}.")
@@ -1409,6 +1473,8 @@ def main(argv: list[str] | None = None, *, transport: Transport | None = None,
         "cache_max_age_hours": args.cache_max_age_hours,
         "replay_only": args.replay_only,
         "collect_title_differences": not args.no_collect_title_differences,
+        "catalog_index_run": str(args.catalog_index_run) if args.catalog_index_run else "",
+        "catalog_feed_runs": [str(path) for path in args.catalog_feed_run],
     }
     summary: dict = {
         "description": "Automatic product discovery (bounded search, ranking, collection).",

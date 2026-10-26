@@ -2,6 +2,10 @@
 
 **Start here:** [Weekly workflow, dataflow and commands](docs/WEEKLY_WORKFLOW.md) explains the Sheet tabs, CSVs, weekly refresh, automatic search and publishing step by step.
 
+[Cached catalog search](docs/CATALOG_INDEX.md) finds candidate links locally from
+retailer sitemaps, with page evidence and a measured discovery benchmark. It requires
+no LLM or search API and supplies leads to the existing workflow.
+
 This project processes Shopee Electronics data from Google Sheets and produces a ranked list
 of laptop models for future retailer price tracking. The current Python pipeline reads the
 `raw` worksheet, validates and classifies data, detects M-1 and MTD, and generates local ranking
@@ -234,6 +238,12 @@ and [docs/PHASE_10_PILOT.md](docs/PHASE_10_PILOT.md).
 `discover_products.py` searches the five retailers for verified configurations within explicit request limits (`--preview` sends nothing), ranks the results with reasons, lists variants only from each page's own structured data, writes a `collect_and_match.py` manifest, and with `--collect` collects and matches those pages. Ranking never assigns a target. When a complete model code returns no result, it also tries the code's spellings (2026-10-22); `--max-second-pass-candidates-per-target-retailer` (opt-in) collects relevant candidates a per-round limit skipped. See [docs/SETUP_AND_OPERATIONS.md](docs/SETUP_AND_OPERATIONS.md#automatic-product-discovery-phase-10-manual-runs).
 
 `discover_catalog_leads.py` (opt-in, 2026-10-22) reads the sitemaps the retailers advertise in robots.txt, within a hard request ceiling, and writes supplied-URL leads for pages whose URL shows a scoped target's complete model code; discovery re-fetches and re-matches them. `diagnose_blank_cells.py` explains every configuration x retailer cell (furthest stage reached, queries, limits, observed versus comparable price), and `measure_discovery.py` scores a run against the labelled benchmark in `tests/scraping_fixtures/discovery_benchmark/`. All three are offline except `discover_catalog_leads.py --live`. See [docs/DISCOVERY_IMPROVEMENTS_2026-10-22.md](docs/DISCOVERY_IMPROVEMENTS_2026-10-22.md).
+
+`search_catalog_index.py` reuses the collector's saved sitemap responses to search product names,
+model codes and punctuation variations locally. One catalog refresh serves many searches, with
+no LLM or search API. Add `--live` only to fetch candidate product pages. Exported supplied-URL
+leads still pass the existing downstream checks. See [cached catalog search](docs/CATALOG_INDEX.md)
+and the [measured benchmark](docs/benchmarks/catalog-index-2026-10-25.md).
 
 `replay_extraction.py` replays a saved collection offline through the current extractor (from the
 observation CSV) and the current adapters (from saved HTML), and writes a before/after comparison;
