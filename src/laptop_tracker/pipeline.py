@@ -15,6 +15,7 @@ from .data_quality import (
     CONFLICT_COLUMNS,
     DUPLICATE_DECISION_COLUMNS,
     DUPLICATE_KEY_COLUMNS,
+    DUPLICATE_RESOLUTION_LOG_COLUMNS,
     UNRESOLVED_CONFLICT_STATUSES,
     VALIDATION_ERROR_COLUMNS,
     apply_duplicate_decisions,
@@ -87,6 +88,26 @@ def _save_local_outputs(
     )
 
 
+def source_shop_names(frame: pd.DataFrame, mtd_month: str) -> pd.DataFrame:
+    """``source_key, shop_id, shop_name``: the seller name of each variation's raw rows.
+
+    The MTD row's name is preferred (earliest source row within it); a variation without MTD rows
+    falls back to its earliest named row. Blank names are never used.
+    """
+    columns = ["source_key", "shop_id", "shop_name"]
+    if frame.empty or "shop_name" not in frame.columns:
+        return pd.DataFrame(columns=columns)
+    keep = ["source_key", "shop_id", "shop_name", "period_month", "source_row_number"]
+    named = frame[keep].copy()
+    named["shop_name"] = named["shop_name"].astype("string").fillna("").str.strip()
+    named = named.loc[named["shop_name"].ne("")]
+    named["_in_mtd"] = named["period_month"].astype("string").eq(mtd_month)
+    named = named.sort_values(
+        ["source_key", "_in_mtd", "source_row_number"], ascending=[True, False, True], kind="stable"
+    )
+    return named.drop_duplicates("source_key", keep="first")[columns].reset_index(drop=True)
+
+
 def process_raw_values(
     values: list[list[object]],
     settings: Settings,
@@ -118,7 +139,7 @@ def process_raw_values(
     duplicate_decisions = load_duplicate_decisions(
         duplicate_decisions_path or root / "config" / "duplicate_decisions.csv"
     )
-    decided_rows, duplicate_conflicts, duplicate_review = apply_duplicate_decisions(
+    decided_rows, duplicate_conflicts, duplicate_review, duplicate_log = apply_duplicate_decisions(
         validation.valid_rows, duplicate_conflicts, duplicate_decisions
     )
     if not decided_rows.empty:
@@ -133,6 +154,11 @@ def process_raw_values(
     # Local-only, redacted decision template; it is never published to Sheets.
     duplicate_review.reindex(columns=DUPLICATE_DECISION_COLUMNS).to_csv(
         destination / "duplicate_review.csv", index=False
+    )
+    # Local-only: the sheet row each reviewed record occupies in this run (decisions are matched
+    # by content, so row positions are logged here and never stored in a decision).
+    duplicate_log.reindex(columns=DUPLICATE_RESOLUTION_LOG_COLUMNS).to_csv(
+        destination / "duplicate_resolution_log.csv", index=False
     )
     selection = detect_periods(clean)
     freshness_enabled = (
@@ -176,13 +202,19 @@ def process_raw_values(
         "P1_PERIOD_SUMMARY": period_summary(clean, selection, run_id),
     }
     _save_local_outputs(destination, outputs, summary)
+    # Local-only sidecar (never published): the seller name of each source variation, which the
+    # Shopee-variation ranking shows beside its IDs (2026-10-27).
+    source_shop_names(publication_rows, selection.mtd_month).to_csv(
+        destination / "source_shop_names.csv", index=False
+    )
     result = Phase1Result(summary=summary, outputs=outputs, local_output_dir=destination)
     unresolved = int(all_conflicts["resolution_status"].isin(UNRESOLVED_CONFLICT_STATUSES).sum())
     if fail_on_conflicts and unresolved:
         raise PipelineSafetyError(
             f"{unresolved} conflicting duplicate or model identity records were quarantined "
             "without a recorded decision; publication is blocked. Review duplicate_review.csv "
-            "and record decisions in config/duplicate_decisions.csv."
+            "(duplicate_resolution_log.csv shows where each record sits in the sheet) and record "
+            "decisions in config/duplicate_decisions.csv."
         )
     return result
 

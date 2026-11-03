@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import itertools
 import json
 import math
 from dataclasses import dataclass
@@ -34,9 +35,35 @@ CONFLICT_COLUMNS = [
     "notes",
 ]
 DUPLICATE_KEY_COLUMNS = ["period_month", "shop_id", "item_id", "model_id"]
-# The review template and config/duplicate_decisions.csv share one redacted layout: keys,
-# row numbers, field names, and a content fingerprint only; never GMV, prices, or names.
+# The review template and config/duplicate_decisions.csv share one redacted, content-based layout:
+# source identifiers, the conflicting date(s), field names, and one content fingerprint per
+# reviewed record; never GMV, prices, names, or sheet row numbers. A decision is identified by
+# what the conflicting records say, so re-sorting the raw sheet cannot invalidate it. Current
+# row positions are resolved at run time and written to duplicate_resolution_log.csv.
+FINGERPRINT_VERSION = "content-v1"
 DUPLICATE_DECISION_COLUMNS = [
+    *DUPLICATE_KEY_COLUMNS,
+    "conflict_dates",
+    "differing_fields",
+    "record_fingerprints",
+    "fingerprint_version",
+    "decision",
+    "selected_record_fingerprint",
+    "reviewer",
+    "reviewed_at",
+    "reason",
+]
+DUPLICATE_RESOLUTION_LOG_COLUMNS = [
+    *DUPLICATE_KEY_COLUMNS,
+    "record_fingerprint",
+    "current_source_row_number",
+    "record_role",
+    "outcome",
+    "detail",
+]
+# The pre-2026-10-27 layout identified a decision by sheet row numbers; it is only read by the
+# migration (`migrate_legacy_decisions`).
+LEGACY_DECISION_COLUMNS = [
     *DUPLICATE_KEY_COLUMNS,
     "duplicate_count",
     "differing_fields",
@@ -48,7 +75,7 @@ DUPLICATE_DECISION_COLUMNS = [
     "reviewed_at",
     "reason",
 ]
-VALID_DUPLICATE_DECISIONS = {"EXCLUDE_KEY", "KEEP_SOURCE_ROW"}
+VALID_DUPLICATE_DECISIONS = {"EXCLUDE_KEY", "KEEP_RECORD"}
 # Conflicts in these statuses have no applicable human decision and block publication.
 UNRESOLVED_CONFLICT_STATUSES = {"EXCLUDED", "MODEL_IDENTITY_CONFLICT"}
 COMPARE_COLUMNS = [INTERNAL_COLUMN_MAP.get(column, column) for column in REQUIRED_RAW_COLUMNS]
@@ -205,8 +232,32 @@ def collapse_duplicates(frame: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame
     return clean, pd.DataFrame(conflicts, columns=CONFLICT_COLUMNS)
 
 
-def _conflict_fingerprint(group: pd.DataFrame) -> str:
-    """Hash the conflicting rows so a decision applies only to the exact rows reviewed."""
+def record_fingerprint(row: pd.Series) -> str:
+    """Content fingerprint (``FINGERPRINT_VERSION``) of one source record.
+
+    Hashes the exact text of every compared raw column (identifiers, date, names, price, orders,
+    GMV, amount) as read from the sheet, so numeric precision, leading zeros and long
+    identifiers are preserved and the sheet row number plays no part.
+    """
+    payload = [FINGERPRINT_VERSION, [[column, _text(row[column])] for column in COMPARE_COLUMNS]]
+    return hashlib.sha256(json.dumps(payload).encode("utf-8")).hexdigest()[:24]
+
+
+def _record_table(group: pd.DataFrame) -> list[tuple[str, int]]:
+    """(fingerprint, current sheet row) of each record, in current row order."""
+    ordered = group.sort_values("source_row_number", kind="stable")
+    return [
+        (record_fingerprint(row), int(row["source_row_number"]))
+        for _, row in ordered.iterrows()
+    ]
+
+
+def _conflict_dates(group: pd.DataFrame) -> str:
+    return ";".join(sorted({_text(value) for value in group["period_date"]}))
+
+
+def legacy_conflict_fingerprint(group: pd.DataFrame) -> str:
+    """The pre-2026-10-27 row-number fingerprint; used only to verify a migration."""
     ordered = group.sort_values("source_row_number", kind="stable")
     payload = [
         [_text(value) for value in row]
@@ -221,6 +272,15 @@ def load_duplicate_decisions(path: str | Path) -> pd.DataFrame:
     if not file_path.exists():
         return pd.DataFrame(columns=DUPLICATE_DECISION_COLUMNS)
     decisions = pd.read_csv(file_path, dtype="string", keep_default_na=False)
+    if {"source_row_numbers", "keep_source_row_number"} & set(decisions.columns):
+        recorded_legacy = decisions.get("decision", pd.Series(dtype="string"))
+        if recorded_legacy.astype("string").fillna("").str.strip().ne("").any():
+            raise ValueError(
+                "config/duplicate_decisions.csv uses the retired row-number layout. Convert it "
+                "with migrate_duplicate_decisions.py (content-based decisions are not tied to "
+                "sheet rows)."
+            )
+        return pd.DataFrame(columns=DUPLICATE_DECISION_COLUMNS)
     missing = [column for column in DUPLICATE_DECISION_COLUMNS if column not in decisions.columns]
     if missing:
         raise ValueError(f"Duplicate decisions are missing columns: {', '.join(missing)}")
@@ -232,15 +292,28 @@ def load_duplicate_decisions(path: str | Path) -> pd.DataFrame:
     invalid = set(recorded["decision"]) - VALID_DUPLICATE_DECISIONS
     if invalid:
         raise ValueError(f"Unsupported duplicate decisions: {', '.join(sorted(invalid))}")
-    required = [*DUPLICATE_KEY_COLUMNS, "conflict_fingerprint", "reviewer", "reviewed_at", "reason"]
+    required = [
+        *DUPLICATE_KEY_COLUMNS,
+        "conflict_dates",
+        "record_fingerprints",
+        "fingerprint_version",
+        "reviewer",
+        "reviewed_at",
+        "reason",
+    ]
     if recorded[required].eq("").to_numpy().any():
         raise ValueError("Recorded duplicate decisions require: " + ", ".join(required) + ".")
-    keep = recorded["decision"].eq("KEEP_SOURCE_ROW")
-    has_row = recorded["keep_source_row_number"].ne("")
-    if (keep & ~has_row).any() or (~keep & has_row).any():
+    keep = recorded["decision"].eq("KEEP_RECORD")
+    has_selected = recorded["selected_record_fingerprint"].ne("")
+    if (keep & ~has_selected).any() or (~keep & has_selected).any():
         raise ValueError(
-            "keep_source_row_number is required for KEEP_SOURCE_ROW and must be blank otherwise."
+            "selected_record_fingerprint is required for KEEP_RECORD and must be blank otherwise."
         )
+    for _, record in recorded.loc[keep].iterrows():
+        if record["selected_record_fingerprint"] not in record["record_fingerprints"].split(";"):
+            raise ValueError(
+                "selected_record_fingerprint must be one of the reviewed record_fingerprints."
+            )
     # Never pick one of several decisions for the same key; that choice belongs to a human.
     if recorded.duplicated(DUPLICATE_KEY_COLUMNS).any():
         raise ValueError("Each duplicate key may have only one recorded decision.")
@@ -249,15 +322,24 @@ def load_duplicate_decisions(path: str | Path) -> pd.DataFrame:
 
 def apply_duplicate_decisions(
     frame: pd.DataFrame, conflicts: pd.DataFrame, decisions: pd.DataFrame
-) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
-    """Apply recorded decisions whose fingerprint matches; every other key stays quarantined.
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    """Apply recorded decisions whose reviewed content still matches; the rest stay quarantined.
 
-    Returns the rows retained by KEEP_SOURCE_ROW decisions, the conflict report with updated
-    resolution statuses, and a redacted review template covering every conflicting key.
+    A decision applies only when the key's current records are exactly the records that were
+    reviewed (same fingerprints, same dates), however the sheet rows have moved. If a reviewed
+    record changed, or a record was added or removed, the decision is invalidated even when the
+    selected record still exists. Returns the rows retained by KEEP_RECORD decisions, the
+    conflict report with updated resolution statuses, a redacted review template covering every
+    conflicting key, and a log of the sheet row each record occupies in this run.
     """
     conflicts = conflicts.copy()
     if conflicts.empty:
-        return frame.iloc[0:0].copy(), conflicts, pd.DataFrame(columns=DUPLICATE_DECISION_COLUMNS)
+        return (
+            frame.iloc[0:0].copy(),
+            conflicts,
+            pd.DataFrame(columns=DUPLICATE_DECISION_COLUMNS),
+            pd.DataFrame(columns=DUPLICATE_RESOLUTION_LOG_COLUMNS),
+        )
 
     conflict_keys = pd.MultiIndex.from_frame(conflicts[DUPLICATE_KEY_COLUMNS].astype(str))
     in_conflict = pd.MultiIndex.from_frame(frame[DUPLICATE_KEY_COLUMNS].astype(str)).isin(
@@ -273,57 +355,224 @@ def apply_duplicate_decisions(
     }
     retained: list[pd.DataFrame] = []
     review: list[dict[str, object]] = []
+    log: list[dict[str, object]] = []
 
     for index, conflict in conflicts.iterrows():
         key = tuple(str(conflict[column]) for column in DUPLICATE_KEY_COLUMNS)
         group = groups[key]
+        table = _record_table(group)
+        current = sorted(fingerprint for fingerprint, _ in table)
+        dates = _conflict_dates(group)
         record: dict[str, object] = {
             column: conflict[column] for column in DUPLICATE_KEY_COLUMNS
         } | {
-            "duplicate_count": conflict["duplicate_count"],
+            "conflict_dates": dates,
             "differing_fields": conflict["differing_fields"],
-            "source_row_numbers": conflict["source_row_numbers"],
-            "conflict_fingerprint": _conflict_fingerprint(group),
+            "record_fingerprints": ";".join(current),
+            "fingerprint_version": FINGERPRINT_VERSION,
         }
         decision = decision_map.get(key)
-        if decision is not None and decision["conflict_fingerprint"] != record[
-            "conflict_fingerprint"
-        ]:
+        outcome = "UNRESOLVED"
+        detail = "No recorded decision."
+        if decision is not None:
+            problem = ""
+            if decision["fingerprint_version"] != FINGERPRINT_VERSION:
+                problem = (
+                    f"Recorded decision uses fingerprint format {decision['fingerprint_version']}, "
+                    f"not {FINGERPRINT_VERSION}; re-review required."
+                )
+            elif sorted(decision["record_fingerprints"].split(";")) != current:
+                problem = (
+                    "The reviewed conflicting records changed (a record was edited, added or "
+                    "removed); re-review required."
+                )
+            elif decision["conflict_dates"] != dates:
+                problem = "The reviewed conflict date changed; re-review required."
+            if problem:
+                conflicts.at[index, "notes"] = problem
+                outcome, detail, decision = "DECISION_INVALIDATED", problem, None
+
+        selected_row: int | None = None
+        if decision is not None and decision["decision"] == "KEEP_RECORD":
+            selected = decision["selected_record_fingerprint"]
+            holders = [row for fingerprint, row in table if fingerprint == selected]
+            selected_row = holders[0]  # identical copies are interchangeable; keep the first
+            kept = group.loc[group["source_row_number"].astype(int).eq(selected_row)].copy()
+            kept["duplicate_status"] = "RESOLVED_BY_DECISION"
+            kept["duplicate_count"] = len(group)
+            retained.append(kept)
+            conflicts.at[index, "resolution_status"] = "RESOLVED_BY_DECISION"
             conflicts.at[index, "notes"] = (
-                "Recorded decision does not match the current source rows; re-review required."
+                f"Record {selected} (source row {selected_row} in this run) retained by recorded "
+                "human decision."
             )
-            decision = None
-        if decision is not None and decision["decision"] == "KEEP_SOURCE_ROW":
-            kept = group.loc[
-                group["source_row_number"].astype(str).eq(decision["keep_source_row_number"])
-            ]
-            if len(kept) != 1:
-                conflicts.at[index, "notes"] = (
-                    "Recorded keep_source_row_number is not one of the conflicting rows; "
-                    "re-review required."
-                )
-                decision = None
-            else:
-                kept = kept.copy()
-                kept["duplicate_status"] = "RESOLVED_BY_DECISION"
-                kept["duplicate_count"] = len(group)
-                retained.append(kept)
-                conflicts.at[index, "resolution_status"] = "RESOLVED_BY_DECISION"
-                conflicts.at[index, "notes"] = (
-                    f"Source row {decision['keep_source_row_number']} retained by recorded "
-                    "human decision."
-                )
+            outcome, detail = "RESOLVED_BY_DECISION", "Reviewed records unchanged."
         elif decision is not None:
             conflicts.at[index, "resolution_status"] = "EXCLUDED_BY_DECISION"
             conflicts.at[index, "notes"] = (
                 "Conflicting duplicate key excluded by recorded human decision."
             )
-        for column in ("decision", "keep_source_row_number", "reviewer", "reviewed_at", "reason"):
+            outcome, detail = "EXCLUDED_BY_DECISION", "Reviewed records unchanged."
+
+        for column in (
+            "decision",
+            "selected_record_fingerprint",
+            "reviewer",
+            "reviewed_at",
+            "reason",
+        ):
             record[column] = decision[column] if decision is not None else ""
         review.append(record)
+        for fingerprint, row in table:
+            if outcome == "RESOLVED_BY_DECISION":
+                role = "SELECTED" if row == selected_row else "NOT_SELECTED"
+            elif outcome == "EXCLUDED_BY_DECISION":
+                role = "EXCLUDED"
+            else:
+                role = "UNDECIDED"
+            log.append(
+                {column: conflict[column] for column in DUPLICATE_KEY_COLUMNS}
+                | {
+                    "record_fingerprint": fingerprint,
+                    "current_source_row_number": row,
+                    "record_role": role,
+                    "outcome": outcome,
+                    "detail": detail,
+                }
+            )
 
     resolved = pd.concat(retained, ignore_index=True) if retained else frame.iloc[0:0].copy()
-    return resolved, conflicts, pd.DataFrame(review, columns=DUPLICATE_DECISION_COLUMNS)
+    return (
+        resolved,
+        conflicts,
+        pd.DataFrame(review, columns=DUPLICATE_DECISION_COLUMNS),
+        pd.DataFrame(log, columns=DUPLICATE_RESOLUTION_LOG_COLUMNS),
+    )
+
+
+def load_legacy_decisions(path: str | Path) -> pd.DataFrame:
+    """Read a retired row-number decision file for migration (recorded decisions only)."""
+    decisions = pd.read_csv(path, dtype="string", keep_default_na=False)
+    missing = [column for column in LEGACY_DECISION_COLUMNS if column not in decisions.columns]
+    if missing:
+        raise ValueError(f"Legacy duplicate decisions are missing columns: {', '.join(missing)}")
+    decisions = decisions[LEGACY_DECISION_COLUMNS].copy()
+    for column in LEGACY_DECISION_COLUMNS:
+        decisions[column] = decisions[column].astype("string").fillna("").str.strip()
+    return decisions.loc[decisions["decision"].ne("")].reset_index(drop=True)
+
+
+MIGRATION_REPORT_COLUMNS = [
+    *DUPLICATE_KEY_COLUMNS,
+    "legacy_decision",
+    "outcome",
+    "detail",
+    "selected_record_fingerprint",
+]
+MAX_MIGRATION_GROUP = 6
+
+
+def migrate_legacy_decisions(
+    legacy: pd.DataFrame, valid_rows: pd.DataFrame, *, note: str = ""
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Convert recorded row-number decisions to content-based ones where that is established.
+
+    A decision is migrated only when the previously reviewed records are proven to be the
+    current records: placing the key's current records on the old row numbers (in some order)
+    must reproduce the stored legacy fingerprint, and every such order must give the same
+    selected record content. The reviewer, review date and reason are kept; ``note`` is appended
+    to the reason. Anything not established is reported and left for review, never guessed.
+    """
+    _, conflicts = collapse_duplicates(valid_rows)
+    groups: dict[tuple[str, ...], pd.DataFrame] = {}
+    for _, conflict in conflicts.iterrows():
+        mask = pd.Series(True, index=valid_rows.index)
+        for column in DUPLICATE_KEY_COLUMNS:
+            mask &= valid_rows[column].astype(str).eq(str(conflict[column]))
+        groups[tuple(str(conflict[column]) for column in DUPLICATE_KEY_COLUMNS)] = valid_rows.loc[
+            mask
+        ]
+    migrated: list[dict[str, object]] = []
+    report: list[dict[str, object]] = []
+
+    def outcome(row: pd.Series, result: str, detail: str, selected: str = "") -> None:
+        report.append(
+            {column: row[column] for column in DUPLICATE_KEY_COLUMNS}
+            | {
+                "legacy_decision": row["decision"],
+                "outcome": result,
+                "detail": detail,
+                "selected_record_fingerprint": selected,
+            }
+        )
+
+    for _, row in legacy.iterrows():
+        key = tuple(str(row[column]) for column in DUPLICATE_KEY_COLUMNS)
+        group = groups.get(key)
+        if group is None:
+            outcome(row, "NOT_MIGRATED", "The key is not a current conflict.")
+            continue
+        group = group.sort_values("source_row_number", kind="stable")
+        old_numbers = [int(part) for part in row["source_row_numbers"].split(";") if part.strip()]
+        if len(group) != len(old_numbers) or not 2 <= len(group) <= MAX_MIGRATION_GROUP:
+            outcome(
+                row,
+                "NOT_MIGRATED",
+                f"{len(group)} current records versus {len(old_numbers)} reviewed rows.",
+            )
+            continue
+        slots = sorted(old_numbers)
+        keep_row = (
+            int(row["keep_source_row_number"]) if row["decision"] == "KEEP_SOURCE_ROW" else None
+        )
+        if keep_row is not None and keep_row not in slots:
+            outcome(row, "NOT_MIGRATED", "The selected row is not one of the reviewed rows.")
+            continue
+        prints = [record_fingerprint(record) for _, record in group.iterrows()]
+        winners: set[str] = set()
+        reproduced = 0
+        for order in itertools.permutations(range(len(group))):
+            trial = group.copy()
+            trial["source_row_number"] = [slots[position] for position in order]
+            if legacy_conflict_fingerprint(trial) != row["conflict_fingerprint"]:
+                continue
+            reproduced += 1
+            if keep_row is not None:
+                winners.add(prints[order[slots.index(keep_row)]])
+        if not reproduced:
+            outcome(
+                row,
+                "NOT_MIGRATED",
+                "The reviewed records cannot be established: the stored fingerprint is not "
+                "reproduced by the current records (values changed since the review).",
+            )
+            continue
+        if keep_row is not None and len(winners) != 1:
+            outcome(row, "NOT_MIGRATED", "The previously selected record is ambiguous.")
+            continue
+        selected = next(iter(winners)) if keep_row is not None else ""
+        reason = (row["reason"] + (" " + note if note else "")).strip()
+        migrated.append(
+            {column: row[column] for column in DUPLICATE_KEY_COLUMNS}
+            | {
+                "conflict_dates": _conflict_dates(group),
+                "differing_fields": ";".join(
+                    column for column in COMPARE_COLUMNS if group[column].nunique(dropna=False) > 1
+                ),
+                "record_fingerprints": ";".join(sorted(prints)),
+                "fingerprint_version": FINGERPRINT_VERSION,
+                "decision": "KEEP_RECORD" if keep_row is not None else "EXCLUDE_KEY",
+                "selected_record_fingerprint": selected,
+                "reviewer": row["reviewer"],
+                "reviewed_at": row["reviewed_at"],
+                "reason": reason,
+            }
+        )
+        outcome(row, "MIGRATED", "Reviewed records and selected winner established.", selected)
+    return (
+        pd.DataFrame(migrated, columns=DUPLICATE_DECISION_COLUMNS),
+        pd.DataFrame(report, columns=MIGRATION_REPORT_COLUMNS),
+    )
 
 
 def find_model_identity_conflicts(frame: pd.DataFrame) -> tuple[set[str], pd.DataFrame]:

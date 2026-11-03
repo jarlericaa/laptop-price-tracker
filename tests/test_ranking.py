@@ -206,9 +206,12 @@ def test_required_local_output_files_are_created(tmp_path: Path) -> None:
         "eligibility_review.csv",
         "conflicting_duplicates.csv",
         "duplicate_review.csv",
+        "duplicate_resolution_log.csv",
         "validation_errors.csv",
         "period_summary.csv",
         "phase1_run_summary.json",
+        # Local-only sidecar for the Shopee-variation ranking (seller name per source_key).
+        "source_shop_names.csv",
     }
     assert expected == {path.name for path in tmp_path.iterdir()}
 
@@ -225,3 +228,22 @@ def test_all_models_quarantined_produces_safe_empty_outputs(tmp_path: Path) -> N
     assert result.outputs["P1_TOP_100_TARGETS"].empty
     conflicts = result.outputs["P1_CONFLICTING_DUPLICATES"]
     assert conflicts["resolution_status"].tolist() == ["MODEL_IDENTITY_CONFLICT"]
+
+
+def test_the_seller_name_sidecar_prefers_the_mtd_name_and_never_uses_a_blank(
+    tmp_path: Path,
+) -> None:
+    rows = [
+        raw_row(grass_date="2026-08-01", shopid="1", itemid="1", modelid="1", shop_name="Old Name"),
+        raw_row(grass_date="2026-09-01", shopid="1", itemid="1", modelid="1", shop_name="New Name"),
+        raw_row(grass_date="2026-08-01", shopid="2", itemid="2", modelid="2", shop_name="Only M-1"),
+        raw_row(grass_date="2026-09-01", shopid="3", itemid="3", modelid="3", shop_name="  "),
+    ]
+    run(rows, tmp_path)
+
+    names = pd.read_csv(tmp_path / "source_shop_names.csv", dtype=str, keep_default_na=False)
+    assert names.columns.tolist() == ["source_key", "shop_id", "shop_name"]
+    lookup = dict(zip(names["source_key"], names["shop_name"], strict=True))
+    assert lookup["1|1|1"] == "New Name"  # the MTD row wins over M-1
+    assert lookup["2|2|2"] == "Only M-1"  # a source without MTD rows falls back to its M-1 name
+    assert "3|3|3" not in lookup  # a blank name is never used or invented
