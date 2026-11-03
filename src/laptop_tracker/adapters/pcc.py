@@ -125,7 +125,10 @@ class PCCAdapter:
     # pcc-4 (2026-10-15): a description paragraph laid out as <span>Label </span><span>value
     # </span> keeps its label/value boundary (reviewed 2026-10-15 Nitro page). Other text is
     # byte-for-byte as before.
-    adapter_version = "pcc-6"
+    # pcc-7 (2026-11-03): the variant-definition matrix of a product whose complete picker lists
+    # exactly one variant carries ``complete_sole_variant`` (saved X1504VA and AG14-71M pages).
+    # Other output is unchanged.
+    adapter_version = "pcc-7"
     allowed_hosts = frozenset({HOST})
     # Project-owner authorization under the project-wide decision; not retailer consent.
     live_use_approved = True
@@ -486,6 +489,10 @@ def _variant_evidence(
                         for v in variants
                     ],
                 }
+                if len(variants) == 1:
+                    # The checks above (picker array, option values and JSON-LD offers all name
+                    # this one variant) prove no other variant exists.
+                    matrix["complete_sole_variant"] = True
                 items.append((
                     VARIANT_DEFINITIONS,
                     "main product variant picker script[type=application/json]; select[name=id]",

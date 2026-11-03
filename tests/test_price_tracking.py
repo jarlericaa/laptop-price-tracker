@@ -915,3 +915,19 @@ def test_offer_terms_effect_is_reported_separately_from_matching(tmp_path) -> No
         DEFAULT_OFFER_TERMS_POLICY: 1, BUNDLE_FLAG_POLICY: 1,
     }
     assert effect["observations_whose_eligibility_depends_on_the_policy"] == []
+
+
+def test_a_price_from_the_m_minus_1_record_is_not_dated_by_the_sales_extract() -> None:
+    from laptop_tracker.price_tracking import _snapshot_price_status
+
+    assert _snapshot_price_status(None) == "SALES_RANKING_NOT_SUPPLIED"
+    assert _snapshot_price_status({"price_status": "PRICE_OK", "price_basis": "MTD_PRICE"}) == (
+        "PRICE_OK"
+    )
+    # An earlier ranking file has no price_basis column: unchanged behaviour.
+    assert _snapshot_price_status({"price_status": "PRICE_OK"}) == "PRICE_OK"
+    # The configuration layer dates every price by the extract, so an M-1 record's price (a
+    # variation without an MTD price, 2026-11-03) is excluded and labelled, never relabelled.
+    assert _snapshot_price_status(
+        {"price_status": "PRICE_OK", "price_basis": "M_MINUS_1_PRICE"}
+    ) == "PRICE_FROM_M_MINUS_1_RECORD"

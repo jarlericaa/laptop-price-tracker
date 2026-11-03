@@ -18,6 +18,7 @@ from laptop_tracker.retailer_search import (
     TIER_CODE_SEGMENT,
     TIER_FAMILY,
     TIER_MODEL_CODE,
+    TIER_MODEL_CODE_COMPACT,
     TIER_MODEL_CODE_SPACED,
     TIER_MODEL_SPECS,
     TIER_PART_NUMBER,
@@ -54,19 +55,21 @@ def test_variant_queries_follow_the_code_and_are_marked() -> None:
     assert [(q.tier, q.text, q.verified_identifier) for q in queries] == [
         (TIER_MODEL_CODE, "B12UC-1432PH", True),
         (TIER_MODEL_CODE_SPACED, "B12UC 1432PH", True),
+        (TIER_MODEL_CODE_COMPACT, "B12UC1432PH", True),
         (TIER_CODE_SEGMENT, "1432PH", False),
         (TIER_MODEL_SPECS, "B12UC-1432PH 8GB 512GB", False),
         (TIER_FAMILY, "MSI Thin 15", False),
         ("5_FAMILY_WITH_SPECS", "MSI Thin 15 Core i3 8GB 512GB", False),
     ]
-    assert "complete code must appear" in queries[2].basis
+    assert "complete code must appear" in queries[3].basis
 
 
 def test_a_code_without_series_falls_back_to_brand_and_processor_model() -> None:
     queries = search_queries("T", "laptop_factory", model="14-ep0445TU", part_number="D07C0PA",
                              brand="HP", series="", core=CORE, cpu_model="i3-1315U")
     assert [q.tier for q in queries] == [TIER_MODEL_CODE, TIER_MODEL_CODE_SPACED,
-                                         TIER_PART_NUMBER, TIER_CODE_SEGMENT, TIER_MODEL_SPECS,
+                                         TIER_MODEL_CODE_COMPACT, TIER_PART_NUMBER,
+                                         TIER_CODE_SEGMENT, TIER_MODEL_SPECS,
                                          TIER_BRAND_CPU_SPECS]
     assert queries[-1].text == "HP i3-1315U 8GB 512GB"
     # A bare series ("Ryzen 3") repeats the CPU family and is not searched on its own.
@@ -117,6 +120,8 @@ def test_a_spelling_result_with_another_code_is_not_plausible(tmp_path) -> None:
     other = LF_PRODUCT.replace("x3bp", "x3bq")
     spaced_url = LF.first_page_url("A14 11M X3BP")
     routes[spaced_url] = html(spaced_url, lf_search([(other, "Acer Aspire AI 14 A14-11M-X3BQ")]))
+    compact_url = LF.first_page_url("A1411MX3BP")
+    routes[compact_url] = html(compact_url, lf_search(no_results=True))
     _, _, out = variant_run(tmp_path, routes)
     row = job(out)
     assert TIER_MODEL_SPECS in row["tiers_run"]  # the search went on

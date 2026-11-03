@@ -21,6 +21,7 @@ from .variation_ranking import (
     UNMAPPED,
     build_variation_ranking,
     build_variation_snapshot,
+    in_pool,
 )
 from .variation_specs import COMPARED_FIELDS, read_variation_specs
 from .verified_top import VerifiedRankingInputError
@@ -128,12 +129,8 @@ def pool_trace(
     summary_path = folder / "phase1_run_summary.json"
     phase1 = json.loads(summary_path.read_text(encoding="utf-8")) if summary_path.is_file() else {}
     file_rows = read_rows(ranking_path)
-    # The pool is what the builder keeps: ELIGIBLE and present in the MTD month.
-    pool = [
-        r
-        for r in file_rows
-        if r["eligibility_status"] == "ELIGIBLE" and r["present_in_mtd"] == "True"
-    ]
+    # The pool is what the builder keeps: ELIGIBLE and present in either reporting month.
+    pool = [r for r in file_rows if r["eligibility_status"] == "ELIGIBLE" and in_pool(r)]
     excluded = (
         {r["model_id"] for r in read_rows(folder / "excluded_listings.csv")}
         if (folder / "excluded_listings.csv").is_file()
@@ -145,6 +142,36 @@ def pool_trace(
         else set()
     )
     pool_ids = {r["model_id"] for r in pool}
+    review_rows = (
+        read_rows(folder / "eligibility_review.csv")
+        if (folder / "eligibility_review.csv").is_file()
+        else []
+    )
+    excluded_rows = (
+        read_rows(folder / "excluded_listings.csv")
+        if (folder / "excluded_listings.csv").is_file()
+        else []
+    )
+
+    def m_minus_1_only(row: Mapping[str, str]) -> bool:
+        # Review and excluded files carry GMV, not presence flags: a record with GMV in M-1 and
+        # none in MTD is the proxy used here.
+        return float(row["m_minus_1_gmv_usd"] or 0) > 0 and float(row["mtd_gmv_usd"] or 0) == 0
+
+    eligible_m1 = [
+        r
+        for r in pool
+        if r["model_id"] in mapped_ids
+        and r.get("present_in_m_minus_1") == "True"
+        and r.get("present_in_mtd") != "True"
+    ]
+    review_m1 = [r for r in review_rows if r["model_id"] in mapped_ids and m_minus_1_only(r)]
+    excluded_m1 = [r for r in excluded_rows if r["model_id"] in mapped_ids and m_minus_1_only(r)]
+    known_ids = (
+        {r["model_id"] for r in file_rows}
+        | {r["model_id"] for r in review_rows}
+        | {r["model_id"] for r in excluded_rows}
+    )
     outside = sorted(mapped_ids - pool_ids)
     classified = Counter(
         "PHASE1_EXCLUDED_BY_ELIGIBILITY_RULES"
@@ -193,6 +220,13 @@ def pool_trace(
         "mapped_source_ids": len(mapped_ids),
         "mapped_ids_in_eligible_pool": len(mapped_ids & pool_ids),
         "mapped_ids_outside_eligible_pool": len(outside),
+        "mapped_ids_with_an_m_minus_1_record_and_no_mtd_record": {
+            "ELIGIBLE": len(eligible_m1),
+            "PHASE1_ELIGIBILITY_REVIEW": len(review_m1),
+            "PHASE1_EXCLUDED": len(excluded_m1),
+            "total": len(eligible_m1) + len(review_m1) + len(excluded_m1),
+        },
+        "mapped_ids_with_no_phase1_record_in_either_month": len(mapped_ids - known_ids),
         "mapped_ids_outside_pool_by_phase1_state": dict(sorted(classified.items())),
         "mapped_ids_outside_pool_with_valid_target": sum(
             1 for m in outside if valid_target_by_source.get(m)
@@ -313,6 +347,44 @@ def selected_review_evidence(
     }
 
 
+def period_reproduction(ranked: Sequence[Mapping[str, str]]) -> dict[str, object]:
+    """The earlier MTD-only result and the M-1-only mapped variations, from the run's own rows.
+
+    Reproduces, never assumes: mapped variations present in MTD, what removed some of them
+    (listing-only targets, conflicted targets, ...) and how many were left under the earlier rule
+    (an MTD record required), and the mapped variations that have an M-1 record but no MTD
+    record, which the union pool now keeps. A row is mapped when it resolves to a target.
+    """
+
+    def split(rows: Sequence[Mapping[str, str]]) -> dict[str, object]:
+        mapped = [r for r in rows if r["target_id"]]
+        verified = [r for r in mapped if not r["exclusion_reason"]]
+        removed = Counter(r["exclusion_reason"] for r in mapped if r["exclusion_reason"])
+        return {
+            "eligible": len(rows),
+            "mapped": len(mapped),
+            "unmapped": len(rows) - len(mapped),
+            "mapped_then_removed_by_reason": dict(sorted(removed.items())),
+            "verified_mapped": len(verified),
+        }
+
+    mtd = [r for r in ranked if r["present_in_mtd"] == "True"]
+    m1 = [r for r in ranked if r["present_in_m_minus_1"] == "True"]
+    m1_only = [r for r in m1 if r["present_in_mtd"] != "True"]
+    mtd_only = [r for r in mtd if r["present_in_m_minus_1"] != "True"]
+    unknown = [r for r in ranked if not r["present_in_mtd"] and not r["present_in_m_minus_1"]]
+    return {
+        "mtd_pool_the_earlier_rule": split(mtd),
+        "m_minus_1_pool": split(m1),
+        "m_minus_1_only_no_mtd_record": split(m1_only),
+        "mtd_only_no_m_minus_1_record": split(mtd_only),
+        "union_pool": split(ranked),
+        "rows_without_presence_flags": len(unknown),
+        "note": "Earlier rule = an MTD record required. Mapped = resolves to a target; "
+        "verified = also passes every selection check. A missing month is not an observed zero.",
+    }
+
+
 def spec_reading_coverage(top: Sequence[Mapping[str, str]]) -> dict[str, dict[str, int]]:
     """How much of each compared field the selected variations state themselves.
 
@@ -428,6 +500,7 @@ def build_selection_audit(
         "unmapped_variations": unmapped_review_state(ranked, review_by_source),
         "selected_review_evidence": selected_review_evidence(top, review_by_source),
         "selected_spec_reading_coverage": spec_reading_coverage(top),
+        "period_reproduction": period_reproduction(ranked),
         "variation_spec_conflicts": [dict(r) for r in spec_conflict_rows],
         "checks": checks,
         "checks_passed": all(c["passed"] for c in checks),
@@ -484,13 +557,14 @@ def audit_markdown(audit: Mapping[str, object]) -> str:
         f"{p1['m_minus_1_rows']} rows in "
         f"M-1 {p1['m_minus_1_month']}, {p1['mtd_rows']} in MTD {p1['mtd_month']} "
         f"({p1['mtd_active_models']} models active in MTD).",
-        f"- {p1['eligible_models']} models are ELIGIBLE over all periods; the ranking keeps those "
-        f"present in MTD: **{trace['eligible_ranking_rows']}** "
-        f"({trace['eligible_models_absent_from_the_mtd_month']} eligible models have no sales in "
-        f"the MTD month). Established rule (DECISIONS.md): only eligible models present in MTD "
-        "rank.",
+        f"- {p1['eligible_models']} models are ELIGIBLE in the two reporting months; the pool is "
+        f"those present in either month (owner decision 2026-11-03; an MTD record is not "
+        f"required): **{trace['eligible_ranking_rows']}**. "
+        f"{trace['eligible_models_absent_from_the_mtd_month']} of them have no MTD record; a "
+        "missing month is not an observed zero (it adds 0 to the ranking arithmetic and is "
+        "flagged).",
         f"- Ranking file rows {trace['eligible_ranking_file_rows']}, of which "
-        f"{trace['file_rows_not_eligible_or_not_in_mtd']} not ELIGIBLE or not in MTD; "
+        f"{trace['file_rows_not_eligible_or_not_in_mtd']} not ELIGIBLE or in neither month; "
         f"unique source keys: {trace['unique_source_keys']}; unique model IDs: "
         f"{trace['unique_model_ids']}; pool equals the selection input: "
         f"{trace['matches_selection_input']}.",
@@ -499,6 +573,10 @@ def audit_markdown(audit: Mapping[str, object]) -> str:
         f"{trace['mapped_ids_outside_eligible_pool']} "
         f"({trace['mapped_ids_outside_pool_with_valid_target']} of them with an active, "
         f"non-listing-only target): {trace['mapped_ids_outside_pool_by_phase1_state']}.",
+        f"- Mapped IDs with an M-1 record and no MTD record: "
+        f"{trace['mapped_ids_with_an_m_minus_1_record_and_no_mtd_record']}; "
+        f"{trace['mapped_ids_with_no_phase1_record_in_either_month']} mapped IDs have no Phase 1 "
+        "record in either month.",
         f"- Identifier checks: {trace['identifier_checks']}.",
     ]
     for pool in audit["earlier_pools_under_current_catalog"]:
@@ -510,7 +588,26 @@ def audit_markdown(audit: Mapping[str, object]) -> str:
             f"(shortfall {pool.get('shortfall_under_current_catalog', 'n/a')}). "
             + pool.get("note", "")
         )
+    pr = audit["period_reproduction"]
     lines += [
+        "",
+        "## Reporting months (reproduced from this run's rows)",
+        "",
+        f"- Eligible variations: {pr['m_minus_1_pool']['eligible']} with an M-1 record, "
+        f"{pr['mtd_pool_the_earlier_rule']['eligible']} with an MTD record, "
+        f"{pr['union_pool']['eligible']} in the union "
+        f"({pr['m_minus_1_only_no_mtd_record']['eligible']} M-1 only, "
+        f"{pr['mtd_only_no_m_minus_1_record']['eligible']} MTD only).",
+        "- Earlier rule (an MTD record required): "
+        f"{pr['mtd_pool_the_earlier_rule']['mapped']} mapped, "
+        f"removed {pr['mtd_pool_the_earlier_rule']['mapped_then_removed_by_reason']}, leaving "
+        f"{pr['mtd_pool_the_earlier_rule']['verified_mapped']}.",
+        f"- Mapped with an M-1 record and no MTD record: "
+        f"{pr['m_minus_1_only_no_mtd_record']['mapped']} "
+        f"(verified {pr['m_minus_1_only_no_mtd_record']['verified_mapped']}, removed "
+        f"{pr['m_minus_1_only_no_mtd_record']['mapped_then_removed_by_reason']}).",
+        f"- Union pool: {pr['union_pool']['mapped']} mapped, "
+        f"{pr['union_pool']['verified_mapped']} verified.",
         "",
         "## Selection",
         "",

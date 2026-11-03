@@ -47,6 +47,7 @@ from laptop_tracker.retailer_search import (
     TIER_FAMILY,
     TIER_FAMILY_SPECS,
     TIER_MODEL_CODE,
+    TIER_MODEL_CODE_COMPACT,
     TIER_MODEL_CODE_SPACED,
     TIER_MODEL_SPECS,
     TIER_PART_NUMBER,
@@ -201,12 +202,12 @@ def test_queries_run_code_then_verified_part_number_then_family() -> None:
                                             series="Vivobook")]
     # The identifier spellings (2026-10-22) follow the complete code in the plan; a job runs
     # them only when the complete code returned no result.
-    assert tiers == [TIER_MODEL_CODE, TIER_MODEL_CODE_SPACED, TIER_PART_NUMBER,
-                     TIER_CODE_SEGMENT, TIER_FAMILY]
+    assert tiers == [TIER_MODEL_CODE, TIER_MODEL_CODE_SPACED, TIER_MODEL_CODE_COMPACT,
+                     TIER_PART_NUMBER, TIER_CODE_SEGMENT, TIER_FAMILY]
     no_mpn = search_queries("T", "pcx", model="S3607VA-RP181WSM", part_number="",
                             brand="ASUS", series="Vivobook")
-    assert [q.text for q in no_mpn] == ["S3607VA-RP181WSM", "S3607VA RP181WSM", "RP181WSM",
-                                        "ASUS Vivobook"]
+    assert [q.text for q in no_mpn] == ["S3607VA-RP181WSM", "S3607VA RP181WSM",
+                                        "S3607VARP181WSM", "RP181WSM", "ASUS Vivobook"]
     # The complete code first, without filters; specifications only in later fallbacks.
     core = {"cpu_series": "Core 5", "ram_capacity_gb": "16", "storage_capacity_gb": "1000"}
     full = search_queries("T", "pcx", model="S3607VA-RP181WSM", part_number="", brand="ASUS",
@@ -214,6 +215,7 @@ def test_queries_run_code_then_verified_part_number_then_family() -> None:
     assert [(q.tier, q.text) for q in full] == [
         (TIER_MODEL_CODE, "S3607VA-RP181WSM"),
         (TIER_MODEL_CODE_SPACED, "S3607VA RP181WSM"),
+        (TIER_MODEL_CODE_COMPACT, "S3607VARP181WSM"),
         (TIER_CODE_SEGMENT, "RP181WSM"),
         (TIER_MODEL_SPECS, "S3607VA-RP181WSM 16GB 1TB"),
         (TIER_FAMILY, "ASUS Vivobook"),

@@ -18,7 +18,7 @@ mkdir -p "$weekly_run/inputs"
 echo "$weekly_run" > /tmp/current_weekly_run.txt
 V="$weekly_run/shopee_variations"
 STORE=data/history/price_history.sqlite3
-PREV_RUN="${PREV_RUN:-data/output/weekly_runs/20261103T023824Z}"
+PREV_RUN="${PREV_RUN:-data/output/weekly_runs/20261103T062304Z}"
 
 search_cache="${SEARCH_CACHE:-}"
 if [ -z "$search_cache" ]; then
@@ -90,6 +90,10 @@ s_selection_audit() {
     --match-review "$weekly_run/inputs/match_review_validated.csv" \
     "${extra[@]}" > "$weekly_run/selection_audit.log" 2>&1
 }
+# Owner review queue for suspicious catalog bindings (read-only; nothing is applied).
+s_corrections() { python build_catalog_correction_queue.py --run-dir "$weekly_run"   --output-dir "$weekly_run/catalog_corrections" > "$weekly_run/catalog_corrections.log" 2>&1; }
+# P1 audit diagnostics prepared as local files and a plan (preview only; no Sheets write).
+s_diagnostics() { python build_publication_diagnostics.py --run-dir "$weekly_run"   --discovery-dir "$weekly_run/discovery"   --correction-queue "$weekly_run/catalog_corrections/catalog_correction_queue.csv"   --output-dir "$weekly_run/diagnostics" > "$weekly_run/diagnostics.log" 2>&1; }
 s_catalog_preview() { python discover_catalog_leads.py --preview --scope-file "$V/context_scope.csv" \
   --target-master "$weekly_run/inputs/target_master_validated.csv" \
   --output-dir "$weekly_run/catalog_leads_preview" > "$weekly_run/catalog_preview.log" 2>&1; }
@@ -148,6 +152,7 @@ stage catalog_check 0 s_catalog_check
 stage variation_build 0 s_build
 stage variation_audit 0 s_audit
 stage selection_audit 0 s_selection_audit
+stage catalog_corrections 0 s_corrections
 stage catalog_preview 0 s_catalog_preview
 stage catalog 0 s_catalog
 stage discovery_preview 0 s_disc_preview
@@ -155,5 +160,6 @@ stage discovery 0,2 s_discovery
 stage prices 0 s_prices
 stage alt_audit 0 s_alt_audit
 stage variation_reports 0 s_var_reports
+stage diagnostics 0 s_diagnostics
 stage publish_preview 0 s_publish_preview
 echo "{\"status\": \"READY_TO_PUBLISH\", \"finished_at\": \"$(date -u +%Y-%m-%dT%H:%M:%SZ)\"}" > "$weekly_run/status.json"

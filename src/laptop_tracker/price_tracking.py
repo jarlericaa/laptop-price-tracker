@@ -750,6 +750,20 @@ def validate_selected_list(
     )
 
 
+
+def _snapshot_price_status(snapshot: Mapping[str, str] | None) -> str:
+    """Status of a source's sales-extract price for the configuration snapshot.
+
+    The configuration layer dates every price by the sales extract. A price that comes from the
+    M-1 record (a variation with no MTD record, 2026-11-03) is not an extract-dated price and is
+    never shown as one.
+    """
+    if not snapshot:
+        return "SALES_RANKING_NOT_SUPPLIED"
+    if snapshot.get("price_basis") == "M_MINUS_1_PRICE":
+        return "PRICE_FROM_M_MINUS_1_RECORD"
+    return snapshot["price_status"]
+
 def build_source_ledger(
     selected: SelectedList,
     contributions: Sequence[Mapping[str, str]],
@@ -812,9 +826,7 @@ def build_source_ledger(
                     "shopee_price_php_snapshot": snapshot["shopee_current_price_php"]
                     if snapshot
                     else "",
-                    "shopee_price_status": snapshot["price_status"]
-                    if snapshot
-                    else "SALES_RANKING_NOT_SUPPLIED",
+                    "shopee_price_status": _snapshot_price_status(snapshot),
                     "sales_run_id": selected.sales_run_id,
                     "sales_extract_date": selected.sales_extract_date,
                     "sales_period_label": label,

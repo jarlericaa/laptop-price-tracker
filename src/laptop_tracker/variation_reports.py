@@ -320,27 +320,39 @@ def _shopee_price_at_cutoff(row: Mapping[str, str], cutoff: date) -> tuple[str, 
     try:
         extracted = date.fromisoformat(row["shopee_price_observed_at"])
     except ValueError:
-        return "", "PRICE_DATE_INVALID", "the sales extract date is not a valid date"
+        return "", "PRICE_DATE_INVALID", "the price record date is not a valid date"
+    from_m_minus_1 = row.get("shopee_price_date_basis") == "M_MINUS_1_RECORD_DATE"
+    source = (
+        f"its M-1 {row.get('price_period_month', '')} source record of {extracted}"
+        if from_m_minus_1
+        else f"the sales extract of {extracted}"
+    )
     if extracted > cutoff:
         return (
             "",
             SNAPSHOT_AFTER_CUTOFF,
-            f"the sales extract ({extracted}) is later than the report cutoff ({cutoff})",
+            f"the price record ({extracted}) is later than the report cutoff ({cutoff})",
         )
     age = (cutoff - extracted).days
     if age > STALE_SNAPSHOT_DAYS:
         return (
             price,
             SNAPSHOT_PRICE_STALE,
-            f"own variation's snapshot price from the sales extract of {extracted}, {age} days "
-            f"before the report cutoff (older than {STALE_SNAPSHOT_DAYS} days)",
+            f"own variation's snapshot price from {source}, {age} days before the report cutoff "
+            f"(older than {STALE_SNAPSHOT_DAYS} days)"
+            + (
+                "; the record is monthly, so the exact snapshot time is unknown, and it is not an "
+                "observation of a later month"
+                if from_m_minus_1
+                else ""
+            ),
         )
     return (
         price,
         SNAPSHOT_PRICE,
         (
-            f"own variation's historical snapshot price from the sales extract of {extracted} "
-            "(extract date only; no per-price observation time is known)"
+            f"own variation's historical snapshot price from {source} "
+            "(record date only; no per-price observation time is known)"
         ),
     )
 

@@ -20,7 +20,7 @@ import re
 from collections import Counter
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
-from urllib.parse import parse_qs, urlsplit
+from urllib.parse import parse_qs, parse_qsl, urlsplit
 
 from .alternatives import MAX_DIFFERENCES
 from .collection import ROUTES
@@ -245,6 +245,9 @@ class RankedCandidate:
     decision_reason: str = ""
     # An earlier verified offer URL for this product (may name a ?variant=), when known.
     seed_url: str = ""
+    # Every distinct lead URL for this product page, variants kept apart (2026-11-03): two known
+    # URLs of one product with different ``?variant=`` values are two leads, never one.
+    lead_urls: list[str] = field(default_factory=list)
     # Lineage (2026-10-19): the discovery round that listed the candidate, and the collection
     # request that fetched it (an earlier request when the same page was already collected).
     discovery_round: int = 1
@@ -275,14 +278,14 @@ _ACCESSORY_NOUN = re.compile(
     r"\b(?:sleeves?|bags?|handbags?|briefcases?|pouch(?:es)?|totes?|backpacks?|cases?|covers?|"
     r"skins?|protectors?|films?|shells?|chargers?|adapters?|power\s+suppl(?:y|ies)|stands?|"
     r"docks?|docking\s+stations?|hubs?|mouse|mice|keyboards?|cooling\s+pads?|cables?|"
-    r"batter(?:y|ies)|monitors?|headsets?|webcams?)\b",
+    r"batter(?:y|ies)|monitors?|headsets?|webcams?|power\s*banks?)\b",
     re.I,
 )
 _COMPATIBILITY = re.compile(r"\b(?:for|compatible\s+(?:with|for)|fits?|designed\s+for)\b", re.I)
 _LAPTOP_NOUN = re.compile(r"\b(?:laptops?|notebooks?|ultrabooks?|chromebooks?)\b", re.I)
 _ACCESSORY_TYPE = re.compile(
     r"\b(?:bags?|sleeves?|cases?|accessor(?:y|ies)|peripherals?|chargers?|adapters?|mouse|"
-    r"keyboards?|monitors?|stands?)\b", re.I,
+    r"keyboards?|monitors?|stands?|power\s*banks?)\b", re.I,
 )
 
 
@@ -325,13 +328,71 @@ _NOT_LAPTOP = re.compile(
 )
 
 
-def non_laptop_reason(title: str, product_type: str = "") -> str:
-    """Why a search result is not a laptop (desktop, handheld, router, component, ...), or ''."""
+# Components, media, phones, tablets and furniture (2026-11-03, from the real candidates of the
+# 2026-11-03 runs: DataBlitz and PC Express RAM, SSDs, memory cards, graphics cards, motherboards
+# and a gaming chair, Octagon video cards and phones, Laptop Factory a power bank). They were
+# ``UNRELATED`` or ``DIFFERENT_MODEL_CODE`` (a motherboard whose "(AM4)" cut the title head before
+# its product noun), so they reached the ranking as laptops of another model.
+#
+# The retailer's own product type is authoritative when it names such a category and not a laptop.
+_NON_LAPTOP_TYPE = re.compile(
+    r"\b(?:RAM|DIMM|UDIMM|SO-?DIMM|memory\s+cards?|solid\s+state|SSDs?|HDDs?|hard\s+drives?|"
+    r"(?:graphics|video)\s+(?:cards?|adapters?)|PC\s+parts|components?|motherboards?|"
+    r"power\s+supply|mobile\s+phones?|smartphones?|phones?|tablets?|chairs?|desktops?|"
+    r"monitors?|routers?|printers?|consoles?|mini\s+pc|processors?)\b", re.I,
+)
+# Title phrases that never name a laptop, wherever they stand in the title: a laptop title does
+# not say "Motherboard" or "Graphics Card", and a bare DIMM listing states no processor or screen.
+_COMPONENT_PHRASE = re.compile(
+    r"\b(?:motherboard|(?:graphics|video)\s+card|solid[\s-]state\s+drive|memory\s+card|"
+    r"micro-?SDX?C?|SDXC|gaming\s+chair|GDDR[0-9]X?|desktop\s+memory|memory\s+kit)\b", re.I,
+)
+_MEMORY_MODULE = re.compile(r"\b(?:SO-?DIMM|U?DIMM)\b", re.I)
+_PHONE_OR_TABLET = re.compile(
+    r"\b(?:(?:Yoga|Idea|Legion|Smart|Galaxy)\s+Tab|Lenovo\s+Tab|Mi\s?Pad|Mate\s?Pad|iPad|"
+    r"Galaxy\s+[ASZM]\d{1,2}|iPhone|Redmi|smartphone)\b", re.I,
+)
+# A product URL handle that names a component (a laptop handle may end in ``-backpack`` for a
+# bundled bag, so bags are not matched here).
+_NON_LAPTOP_HANDLE = re.compile(
+    r"(?:^|-)(?:motherboard|graphics-card|video-card|solid-state-drive|sodimm|udimm|"
+    r"memory-module|desktop-memory|memory-card|gaming-chair|power-?bank)(?:-|$)")
+
+
+def non_laptop_reason(title: str, product_type: str = "", url: str = "") -> str:
+    """Why a search result is not a laptop (desktop, handheld, router, component, ...), or ''.
+
+    Checked, in order: a retailer product type naming a non-laptop category; a title phrase that
+    only components, media, phones or tablets use; a memory-module listing that states no
+    processor or screen; a product URL handle naming a component; then the leading item of the
+    title (desktops, handhelds, routers, monitors, ...), unless the title calls the product a
+    laptop. A laptop's title may still mention a component for compatibility, so phrases other
+    than the unambiguous ones never override the word "laptop".
+    """
     head = re.split(r"\s\|\s|\s\+\s|\(|\|", title, maxsplit=1)[0]
+    laptop_type = _LAPTOP_NOUN.search(product_type or "")
+    if product_type and not laptop_type and (found := _NON_LAPTOP_TYPE.search(product_type)):
+        return f"retailer product type '{product_type}' ('{found[0]}')"
+    for pattern in (_COMPONENT_PHRASE, _PHONE_OR_TABLET):
+        if found := pattern.search(title):
+            return f"'{found[0]}'"
+    if (module := _MEMORY_MODULE.search(title)) and not _stated_laptop_hardware(head):
+        return f"'{module[0]}' memory module"
+    handle = urlsplit(url).path.rstrip("/").rsplit("/", 1)[-1].lower() if url else ""
+    if handle and not _LAPTOP_WORDS.search(f"{title} {product_type}") and (
+        found := _NON_LAPTOP_HANDLE.search(handle)
+    ):
+        return f"URL handle '{found[0].strip('-')}'"
     if _LAPTOP_WORDS.search(f"{head} {product_type}"):
         return ""
     found = _NOT_LAPTOP.search(head) or _NOT_LAPTOP.search(product_type or "")
     return f"'{found[0]}'" if found else ""
+
+
+def _stated_laptop_hardware(text: str) -> bool:
+    """True when a title head states a processor or a screen size (a laptop-like listing)."""
+    clues = title_clues(text)
+    return bool(clues["cpu_series"] or clues["screen_size_in"])
 
 
 def name_in_title(title: str, name: str) -> str:
@@ -368,7 +429,7 @@ def rank_hit(target: SearchTarget, hit: SearchHit, records: list[SearchRecord]) 
     suffix = ""
     evidence = ""
     accessory = accessory_reason(title, hit.product_type)
-    not_laptop = non_laptop_reason(title, hit.product_type)
+    not_laptop = non_laptop_reason(title, hit.product_type, hit.product_url)
     named = name_in_title(title, code) if kind != MODEL_CODE_KIND else ""
     # A broad name that records one verified manufacturer code (TUF A16 -> FA607NUQ-RL011W,
     # 2026-10-22): a title, spelling or URL handle showing the complete recorded code is
@@ -713,7 +774,7 @@ def seed_candidate(
     clues = dict.fromkeys(_CONFIGURATION_CLUES, "NOT_STATED")
     return RankedCandidate(target, hit, [], HISTORICAL_VERIFIED_URL, "historical exact match",
                            "", "", clues, ["HISTORICAL_VERIFIED_URL"], [reason],
-                           seed_url=seed_url)
+                           seed_url=seed_url, lead_urls=[seed_url])
 
 
 # Supplied candidate URLs (2026-10-19). Tracking parameters added by search engines and shops are
@@ -760,7 +821,7 @@ def supplied_candidate(
     clues = dict.fromkeys(_CONFIGURATION_CLUES, "NOT_STATED")
     return RankedCandidate(target, hit, [], SUPPLIED_URL, f"supplied URL {supplied_id}", "", "",
                            clues, [SUPPLIED_URL, "NATIVE_SEARCH_MISSED_SUPPLIED_URL"], [reason],
-                           seed_url=url if "variant=" in url else "")
+                           seed_url=url if "variant=" in url else "", lead_urls=[url])
 
 
 def has_code_signal(target: SearchTarget, records: Sequence[SearchRecord]) -> bool:
@@ -1024,6 +1085,8 @@ CANDIDATE_COLUMNS: tuple[str, ...] = (
     "configuration_difference", "plausible", "seed_url",
     # Lineage (2026-10-19): search job -> candidate -> collection request -> observation.
     "discovery_round", "collection_url", "collection_request_id",
+    # A known URL is a lead to revalidate, never an approved match (2026-11-03).
+    "lead_status", "lead_variants",
     # Close-alternative assessment of the search title (2026-10-27).
     "title_difference_count", "title_difference_dimensions", "title_unknown_dimensions",
     "alternative_tier",
@@ -1068,6 +1131,12 @@ def candidate_row(candidate: RankedCandidate) -> dict[str, str]:
         "title_difference_dimensions": ";".join(potential.differences),
         "title_unknown_dimensions": ";".join(potential.unknown),
         "alternative_tier": potential.tier,
+        "lead_status": ("LEAD_REVALIDATE_REQUIRED" if candidate.category in _SEED_CATEGORIES
+                        or "ALSO_SUPPLIED_URL" in candidate.flags
+                        or "ALSO_HISTORICAL_VERIFIED_URL" in candidate.flags else ""),
+        "lead_variants": ";".join(dict.fromkeys(
+            v for v in (lead_variant(u) for u in (candidate.lead_urls or [candidate.seed_url]))
+            if v)),
     }
     return {column: row.get(column, "") for column in CANDIDATE_COLUMNS}
 
@@ -1075,6 +1144,39 @@ def candidate_row(candidate: RankedCandidate) -> dict[str, str]:
 def strip_variant(url: str) -> str:
     parts = urlsplit(url)
     return f"{parts.scheme}://{parts.netloc}{parts.path}".rstrip("/")
+
+
+def lead_url_key(url: str) -> str:
+    """Identity of a lead URL for de-duplication (2026-11-03): the product page *and* its variant.
+
+    Scheme and host case, a trailing slash, the fragment and tracking parameters are presentation;
+    every other query parameter, ``variant`` above all, is identity. So ``/products/x?variant=1``
+    never collapses into ``/products/x`` or into ``/products/x?variant=2``, while
+    ``/products/x?utm_source=a`` is ``/products/x``. ``strip_variant`` stays the product-page
+    identity (one page inspection serves every variant of a product).
+    """
+    parts = urlsplit(url.strip())
+    kept = sorted((name, value) for name, value in parse_qsl(parts.query, keep_blank_values=True)
+                  if not _TRACKING_PARAMETERS.match(name))
+    query = "&".join(f"{name}={value}" for name, value in kept)
+    return (f"{parts.scheme.lower()}://{parts.netloc.lower()}{parts.path.rstrip('/')}"
+            + (f"?{query}" if query else ""))
+
+
+def add_lead_url(candidate: RankedCandidate, url: str) -> bool:
+    """Record ``url`` as one more lead of ``candidate`` unless an identical lead (same page and
+    same variant) is already there. Returns whether it was new. A lead with a different variant
+    is always new: it is never folded into the bare product or into another variant."""
+    key = lead_url_key(url)
+    if any(lead_url_key(known) == key for known in candidate.lead_urls):
+        return False
+    candidate.lead_urls.append(url)
+    return True
+
+
+def lead_variant(url: str) -> str:
+    """The ``variant`` a lead URL names, or ``""``."""
+    return dict(parse_qsl(urlsplit(url).query)).get("variant", "").strip()
 
 
 COVERAGE_COLUMNS: tuple[str, ...] = (

@@ -8,6 +8,12 @@ extracted, never summed across overlapping cumulative snapshots). Phase 1 eligib
 interpretation, quarantine and duplicate decisions are inherited unchanged through the eligible
 ranking this module reads; that full eligible ranking stays available for audit.
 
+Pool (owner decision 2026-11-03): the eligible variations present in **either** reporting month.
+An MTD record is not required; a month with no record is not an observed zero. It contributes 0
+to ``ranking_gmv_usd`` only as labelled arithmetic (``mtd_status`` / ``m_minus_1_status`` =
+``NO_RECORD_TREATED_AS_ZERO``) and the presence flags are kept on every row. Each row's price is
+its own latest valid price with its actual period, record date and basis.
+
 Selection (owner decision 2026-11-03, superseding the 2026-10-27 rule that let unmapped variations
 enter the list): the verified-mapping filter runs *before* the 100-row limit. A variation qualifies
 only when it is ``MAPPED_VERIFIED``: its source model ID resolves to exactly one ACTIVE, complete,
@@ -100,6 +106,12 @@ LIST_NAME = "Top 100 eligible mapped Shopee variations"
 NOT_SELECTED = "OUTSIDE_SELECTED_VARIATIONS"
 
 SALES_DATE_LABEL = "SALES_EXTRACT_DATE"
+# The price comes from the M-1 monthly record (the model has no MTD price): dated by that record.
+M_MINUS_1_DATE_LABEL = "M_MINUS_1_RECORD_DATE"
+MTD_PRICE = "MTD_PRICE"
+M_MINUS_1_PRICE = "M_MINUS_1_PRICE"
+NO_RECORD_AS_ZERO = "NO_RECORD_TREATED_AS_ZERO"
+PRESENT = "PRESENT"
 SNAPSHOT_PRICE = "SNAPSHOT_PRICE"
 
 # Columns of the selected / full variation lists. The first block is the TOP_100_SHOPEE_VARIATIONS
@@ -145,6 +157,12 @@ VARIATION_COLUMNS: tuple[str, ...] = (
     "exclusion_reason",
     "variation_spec_evidence",
     "variation_spec_conflicts",
+    "present_in_m_minus_1",
+    "present_in_mtd",
+    "m_minus_1_status",
+    "mtd_status",
+    "price_period_month",
+    "price_basis",
     "shopee_price_status",
     "shopee_price_detail",
     "shopee_price_date_basis",
@@ -231,8 +249,50 @@ def rank_metric_scope(snapshot: SalesSnapshot) -> str:
     return (
         f"{RANKING_GRAIN}: each variation's own ranking_gmv_usd = M-1 {snapshot.m_minus_1_month} "
         f"(full calendar month) + MTD {snapshot.mtd_month} as extracted {snapshot.extract_date}; "
-        f"Phase 1 run {snapshot.run_id}; one Shopee seller variation per row, not summed across "
-        "variations, sellers or overlapping cumulative snapshots"
+        "eligible variations present in either month rank, and a month with no record is not an "
+        "observed zero (it adds 0 to the arithmetic only, flagged in m_minus_1_status / "
+        f"mtd_status); Phase 1 run {snapshot.run_id}; one Shopee seller variation per row, not "
+        "summed across variations, sellers or overlapping cumulative snapshots"
+    )
+
+
+def in_pool(values: Mapping[str, str]) -> bool:
+    """Present in either reporting month (an MTD record is not required)."""
+    return values.get("present_in_mtd") == "True" or values.get("present_in_m_minus_1") == "True"
+
+
+def month_statuses(values: Mapping[str, str]) -> tuple[str, str]:
+    """``(m_minus_1_status, mtd_status)``; derived from the flags for an older ranking file."""
+
+    def one(status_name: str, flag_name: str) -> str:
+        if values.get(status_name):
+            return values[status_name]
+        return {"True": PRESENT, "False": NO_RECORD_AS_ZERO}.get(values.get(flag_name, ""), "")
+
+    return one("m_minus_1_status", "present_in_m_minus_1"), one("mtd_status", "present_in_mtd")
+
+
+def own_price_dating(
+    values: Mapping[str, str], snapshot: SalesSnapshot
+) -> tuple[str, str, str, str]:
+    """``(observed_at, date basis, price period month, price basis)`` of a variation's price.
+
+    An MTD price is dated by the sales extract (the established rule). A price that comes from
+    the M-1 record is dated by that monthly source record and never relabelled as an observation
+    of the extract month; the exact snapshot time within the month is unknown.
+    """
+    if values.get("price_basis") == M_MINUS_1_PRICE:
+        return (
+            values.get("price_record_date", ""),
+            M_MINUS_1_DATE_LABEL,
+            values.get("price_period_month", "") or snapshot.m_minus_1_month,
+            M_MINUS_1_PRICE,
+        )
+    return (
+        snapshot.extract_date,
+        SALES_DATE_LABEL,
+        values.get("price_period_month", "") or snapshot.mtd_month,
+        values.get("price_basis", "") or MTD_PRICE,
     )
 
 
@@ -387,7 +447,7 @@ def build_variation_ranking(
     ineligible: Counter[str] = Counter()
     for source in snapshot.rows:
         values = source.values
-        if values["eligibility_status"] != "ELIGIBLE" or values["present_in_mtd"] != "True":
+        if values["eligibility_status"] != "ELIGIBLE" or not in_pool(values):
             ineligible["SOURCE_NOT_ELIGIBLE"] += 1
             continue
         eligible.append(source)
@@ -452,6 +512,7 @@ def build_variation_ranking(
                 }
             )
         trusted = comparison == CONTEXT_READY
+        price_dating = own_price_dating(values, snapshot)
         target = targets[target_id] if trusted else {}
         amount, reason = snapshot_amount(
             {
@@ -482,7 +543,7 @@ def build_variation_ranking(
                 "mtd_gmv_usd": values["mtd_gmv_usd"],
                 "ranking_gmv_usd": values["ranking_gmv_usd"],
                 "shopee_current_price_php": price_text(amount) if amount is not None else "",
-                "shopee_price_observed_at": snapshot.extract_date,
+                "shopee_price_observed_at": price_dating[0],
                 "target_id": target_id,
                 "mapping_status": status,
                 "comparison_status": comparison,
@@ -502,12 +563,25 @@ def build_variation_ranking(
                 "variation_spec_conflicts": " | ".join(c.describe() for c in spec_found),
                 "shopee_price_status": SNAPSHOT_PRICE if amount is not None else reason,
                 "shopee_price_detail": (
-                    "own variation's snapshot price from the sales extract"
+                    (
+                        "own variation's snapshot price from the sales extract"
+                        if price_dating[1] == SALES_DATE_LABEL
+                        else f"own variation's price from its M-1 {price_dating[2]} source record "
+                        "(no MTD price); dated by that monthly record, not an observation of the "
+                        "extract month"
+                    )
                     if amount is not None
                     else f"no usable own-variation price ({reason}); "
-                    f"MTD price values: {values.get('mtd_price_values', '') or 'none'}"
+                    f"MTD price values: {values.get('mtd_price_values', '') or 'none'}; "
+                    f"M-1 price values: {values.get('m_minus_1_price_values', '') or 'none'}"
                 ),
-                "shopee_price_date_basis": SALES_DATE_LABEL,
+                "shopee_price_date_basis": price_dating[1],
+                "present_in_m_minus_1": values.get("present_in_m_minus_1", ""),
+                "present_in_mtd": values.get("present_in_mtd", ""),
+                "m_minus_1_status": month_statuses(values)[0],
+                "mtd_status": month_statuses(values)[1],
+                "price_period_month": price_dating[2],
+                "price_basis": price_dating[3],
                 "shopee_listing_url": listing_url(values["shop_id"], values["item_id"]),
                 "mapping_detail": detail,
                 "comparison_detail": comparison_detail,
@@ -541,6 +615,7 @@ def build_variation_ranking(
     counts: dict[str, object] = {
         "selection_policy": SELECTION_POLICY,
         "eligible_variations": len(ranked),
+        **_month_counts(ranked, qualifying, top),
         "eligible_variations_with_verified_mapping": len(qualifying),
         "excluded_from_top_consideration": len(exclusions),
         "excluded_by_mapping_failure": dict(sorted(excluded_by_reason.items())),
@@ -586,6 +661,34 @@ def build_variation_ranking(
     return VariationRanking(
         ranked, top, exclusions, spec_rows, contexts, context_list, context_ledger, counts
     )
+
+
+def _month_counts(
+    ranked: Sequence[Mapping[str, str]],
+    qualifying: Sequence[Mapping[str, str]],
+    top: Sequence[Mapping[str, str]],
+) -> dict[str, int]:
+    """Eligible, qualifying and selected variations by reporting month and their union."""
+
+    def tally(rows: Sequence[Mapping[str, str]], prefix: str) -> dict[str, int]:
+        in_m1 = [r for r in rows if r["present_in_m_minus_1"] == "True"]
+        in_mtd = [r for r in rows if r["present_in_mtd"] == "True"]
+        both = [r for r in in_m1 if r["present_in_mtd"] == "True"]
+        return {
+            f"{prefix}_in_m_minus_1": len(in_m1),
+            f"{prefix}_in_mtd": len(in_mtd),
+            f"{prefix}_in_both_months": len(both),
+            f"{prefix}_m_minus_1_only": len(in_m1) - len(both),
+            f"{prefix}_mtd_only": len(in_mtd) - len(both),
+            f"{prefix}_union": len(rows),
+        }
+
+    return {
+        **tally(ranked, "eligible"),
+        **tally(qualifying, "qualifying"),
+        **tally(top, "selected"),
+        "selected_with_m_minus_1_price": sum(1 for r in top if r["price_basis"] == M_MINUS_1_PRICE),
+    }
 
 
 def _exclusion_reason(
@@ -815,7 +918,7 @@ def audit_variation_ranking(
     eligible = {
         key
         for key, row in sources.items()
-        if row.values["eligibility_status"] == "ELIGIBLE" and row.values["present_in_mtd"] == "True"
+        if row.values["eligibility_status"] == "ELIGIBLE" and in_pool(row.values)
     }
     open_register = [entry for entry in register if entry.status == "OPEN"]
     keys_per_model: dict[str, set[str]] = defaultdict(set)
@@ -885,8 +988,11 @@ def audit_variation_ranking(
         expected_price = price_text(amount) if amount is not None else ""
         if row["shopee_current_price_php"] != expected_price:
             issues.append(f"{row['source_key']} price is not its own variation's price.")
-        if row["shopee_price_observed_at"] != snapshot.extract_date:
-            issues.append(f"{row['source_key']} price date is not the sales extract date.")
+        expected_date, expected_basis, _, _ = own_price_dating(values, snapshot)
+        if row["shopee_price_observed_at"] != expected_date:
+            issues.append(f"{row['source_key']} price date is not its own price record's date.")
+        if row["shopee_price_date_basis"] != expected_basis:
+            issues.append(f"{row['source_key']} price date basis is wrong.")
         for name, expected in (
             ("sales_run_id", snapshot.run_id),
             ("sales_extract_date", snapshot.extract_date),

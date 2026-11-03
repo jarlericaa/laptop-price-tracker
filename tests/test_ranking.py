@@ -24,17 +24,91 @@ def run(rows: list[list[str]], tmp_path: Path):
     )
 
 
-def test_m_minus_1_only_models_do_not_qualify_and_mtd_models_do(tmp_path: Path) -> None:
+def test_models_present_in_either_month_qualify_with_explicit_presence_flags(
+    tmp_path: Path,
+) -> None:
     result = run(
         [
-            raw_row(grass_date="2026-08-01", modelid="1", itemid="1"),
-            raw_row(grass_date="2026-09-01", modelid="2", itemid="2"),
+            raw_row(grass_date="2026-08-01", modelid="1", itemid="1", gmv_usd="40"),
+            raw_row(grass_date="2026-09-01", modelid="2", itemid="2", gmv_usd="10"),
+            raw_row(grass_date="2026-08-01", modelid="3", itemid="3", gmv_usd="5"),
+            raw_row(grass_date="2026-09-01", modelid="3", itemid="3", gmv_usd="6"),
         ],
         tmp_path,
     )
-    ranking = result.outputs["P1_ELIGIBLE_RANKING"]
-    assert ranking["model_id"].tolist() == ["2"]
-    assert ranking.loc[0, "present_in_mtd"]
+    ranking = result.outputs["P1_ELIGIBLE_RANKING"].set_index("model_id")
+
+    # Owner decision 2026-11-03: an M-1-only model ranks; it needs no MTD record.
+    assert ranking.index.tolist() == ["1", "3", "2"]
+    assert ranking.loc["1", ["present_in_m_minus_1", "present_in_mtd"]].tolist() == [True, False]
+    assert ranking.loc["2", ["present_in_m_minus_1", "present_in_mtd"]].tolist() == [False, True]
+    assert ranking.loc["3", ["present_in_m_minus_1", "present_in_mtd"]].tolist() == [True, True]
+    # A missing month is flagged; it adds 0 to the ranking arithmetic but is not an observed zero.
+    assert ranking.loc["1", "mtd_status"] == "NO_RECORD_TREATED_AS_ZERO"
+    assert ranking.loc["1", "m_minus_1_status"] == "PRESENT"
+    assert ranking.loc["1", "mtd_gmv_usd"] == 0 and ranking.loc["1", "ranking_gmv_usd"] == 40
+    assert ranking.loc["2", "m_minus_1_status"] == "NO_RECORD_TREATED_AS_ZERO"
+    assert result.summary["mtd_active_models"] == 2
+
+
+def test_the_price_is_the_models_own_latest_valid_price_with_its_period_and_date(
+    tmp_path: Path,
+) -> None:
+    rows = [
+        raw_row(grass_date="2026-08-01", modelid="1", itemid="1", current_price="900"),
+        raw_row(grass_date="2026-08-01", modelid="2", itemid="2", current_price="800"),
+        raw_row(grass_date="2026-09-01", modelid="2", itemid="2", current_price="850"),
+        raw_row(grass_date="2026-08-01", modelid="3", itemid="3", current_price="700"),
+        raw_row(grass_date="2026-09-01", modelid="3", itemid="3", current_price="650"),
+        raw_row(grass_date="2026-09-01", modelid="4", itemid="4", current_price="10"),
+        raw_row(grass_date="2026-09-01", modelid="4", itemid="4", current_price="11",
+                shopid="2"),
+    ]
+    frame = _classified(rows)
+    # Model 3's MTD record carries no usable price (validation keeps such a row out of the raw
+    # path, so the case is made at the aggregation level).
+    frame.loc[frame["model_id"].eq("3") & frame["period_month"].eq("2026-09"), "_price_numeric"] = (
+        float("nan")
+    )
+    summary = aggregate_models(frame, "2026-08", "2026-09", "2026-09-22").set_index("model_id")
+
+    # M-1-only: the M-1 price, labelled as such, never relabelled as an MTD observation.
+    assert summary.loc["1", ["shopee_current_price_php", "price_basis", "price_period_month"]
+                       ].tolist() == [900.0, "M_MINUS_1_PRICE", "2026-08"]
+    assert summary.loc["1", "price_record_date"] == "2026-08-01"
+    assert summary.loc["1", "price_status"] == "PRICE_OK"
+    # Both months priced: the latest (MTD) price.
+    assert summary.loc["2", ["shopee_current_price_php", "price_basis"]].tolist() == [
+        850.0, "MTD_PRICE"]
+    assert summary.loc["2", "price_record_date"] == "2026-09-01"
+    # An MTD record without a valid price falls back to the model's own M-1 price.
+    assert summary.loc["3", ["shopee_current_price_php", "price_basis"]].tolist() == [
+        700.0, "M_MINUS_1_PRICE"]
+    assert summary.loc["3", "m_minus_1_price_values"] == "700.0"
+    # Several MTD prices are a conflict; they are never averaged and never replaced by an older one.
+    assert summary.loc["4", "price_status"] == "PRICE_CONFLICT"
+    assert summary.loc["4", "mtd_price_values"] == "10.0;11.0"
+
+
+def test_a_model_with_no_valid_price_stays_ranked_with_price_missing() -> None:
+    frame = _classified([raw_row(grass_date="2026-08-01", modelid="1", itemid="1")])
+    frame["_price_numeric"] = float("nan")
+    summary = aggregate_models(frame, "2026-08", "2026-09", "2026-09-22")
+    ranking = rank_eligible_models(summary)
+
+    assert ranking["model_id"].tolist() == ["1"]  # a missing price never removes a ranked model
+    assert ranking.loc[0, "price_status"] == "PRICE_MISSING"
+    assert ranking.loc[0, "price_basis"] == "" and ranking.loc[0, "price_record_date"] == ""
+
+
+def _classified(rows: list[list[str]]):
+    root = Path(__file__).resolve().parents[1]
+    frame = validate_rows(normalize_raw_values(raw_values(*rows), "run")).valid_rows
+    return apply_eligibility(
+        frame,
+        load_rules(root / "config" / "eligibility_rules.csv"),
+        load_manual_decisions(root / "config" / "eligibility_decisions.csv"),
+    )
 
 
 def test_gmv_math_and_deterministic_order(tmp_path: Path) -> None:
@@ -143,11 +217,16 @@ def test_many_model_aggregation_is_complete_fast_and_deterministic() -> None:
     assert conflict["eligibility_reason"] == (
         "Conflicting listing-level eligibility classifications for the same model."
     )
-    expected_ids = ["00020", "00010", "00030", "00040"] + [
-        f"{index:05d}"
-        for index in range(mtd_model_count)
-        if index not in {10, 20, 30, 40, 50, 51, 52}
-    ]
+    # M-1-only models (no MTD record) now rank too, after every MTD model here (GMV 1 against 11).
+    expected_ids = (
+        ["00020", "00010", "00030", "00040"]
+        + [
+            f"{index:05d}"
+            for index in range(mtd_model_count)
+            if index not in {10, 20, 30, 40, 50, 51, 52}
+        ]
+        + [f"{index:05d}" for index in range(mtd_model_count, model_count)]
+    )
     assert ranking["model_id"].tolist() == expected_ids
     pd.testing.assert_frame_equal(ranking, rank_eligible_models(summary))
     assert elapsed < 10, f"12,000 model groups took {elapsed:.2f} seconds"

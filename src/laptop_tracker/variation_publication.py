@@ -576,6 +576,21 @@ def _alternative_retailers(
 # Tab plans
 
 
+def _missing_month_note(name: str, row: Mapping[str, str]) -> str:
+    """A note on a GMV cell whose month has no record: the 0 is ranking arithmetic, not data."""
+    status = {
+        "m_minus_1_gmv_usd": row.get("m_minus_1_status"),
+        "mtd_gmv_usd": row.get("mtd_status"),
+    }
+    if status.get(name) != "NO_RECORD_TREATED_AS_ZERO":
+        return ""
+    month = row["m_minus_1_month"] if name == "m_minus_1_gmv_usd" else row["mtd_month"]
+    return (
+        f"No {month} record for this variation in the sales extract. The 0 is ranking arithmetic "
+        "only; it is not an observed zero and does not show the listing was inactive."
+    )
+
+
 def top_plan(report: VariationPublicationReport, header: Sequence[str]) -> TabPlan:
     integer = {"rank", "ram_capacity_gb", "storage_capacity_gb"}
     decimal = {"screen_size_in"}
@@ -590,7 +605,7 @@ def top_plan(report: VariationPublicationReport, header: Sequence[str]) -> TabPl
             elif name in decimal and value:
                 cells.append(number(value, "decimal"))
             elif name in usd:
-                cells.append(number(value, "usd"))
+                cells.append(number(value, "usd", note=_missing_month_note(name, row)))
             elif name == "shopee_current_price_php":
                 cells.append(number(value, "php"))
             elif name == "shop_name":
@@ -604,9 +619,12 @@ def top_plan(report: VariationPublicationReport, header: Sequence[str]) -> TabPl
         "configuration mapping, ranked within that pool by its own ranking_gmv_usd (M-1 + MTD, "
         "the Phase 1 metric). Not a configuration ranking.",
         "ranking_gmv_usd": scope,
-        "shopee_current_price_php": "This variation's own historical snapshot price from the "
-        "sales extract; never a current price or another seller's.",
-        "shopee_price_observed_at": "Sales extract date; no per-price observation time exists.",
+        "shopee_current_price_php": "This variation's own latest valid snapshot price: the MTD "
+        "record's (dated by the sales extract) or, when it has no MTD price, its M-1 record's. "
+        "Never a current price or another seller's.",
+        "shopee_price_observed_at": "Date of the price record: the sales extract date for an MTD "
+        "price, the M-1 monthly record date for an M-1 price (price_basis in the local files). "
+        "No per-price observation time exists.",
         "mapping_status": "MAPPED_VERIFIED for every listed row: the source model ID resolves to "
         "one active, complete configuration target. Unmapped or untrusted variations are "
         "excluded before the 100-row limit.",

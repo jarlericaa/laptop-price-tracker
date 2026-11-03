@@ -214,7 +214,9 @@ RETAILER_LABELS: dict[str, RetailerLabels] = {
         cpu=_labels("Processor", "CPU and chipset", "CPU"),
         # "Display Size" / "Panel Size" and HP "Internal Storage" rows on reviewed 2026-10-19
         # pages; "Expansion Slots" ends the previous group.
-        display=_labels("Display", "Display Size", "Panel Size"),
+        # "Display Panel / Resolution" is the Acer Tech Specification row of the reviewed
+        # 2026-11-03 Nitro V page ("15.6" display with IPS technology, Full HD 1920 x 1080 ...").
+        display=_labels("Display", "Display Size", "Panel Size", "Display Panel / Resolution"),
         memory=_labels("Memory", "RAM"),
         storage=_labels("Storage", "Internal Storage"),
         model_code=_labels("Model"),
@@ -267,6 +269,11 @@ MODEL_CLAIM_LABELS = _labels("Model", "Model Name", "Model Number", "Model No", 
 # Match basis tags (balanced policy, 2026-10-15). EXACT keeps its meaning; the basis records how
 # the five fields were supported.
 TITLE_MODEL_CORROBORATED = "TITLE_MODEL_CORROBORATED"
+# A title code written with spaces for hyphens ("15 FC0933AU"), read only where the page itself
+# writes the hyphenated form (2026-11-03).
+TITLE_MODEL_SPACING = "TITLE_MODEL_SPACING_NORMALIZED"
+# A CPU row with a damaged trademark mark ("Core? 5"), read only when the title agrees (2026-11-03).
+CPU_MARK_REPAIRED = "CPU_DAMAGED_MARK_TITLE_CORROBORATED"
 # Product-name identities (2026-10-19, second review; see product_names.py).
 TITLE_PRODUCT_NAME_CORROBORATED = "TITLE_PRODUCT_NAME_CORROBORATED"
 TITLE_STATEMENT = "TITLE_STATEMENT"
@@ -393,6 +400,29 @@ _LEADING_DIAGONAL = re.compile(r"([0-9]{2}(?:\.[0-9]{1,2})?)\s+display\b", re.I)
 # a preceding digit or decimal point (the "44" of "144 display") is not a separate size.
 _STATED_DIAGONAL = re.compile(r"(?<![0-9.])([0-9]{2}(?:\.[0-9]{1,2})?)\s+display\b", re.I)
 _LAPTOP_DIAGONAL_INCHES = (Decimal("10"), Decimal("18.4"))
+
+# An inch size that qualifies an included accessory, not the laptop (2026-11-03: DataBlitz HP
+# 15-fc0933AU "... + HP Everyday 16" Laptop Briefcase", "an HP Everyday 16-inch Laptop Briefcase").
+# The size must be followed, within two ordinary words, by an accessory noun; a display word in
+# between ("15.6" FHD IPS display with a bag") keeps the size, so the laptop's own diagonal is
+# never lost. Only that size is dropped; the rest of the wording is untouched.
+_ACCESSORY_SIZE_NOUN = (
+    r"(?:brief\s*cases?|bags?|back\s*packs?|sleeves?|cases?|pouch(?:es)?|totes?|satchels?|"
+    r"messengers?|covers?|skins?)"
+)
+_NOT_ACCESSORY_BETWEEN = (
+    r"(?:display|screen|panel|monitor|lcd|led|ips|oled|fhd|hd|uhd|wuxga|qhd|touch|touchscreen)"
+)
+_ACCESSORY_SIZE = re.compile(
+    _SCREEN_SIZE.pattern
+    + rf"(?=(?:\s+(?!{_NOT_ACCESSORY_BETWEEN}\b)[A-Za-z]+){{0,2}}\s+{_ACCESSORY_SIZE_NOUN}\b)",
+    re.I,
+)
+
+
+def _without_accessory_sizes(text: str) -> str:
+    """``text`` with the inch sizes of bundled accessories (``16" Laptop Briefcase``) removed."""
+    return _ACCESSORY_SIZE.sub(" ", text)
 
 
 class _Unparseable(ValueError):
@@ -521,9 +551,29 @@ def _installed_cpu_series(text: str) -> set[str]:
     return labeled_cpu_series_forms(_cpu_scopes(text)[0])
 
 
+# A trademark sign lost in transit shows as ``?`` or U+FFFD glued to a word ("Intel® Core? 5
+# Processor 210H", saved PC Central pages, 2026-11-03). Such a row is read only as a fallback,
+# with the mark dropped, and only when the product title states the same processor series.
+_DAMAGED_MARK = re.compile(r"(?<=[A-Za-z0-9])[?�]+(?=\s|$)")
+
+
+def _repaired_cpu_series(text: str, title: str) -> set[str]:
+    """CPU series of a row with damaged trademark marks, when the title states the same series.
+
+    Nothing is guessed: no repaired reading, a different title series, or several title series
+    leave the row unparsed.
+    """
+    repaired = _DAMAGED_MARK.sub(" ", text)
+    if repaired == text:
+        return set()
+    forms = _installed_cpu_series(repaired)
+    titled = cpu_series_forms(_cpu_scopes(_parse_text(title))[0])
+    return forms if forms and forms == titled else set()
+
+
 def _screen_size(text: str) -> set[str]:
     values = set()
-    for match in _SCREEN_SIZE.finditer(_parse_text(text)):
+    for match in _SCREEN_SIZE.finditer(_without_accessory_sizes(_parse_text(text))):
         number = Decimal(match[1])
         if number > 0:
             values.add(format(number.normalize(), "f"))
@@ -556,7 +606,7 @@ def _screen_size_row(label: str, text: str) -> set[str]:
             return {_inches(bare[1])} if low <= Decimal(bare[1]) <= high else set()
     if not _SIZE_LABEL.search(label):
         return _screen_size(text)
-    text = _parse_text(text)
+    text = _without_accessory_sizes(_parse_text(text))
     inch_marked = [
         (match.start(), _inches(match[1]))
         for match in _SCREEN_SIZE.finditer(text)
@@ -1090,7 +1140,14 @@ def _shared_cpu_display_scope(
         names, variants = matrix.get("option_names"), matrix.get("variants")
         if not isinstance(names, list) or names != [name for name, _ in selected]:
             return _SharedVariantScope()
-        if not isinstance(variants, list) or len(variants) < 2:
+        if not isinstance(variants, list) or not variants:
+            return _SharedVariantScope()
+        # A matrix of one variant proves nothing by itself (a partial array of a real
+        # multi-variant page looks the same). Only the adapter's own completeness proof counts:
+        # PC Central names RAM/SSD options even for a product with a single variant (saved
+        # 2026-11-03 X1504VA and AG14-71M pages), and then the description has no other variant
+        # to differ from; the selected option still binds RAM and storage.
+        if len(variants) < 2 and matrix.get("complete_sole_variant") is not True:
             return _SharedVariantScope()
         if any(not isinstance(name, str) for name in names):
             return _SharedVariantScope()
@@ -1183,6 +1240,7 @@ def _prose_screen_rows(
         for sentence in re.split(r"(?<=[.!?])\s+", _parse_text(text)):
             if unrelated.search(sentence):
                 continue
+            sentence = _without_accessory_sizes(sentence)
             matches = list(_SCREEN_SIZE.finditer(sentence))
             for match in matches:
                 if low <= Decimal(match[1]) <= high and (
@@ -1194,6 +1252,18 @@ def _prose_screen_rows(
         if sizes:
             result.append((label, text, sizes))
     return result
+
+
+def _restates_inches(metric: Decimal, divisor: Decimal, inches: set[str]) -> bool:
+    """Whether a metric figure with a decimal place is a stated inch size in centimetres or
+    millimetres, rounded to the metric figure's own precision (``39.6 cm`` beside ``15.6"``:
+    15.6 x 2.54 = 39.624 rounds to 39.6). A unit conversion, never a tolerance between sizes:
+    ``39.6 cm`` does not restate 15.5, and a whole-number metric figure is never matched."""
+    exponent = metric.as_tuple().exponent
+    if not isinstance(exponent, int) or exponent >= 0:
+        return False
+    places = Decimal(1).scaleb(exponent)
+    return any((Decimal(size) * divisor).quantize(places) == metric for size in inches)
 
 
 def _screen_with_prose(
@@ -1219,6 +1289,8 @@ def _screen_with_prose(
             r"(?<![0-9.])([0-9]+(?:\.[0-9]+)?)\s*(cm|mm)\b", _parse_text(text), re.I
         ):
             divisor = Decimal("2.54") if metric[2].lower() == "cm" else Decimal("25.4")
+            if _restates_inches(Decimal(metric[1]), divisor, sizes):
+                continue
             sizes.add(format((Decimal(metric[1]) / divisor).normalize(), "f"))
     source_label = (
         "; ".join(label for label, _, _ in prose) + " [PRODUCT_DESCRIPTION; explicit inches]"
@@ -1521,6 +1593,70 @@ def _title_code_suffix(title: str, code: str) -> str:
     return ""
 
 
+@dataclass(frozen=True)
+class _SpacedCode:
+    code: str  # The code with hyphens, from the title's own tokens ("15-FC0933AU").
+    written: str  # The title wording ("15 FC0933AU").
+    where: str  # The page statement that writes the hyphenated form.
+    title: str  # The title with the wording replaced by the code, for the suffix check.
+
+
+# Manufacturer code shapes that retailer titles write with spaces (2026-11-03). Only a listed brand
+# and shape is read: a product URL joins every title word with hyphens, so without a reviewed shape
+# any two neighbouring words with digits would look hyphenated ("lenovo ... 14akp10 83hx00bcph", a
+# model name beside a machine-type number). HP notebook codes: 15-fc0933AU, 14-ep0445TU, 15s-eq1xxx.
+SPACED_CODE_SHAPES: dict[str, re.Pattern[str]] = {
+    "hp": re.compile(r"[0-9]{2}[a-z]?-[a-z]{2}[0-9]{4}[a-z]{0,3}", re.I),
+}
+
+
+def _spaced_title_code(offer: OfferObservation) -> _SpacedCode | None:
+    """A title code written with spaces where the manufacturer writes hyphens (2026-11-03).
+
+    PC Express titles HP 15-fc0933AU as ``HP 15 FC0933AU (DM8L7PA)``. Two or three adjacent title
+    words, each with a digit, that read as a code of the brand's reviewed shape
+    (``SPACED_CODE_SHAPES``) when joined by hyphens are that code only when the *same* characters
+    are also written hyphenated elsewhere on the page: the product URL path, the retailer's
+    configuration line, or an identifier. The characters always come from the title; the other
+    statement only confirms where the hyphens go, so the URL still never supplies a model. Exactly
+    one such candidate, and only when the title has no hyphenated code of its own. ``Ryzen 5
+    7530U`` (a word without a digit), ``i5 13420H`` (a processor number), ``16GB 512GB``
+    (quantities) and any brand without a reviewed shape are never candidates.
+    """
+    shape = SPACED_CODE_SHAPES.get((offer.details.brand if offer.details else "").casefold())
+    if shape is None:
+        return None
+    title = normalize_hyphens(_MARKS.sub(" ", offer.raw_title))
+    sources = (
+        ("the product URL path", urlsplit(offer.offer_url).path),
+        ("the configuration line", offer.raw_configuration_text),
+        *(("an identifier", value)
+          for scope, _, value in (offer.details.scoped_evidence if offer.details else ())
+          if scope == IDENTIFIER),
+    )
+    found: dict[str, _SpacedCode] = {}
+    for segment in _TITLE_SEGMENT_BREAK.split(title):
+        words = segment.split()
+        for size in (2, 3):
+            for start in range(len(words) - size + 1):
+                window = words[start:start + size]
+                if not all(re.fullmatch(r"[A-Za-z0-9]+", w) and re.search(r"[0-9]", w)
+                           for w in window):
+                    continue
+                code = "-".join(window)
+                if (not shape.fullmatch(code) or model_codes(code) != [code]
+                        or is_part_number_shape(code)):
+                    continue
+                pattern = re.compile(rf"(?<![A-Za-z0-9]){re.escape(code)}(?![A-Za-z0-9])", re.I)
+                where = next((name for name, text in sources
+                              if pattern.search(normalize_hyphens(text))), "")
+                if where:
+                    written = " ".join(window)
+                    found.setdefault(code.casefold(), _SpacedCode(
+                        code, written, where, title.replace(written, code, 1)))
+    return next(iter(found.values())) if len(found) == 1 else None
+
+
 def _model_claim_relation(claim: str, code: str) -> str:
     """How a labeled model claim relates to a full title code.
 
@@ -1556,6 +1692,10 @@ def _url_model_conflict(code: str, url: str) -> str:
         if match.start() and path[match.start() - 1].isalnum():
             continue
         if match[1] != segments[-1]:
+            # Digits only after a stem such as ``15-`` ("hp-15-fc0933au-...-15-6-fhd") are the
+            # slug's screen size or a count, not another final segment of a lettered code.
+            if match[1].isdigit() and not segments[-1].isdigit():
+                continue
             return stem + match[1]
     return ""
 
@@ -1579,6 +1719,74 @@ def _url_slug_differs(
         "model", ExtractionStatus.SUPPORTING, f"URL: {differs}; page model: {model}",
         "offer URL path [wording retained; checked only; never a model source]",
         offer.offer_url, SCOPE_URL,
+    ))
+
+
+@dataclass(frozen=True)
+class MarketedScreenClass:
+    """One reviewed product whose marketed screen class is not its measured diagonal."""
+
+    brand: str
+    product: str  # A registered product name (config/product_name_registry.csv).
+    chip: str  # Canonical ``cpu_series`` that establishes the generation.
+    marketed: str  # The class titles use ("13").
+    diagonal: str  # The diagonal the manufacturer states ("13.6").
+    source: str  # The manufacturer statement that backs the entry.
+
+
+# Model-specific, manufacturer-backed entries only (2026-11-03; the philosophy of the catalog
+# proposal ``SCREEN_CLASS_VS_DIAGONAL`` in catalog_proposals.py). A product title says "13" and the
+# manufacturer's own specification says 13.6; for exactly these identities that is one display, not
+# a contradiction. It is never a tolerance: 13 is not 13.6 for any other model, 15 is not 15.6 for
+# a laptop that is not listed, and the page's own diagonal must still be the listed one. Add a row
+# only with the manufacturer's statement for that exact product and chip.
+MARKETED_SCREEN_CLASSES: tuple[MarketedScreenClass, ...] = (
+    MarketedScreenClass(
+        "Apple", "MacBook Air", "Apple M5", "13", "13.6",
+        "Apple Tech Specs, MacBook Air 13-inch (M5): 'Liquid Retina display 13.6-inch "
+        "(diagonal) LED-backlit display with IPS technology' (reproduced on the saved "
+        "DataBlitz page of 2026-11-03, content sha256 c842e02f...)",
+    ),
+)
+SCREEN_CLASS_NORMALIZED = "SCREEN_CLASS_NORMALIZED"
+
+
+def _marketed_screen_class(
+    offer: OfferObservation, evidence: list[FieldExtraction], stated: set[str],
+    item: FieldExtraction,
+) -> MarketedScreenClass | None:
+    """The reviewed entry that makes a title's screen class agree with the page's diagonal.
+
+    All of these must hold: the title states exactly the entry's marketed class, the page's own
+    specification states exactly the entry's diagonal, the brand is the entry's, the title names
+    exactly the entry's registered product, and the page's processor series is the entry's chip.
+    Anything else is the ordinary title/specification conflict.
+    """
+    brand = offer.details.brand if offer.details else ""
+    names = default_registry().title_product_names(offer.raw_title)
+    chip = next((e.value for e in evidence if e.field == "cpu_series"
+                 and e.status is ExtractionStatus.EXTRACTED), "")
+    if item.status is not ExtractionStatus.EXTRACTED or len(names) != 1:
+        return None
+    return next((
+        entry for entry in MARKETED_SCREEN_CLASSES
+        if stated == {entry.marketed} and item.value == entry.diagonal
+        and brand.casefold() == entry.brand.casefold() and names[0].name == entry.product
+        and chip == entry.chip
+    ), None)
+
+
+def _note_screen_class(
+    offer: OfferObservation, entry: MarketedScreenClass, supporting: list[FieldExtraction],
+    notes: list[str],
+) -> None:
+    if SCREEN_CLASS_NORMALIZED in notes:
+        return
+    notes.append(SCREEN_CLASS_NORMALIZED)
+    supporting.append(FieldExtraction(
+        "screen_size_in", ExtractionStatus.SUPPORTING, entry.marketed,
+        f"title [{SCREEN_CLASS_NORMALIZED}: marketed class for {entry.product} ({entry.chip}); "
+        f"physical diagonal {entry.diagonal}; {entry.source}]", offer.raw_title, SCOPE_TITLE,
     ))
 
 
@@ -1718,6 +1926,11 @@ def _apply_title_fields(
                     "title [installed components summed]", title, SCOPE_TITLE,
                 ))
         elif item.status is ExtractionStatus.EXTRACTED and stated != {item.value}:
+            if item.field == "screen_size_in" and (
+                entry := _marketed_screen_class(offer, evidence, stated, item)
+            ):
+                _note_screen_class(offer, entry, supporting, notes)
+                continue
             evidence[index] = FieldExtraction(
                 item.field, ExtractionStatus.AMBIGUOUS,
                 f"{item.value} | title: {'; '.join(sorted(stated))}",
@@ -1834,6 +2047,10 @@ def _apply_title_model(
             return
         _url_slug_differs(offer, model.value, supporting, notes)
         return
+    spaced = None
+    if not codes and model.status is ExtractionStatus.MISSING:
+        spaced = _spaced_title_code(offer)
+        codes = [spaced.code] if spaced else []
     if model.status not in {
         ExtractionStatus.MISSING, ExtractionStatus.EXTRACTED, ExtractionStatus.NOT_EXTRACTED,
     } or not codes:
@@ -1858,7 +2075,7 @@ def _apply_title_model(
                 model.source_label, model.source_text,
             )
         return
-    suffix = _title_code_suffix(offer.raw_title, code)
+    suffix = _title_code_suffix(spaced.title if spaced else offer.raw_title, code)
     if suffix:
         notes.append("TITLE_MODEL_UNEXPLAINED_SUFFIX")
         supporting.append(FieldExtraction(
@@ -1879,6 +2096,10 @@ def _apply_title_model(
         stated = title_claims.get(item.field, set())
         if not stated or stated == {item.value}:
             continue
+        if item.field == "screen_size_in" and not shared and _marketed_screen_class(
+            offer, evidence, stated, item
+        ):
+            continue
         if shared and item.field in {"ram_capacity_gb", "storage_capacity_gb"}:
             # The parent title describes the shared product, not the confirmed selection.
             notes.append(f"SHARED_TITLE_DIFFERS_{item.field.upper()}")
@@ -1898,6 +2119,10 @@ def _apply_title_model(
     _url_slug_differs(offer, code, supporting, notes)
     corroboration = "; ".join(f"{item.field}: {item.source_label}" for item in others)
     scope = f"SHARED_PRODUCT; {shared_locator}; " if shared else ""
+    if spaced:
+        scope += (f"{TITLE_MODEL_SPACING}: title '{spaced.written}' read as {code}, hyphenated "
+                  f"form also written in {spaced.where}; ")
+        notes.append(TITLE_MODEL_SPACING)
     evidence[evidence.index(model)] = FieldExtraction(
         "model", ExtractionStatus.EXTRACTED, code,
         f"title [{TITLE_MODEL_CORROBORATED}; {scope}corroborated by {corroboration}]",
@@ -1978,6 +2203,10 @@ def _apply_title_product_name(
             continue  # A bound picker option governs this field on a shared parent page.
         stated = title_claims.get(item.field, set())
         if stated and stated != {item.value}:
+            if item.field == "screen_size_in" and not shared and _marketed_screen_class(
+                offer, evidence, stated, item
+            ):
+                continue
             notes.append(f"TITLE_SPEC_CONFLICT_{item.field.upper()}")
             return
     corroboration = "; ".join(f"{item.field}: {item.source_label}" for item in others)
@@ -2090,12 +2319,20 @@ def extract_offer_attributes(offer: OfferObservation) -> ExtractedAttributes:
         if not _GENERIC_CPU_CLAIM.match(_parse_text(value))
     ]
     generic_cpu_rows = [row for row in rows(labels.cpu) if row not in cpu_rows]
+    repaired_cpu: list[str] = []
+
+    def cpu_value(text: str) -> set[str]:
+        forms = _installed_cpu_series(text)
+        if not forms and (forms := _repaired_cpu_series(text, offer.raw_title)):
+            repaired_cpu.append(text)
+        return forms
+
     core_plan: tuple[
         tuple[str, list[tuple[str, str]], Callable[..., set[str]], bool, bool], ...
     ] = (
         ("model", rows(labels.model | labels.model_code), model_value, False, True),
         ("screen_size_in", display_rows, _screen_size_row, False, True),
-        ("cpu_series", cpu_rows, _installed_cpu_series, False, False),
+        ("cpu_series", cpu_rows, cpu_value, False, False),
         ("ram_capacity_gb", rows(labels.memory), _ram, True, False),
         ("storage_capacity_gb", rows(labels.storage), _storage, True, False),
     )
@@ -2125,6 +2362,11 @@ def extract_offer_attributes(offer: OfferObservation) -> ExtractedAttributes:
             field, field_rows, parse, required=True, one_row=one_row, with_label=with_label
         )
         assert item is not None
+        if repaired_cpu and field == "cpu_series" and item.status is ExtractionStatus.EXTRACTED:
+            item = replace(
+                item, source_label=f"{item.source_label} [{CPU_MARK_REPAIRED}: damaged trademark "
+                "mark dropped, same series stated in the title]")
+            notes.append(CPU_MARK_REPAIRED)
         if shared:
             # Shared fields stay supporting; CPU/screen may be inherited only with the
             # complete confirmed RAM/storage-only matrix required by owner policy.
@@ -2414,7 +2656,7 @@ def extract_offer_attributes(offer: OfferObservation) -> ExtractedAttributes:
         if scope == PRODUCT_DESCRIPTION:
             sizes = [
                 _inches(match[1])
-                for match in _SCREEN_SIZE.finditer(_parse_text(value))
+                for match in _SCREEN_SIZE.finditer(_without_accessory_sizes(_parse_text(value)))
                 if low <= Decimal(match[1]) <= high
             ]
             for size in dict.fromkeys(sizes):

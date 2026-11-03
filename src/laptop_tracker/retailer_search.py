@@ -52,6 +52,20 @@ class SearchLayoutError(ValueError):
     """The response is not a search result page this module recognizes."""
 
 
+# Routes (2026-11-03). The native route is the retailer's own search (WooCommerce results page,
+# Shopify predictive search). The storefront route is the Shopify product-only search results page
+# (``/search?q=<query>&type=product``), an explicit opt-in second route with its own request cap.
+NATIVE_ROUTE = ""
+STOREFRONT_ROUTE = "STOREFRONT_SEARCH_PAGE"
+# How Shopify predictive search treats products that cannot be bought (2026-11-03). ``last`` lists
+# them after the available ones, so a page capped at ten results can cut them off; ``show`` keeps
+# them in relevance order. Neither makes the cap go away: the response is never exhaustive.
+UNAVAILABLE_LAST = "last"
+UNAVAILABLE_SHOW = "show"
+UNAVAILABLE_MODES = (UNAVAILABLE_LAST, UNAVAILABLE_SHOW)
+_UNAVAILABLE_PARAMETER = "resources[options][unavailable_products]"
+
+
 @dataclass(frozen=True)
 class SearchHit:
     """One product result as the retailer's search listed it (discovery evidence only)."""
@@ -68,6 +82,10 @@ class SearchHit:
     available: str = ""
     price_text: str = ""
     summary: str = ""
+    # The ``variant`` the result link names, when it names one (2026-11-03). Predictive search
+    # normally lists products, not variants; when a link does name a variant, two links to the
+    # same product with different variants stay two leads (``unique_hits``).
+    variant_id: str = ""
 
 
 @dataclass(frozen=True)
@@ -91,11 +109,19 @@ class SearchMethod:
     notes: str
     multi_variant_collection: bool = False  # The adapter can bind a ``?variant=`` page.
 
-    def first_page_url(self, query: str) -> str:
+    @property
+    def is_shopify(self) -> bool:
+        return self.kind == "shopify_predictive_json"
+
+    def first_page_url(self, query: str, route: str = NATIVE_ROUTE,
+                       unavailable: str = UNAVAILABLE_LAST) -> str:
         if self.kind == "woocommerce_html":
             return f"https://{self.host}/?s={quote_plus(query)}&post_type=product"
+        if route == STOREFRONT_ROUTE:
+            return f"https://{self.host}/search?{urlencode({'q': query, 'type': 'product'})}"
         params = {
             "q": query, "resources[type]": "product", "resources[limit]": str(self.page_size),
+            _UNAVAILABLE_PARAMETER: unavailable,
         }
         return f"https://{self.host}/search/suggest.json?{urlencode(params)}"
 
@@ -109,9 +135,11 @@ class SearchMethod:
             return ""
         return f"https://{self.host}{parts.path}"
 
-    def parse(self, page: FetchedPage) -> ParsedSearchPage:
+    def parse(self, page: FetchedPage, route: str = NATIVE_ROUTE) -> ParsedSearchPage:
         if self.kind == "woocommerce_html":
             return _parse_woocommerce(self, page)
+        if route == STOREFRONT_ROUTE:
+            return _parse_shopify_search_page(self, page)
         return _parse_shopify_predictive(self, page)
 
 
@@ -302,8 +330,100 @@ def _parse_shopify_predictive(method: SearchMethod, page: FetchedPage) -> Parsed
             available={True: "TRUE", False: "FALSE"}.get(available, ""),
             price_text=_plain(item.get("price"), 40),
             summary=_plain(item.get("body")),
+            variant_id=_variant_of(item["url"]),
         ))
     return ParsedSearchPage(tuple(hits), "", filtered, len(products) >= method.page_size)
+
+
+def _variant_of(link: str) -> str:
+    """The ``variant`` query value of a result link, or ``""``."""
+    values = dict(parse_qsl(urlsplit(html.unescape(link.strip())).query)).get("variant", "")
+    return values.strip()
+
+
+# Shopify storefront search page (opt-in second route)
+
+
+class _SearchPageParser(HTMLParser):
+    """Product links, their visible titles, and the ``next`` page link of a Shopify search page."""
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.link: str | None = None
+        self.text: list[str] = []
+        self.title_attr = ""
+        self.cards: list[tuple[str, str]] = []
+        self.next_links: list[str] = []
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        attributes = {name: value or "" for name, value in attrs}
+        rel = attributes.get("rel", "").split()
+        classes = attributes.get("class", "").split()
+        if tag in {"a", "link"} and attributes.get("href") and (
+            "next" in rel or any(c in {"pagination__next", "next"} for c in classes)
+        ):
+            self.next_links.append(attributes["href"])
+        if tag == "a" and attributes.get("href") and "/products/" in attributes["href"]:
+            self.link = attributes["href"]
+            self.title_attr = attributes.get("title", "")
+            self.text = []
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag == "a" and self.link is not None:
+            self.cards.append((self.link, clean_text("".join(self.text)) or self.title_attr))
+            self.link = None
+
+    def handle_data(self, data: str) -> None:
+        if self.link is not None:
+            self.text.append(data)
+
+
+_NO_PRODUCT_RESULTS = re.compile(
+    r"no\s+(?:results|products)\s+found|did\s+not\s+match\s+any|no\s+results\s+for", re.I)
+
+
+def _parse_shopify_search_page(method: SearchMethod, page: FetchedPage) -> ParsedSearchPage:
+    """Product links of the product-only storefront search page, in listed order.
+
+    Several anchors point at one product (image, title); the longest visible title wins. A page
+    with neither product links nor a "no results" statement is not readable (DataBlitz renders
+    its search page in the browser, so it has no result links): ``SearchLayoutError``.
+    """
+    if "html" not in page.content_type.lower():
+        raise SearchLayoutError("The storefront search page is not HTML.")
+    text = page.text()
+    parser = _SearchPageParser()
+    parser.feed(text)
+    parser.close()
+    merged: dict[str, tuple[str, str, str]] = {}
+    filtered = 0
+    for link, title in parser.cards:
+        product = method.canonical_product_url(link, page.final_url)
+        if not product:
+            filtered += 1
+            continue
+        variant = _variant_of(link)
+        key = product + (f"?variant={variant}" if variant else "")
+        if key not in merged or len(title) > len(merged[key][1]):
+            merged[key] = (product, title, urljoin(page.final_url, html.unescape(link)))
+    if not merged:
+        if _NO_PRODUCT_RESULTS.search(text):
+            return ParsedSearchPage(())
+        raise SearchLayoutError("The storefront search page lists no product links and no "
+                                "'no results' statement (it may be rendered in the browser).")
+    page_number = int(dict(parse_qsl(urlsplit(page.requested_url).query)).get("page", "1") or 1)
+    hits = [
+        SearchHit(method.retailer_id, product, title or product.rsplit("/", 1)[-1], listed,
+                  page_number, number, variant_id=_variant_of(listed))
+        for number, (product, title, listed) in enumerate(merged.values(), start=1)
+    ]
+    next_url = ""
+    for link in parser.next_links:
+        candidate = urljoin(page.final_url, html.unescape(link))
+        if url_host(candidate) == method.host and "q=" in urlsplit(candidate).query:
+            next_url = candidate
+            break
+    return ParsedSearchPage(tuple(hits), next_url, filtered)
 
 
 # Request budget
@@ -353,6 +473,7 @@ class SearchQuery:
     text: str
     verified_identifier: bool
     basis: str
+    route: str = NATIVE_ROUTE  # NATIVE_ROUTE or STOREFRONT_ROUTE.
 
 
 TIER_MODEL_CODE = "1_FULL_MODEL_CODE"
@@ -370,22 +491,68 @@ TIER_NAME_SPECS = "3_PRODUCT_NAME_WITH_SPECS"
 # distinctive segment. They are search text only: the page must still show the complete code.
 TIER_MODEL_CODE_SPACED = "1_FULL_MODEL_CODE_SPACED"
 TIER_CODE_SEGMENT = "3_MODEL_CODE_SEGMENT"
+# Punctuation and spacing spellings of one code (2026-11-03): ``15-fc0933AU`` is also searched as
+# ``15 fc0933AU`` (spaced), ``15fc0933AU`` (compact) and, for a spaced catalog value,
+# ``15-fc0933AU`` (hyphenated). Search text only, like the spaced spelling.
+TIER_MODEL_CODE_COMPACT = "1_FULL_MODEL_CODE_COMPACT"
+TIER_MODEL_CODE_HYPHENATED = "1_FULL_MODEL_CODE_HYPHENATED"
+# A product-name target's name with its processor and no capacities (2026-11-03). Retailer titles
+# often omit RAM (``APPLE MacBook Neo A18 Pro 256GB``), so the name-with-capacities query returns
+# nothing; the narrower query also keeps the result count under the predictive-search cap.
+TIER_NAME_CPU = "2_PRODUCT_NAME_CPU"
+# The product-only storefront search page of a Shopify store: an explicit second route, off by
+# default, with its own request cap (``--max-storefront-search-requests``).
+TIER_STOREFRONT = "6_STOREFRONT_SEARCH_PAGE"
 # A code target without a recorded series (2026-10-22): brand, recorded processor model and
 # capacities instead of the skipped family tiers.
 TIER_BRAND_CPU_SPECS = "5_BRAND_CPU_MODEL_WITH_SPECS"
 FALLBACK_TIERS = frozenset({TIER_PART_NUMBER, TIER_MODEL_SPECS, TIER_FAMILY, TIER_FAMILY_SPECS,
                             TIER_NAME_SPECS, TIER_MODEL_CODE_SPACED, TIER_CODE_SEGMENT,
-                            TIER_BRAND_CPU_SPECS})
+                            TIER_BRAND_CPU_SPECS, TIER_MODEL_CODE_COMPACT,
+                            TIER_MODEL_CODE_HYPHENATED, TIER_NAME_CPU, TIER_STOREFRONT})
 FIRST_TIERS = frozenset({TIER_MODEL_CODE, TIER_PRODUCT_NAME})
 # Tiers added to a job only when the complete code returned no result (discover_products.py).
-VARIANT_TIERS = frozenset({TIER_MODEL_CODE_SPACED, TIER_CODE_SEGMENT})
-_CODE_PUNCTUATION = re.compile(r"(?<=[0-9A-Za-z])[-/_.](?=[0-9A-Za-z])")
+VARIANT_TIERS = frozenset({TIER_MODEL_CODE_SPACED, TIER_MODEL_CODE_COMPACT,
+                           TIER_MODEL_CODE_HYPHENATED, TIER_CODE_SEGMENT})
+_CODE_PUNCTUATION = re.compile(r"(?<=[0-9A-Za-z])[-‐-―−/_.](?=[0-9A-Za-z])")
 
 
 def spaced_code(code: str) -> str:
     """``B12UC-1432PH`` -> ``B12UC 1432PH``; ``""`` when the code has no inner punctuation."""
     spaced = _CODE_PUNCTUATION.sub(" ", code.strip())
     return spaced if spaced != code.strip() else ""
+
+
+def compact_code(code: str) -> str:
+    """``15-fc0933AU`` -> ``15fc0933AU``; ``""`` when the code has no inner punctuation or space."""
+    value = " ".join(code.split())
+    compact = re.sub(r"(?<=[0-9A-Za-z])[-‐-―−/_.\s](?=[0-9A-Za-z])", "", value)
+    return compact if compact != value else ""
+
+
+def hyphenated_code(code: str) -> str:
+    """``15 fc0933au`` -> ``15-fc0933au``: a spaced catalog value joined with hyphens, or ``""``
+    when it has no spaces (a code that already has punctuation is not re-punctuated)."""
+    value = " ".join(code.split())
+    if " " not in value or _CODE_PUNCTUATION.search(value):
+        return ""
+    return value.replace(" ", "-")
+
+
+def code_spellings(code: str) -> list[tuple[str, str]]:
+    """``[(tier, spelling)]``: the safe spacing and punctuation spellings of one verified code.
+
+    Case is presentation (search is case-insensitive) and dash style is folded by ``_query_key``;
+    only hyphen/space/none differ. Never a made-up code: every spelling is the same characters.
+    """
+    found = []
+    if spaced := spaced_code(code):
+        found.append((TIER_MODEL_CODE_SPACED, spaced))
+    if compact := compact_code(code):
+        found.append((TIER_MODEL_CODE_COMPACT, compact))
+    if hyphen := hyphenated_code(code):
+        found.append((TIER_MODEL_CODE_HYPHENATED, hyphen))
+    return found
 
 
 def distinctive_segment(code: str) -> str:
@@ -437,6 +604,9 @@ def _without_repeated_words(text: str) -> str:
     return " ".join(kept)
 
 
+without_repeated_words = _without_repeated_words
+
+
 def _query_key(text: str) -> str:
     """Case, spacing and dash style are presentation: ``FA607NUQ-RL011W`` and the same code with
     an en dash are one search. Punctuation that the store may tokenize differently (hyphen
@@ -453,7 +623,7 @@ _RECORDED_CODE_TIERS = frozenset({TIER_MODEL_CODE, TIER_MODEL_CODE_SPACED, TIER_
 def search_queries(
     target_id: str, retailer_id: str, *, model: str, part_number: str, brand: str, series: str,
     core: Mapping[str, str] | None = None, kind: str = "MODEL_CODE", cpu_model: str = "",
-    recorded_code: str = "",
+    recorded_code: str = "", storefront: bool = False,
 ) -> list[SearchQuery]:
     """Ordered, de-duplicated queries for one target (see ``_code_queries`` for code targets).
 
@@ -466,7 +636,9 @@ def search_queries(
     TARGET_MASTER ``manufacturer_model_code``: ``TUF A16`` records ``FA607NUQ-RL011W``). That
     code is searched first, with the same spellings as a code target (2026-10-22), before any
     name query; it is the only code ever taken from the catalog, never derived from a name.
-    Queries identical up to case, spacing and dash style are sent once.
+    Queries identical up to case, spacing and dash style are sent once. With ``storefront`` a
+    Shopify retailer also gets one product-only storefront search query (the complete code, or the
+    name with its processor) after every native query: a second route, never a replacement.
     """
     recorded = clean_text(recorded_code or "")
     if kind == "MODEL_CODE":
@@ -489,11 +661,22 @@ def search_queries(
         # catalog reconciliation; broader family tiers would only repeat them.
         queries = [q for q in queries if q.tier in {TIER_PRODUCT_NAME, TIER_NAME_SPECS,
                                                     TIER_PART_NUMBER} | _RECORDED_CODE_TIERS]
+    if storefront and SEARCH_METHODS[retailer_id].is_shopify and queries:
+        first = queries[0]
+        basis = ("complete model code on the Shopify product-only storefront search page"
+                 if first.tier == TIER_MODEL_CODE
+                 else "product name with processor on the Shopify product-only storefront "
+                      "search page")
+        text = first.text
+        if first.tier != TIER_MODEL_CODE:
+            text = next((q.text for q in queries if q.tier == TIER_NAME_CPU), first.text)
+        queries.append(SearchQuery(target_id, retailer_id, TIER_STOREFRONT, text,
+                                   first.verified_identifier, basis, STOREFRONT_ROUTE))
     unique: list[SearchQuery] = []
-    seen: set[str] = set()
+    seen: set[tuple[str, str]] = set()
     for query in queries:
-        key = _query_key(query.text)
-        if key and key not in seen:
+        key = (query.route, _query_key(query.text))
+        if key[1] and key not in seen:
             seen.add(key)
             unique.append(query)
     return unique
@@ -510,6 +693,12 @@ def _name_queries(target_id, retailer_id, *, model, part_number, brand, series, 
     if part_number.strip():
         queries.append(SearchQuery(target_id, retailer_id, TIER_PART_NUMBER, part_number.strip(),
                                    True, "manufacturer_part_number in TARGET_MASTER"))
+    named_cpu = _without_repeated_words(clean_text(f"{branded} {core.get('cpu_series', '')}"))
+    if named_cpu.casefold() != clean_text(branded).casefold():
+        queries.append(SearchQuery(
+            target_id, retailer_id, TIER_NAME_CPU, named_cpu, False,
+            "product name plus processor, no capacities (retailer titles often omit RAM; "
+            "a narrower search keeps the result count under the predictive-search cap)"))
     detailed = _without_repeated_words(clean_text(
         f"{branded} {core.get('cpu_series', '')} {capacities}"))
     queries.append(SearchQuery(target_id, retailer_id, TIER_NAME_SPECS, detailed, False,
@@ -553,10 +742,15 @@ def _code_queries(
                                  core.get("storage_capacity_gb", ""))
     queries = [SearchQuery(target_id, retailer_id, TIER_MODEL_CODE, model, True,
                            "complete model code from TARGET_MASTER")]
-    if spaced := spaced_code(model):
-        queries.append(SearchQuery(target_id, retailer_id, TIER_MODEL_CODE_SPACED, spaced, True,
-                                   "complete model code with spaces for punctuation (store "
-                                   "search tokenization)"))
+    for tier, spelling in code_spellings(model):
+        queries.append(SearchQuery(
+            target_id, retailer_id, tier, spelling, True,
+            {TIER_MODEL_CODE_SPACED: "complete model code with spaces for punctuation (store "
+                                     "search tokenization)",
+             TIER_MODEL_CODE_COMPACT: "complete model code without punctuation or spaces (store "
+                                      "search tokenization)",
+             TIER_MODEL_CODE_HYPHENATED: "complete model code with hyphens for spaces (store "
+                                         "search tokenization)"}[tier]))
     if part_number.strip():
         queries.append(SearchQuery(target_id, retailer_id, TIER_PART_NUMBER, part_number.strip(),
                                    True, "manufacturer_part_number in TARGET_MASTER"))
@@ -614,12 +808,29 @@ class SearchRecord:
     # Why this query ran (or was skipped), e.g. which earlier results left no plausible candidate.
     run_reason: str = ""
 
+    @property
+    def completeness(self) -> str:
+        """Whether this response can be read as the retailer's full answer to the query.
+
+        Predictive search lists at most ten products and has no next page: ten results mean more
+        may exist (``INCOMPLETE_RESULT_CAP``) and fewer than ten are still a relevance-ranked
+        suggestion list, never a catalog scan. A results page whose next page was not read is
+        ``INCOMPLETE_PAGES_NOT_READ``. A response that was not read (error, not sent) says so.
+        """
+        if self.outcome in {RESULTS, NO_RESULTS}:
+            if self.possibly_truncated:
+                return ("INCOMPLETE_PAGES_NOT_READ" if self.next_url else "INCOMPLETE_RESULT_CAP")
+            return "COMPLETE_FOR_QUERY"
+        return "NOT_READ"
+
 
 SEARCH_RECORD_COLUMNS: tuple[str, ...] = (
     "target_id", "retailer_id", "tier", "query", "verified_identifier", "page_number", "url",
     "outcome", "http_status", "final_url", "retrieved_at", "attempts", "content_sha256",
     "evidence_file", "hits", "filtered_links", "possibly_truncated", "next_url", "message",
     "cache", "run_reason",
+    # Route and completeness (2026-11-03): additive columns.
+    "route", "completeness",
 )
 
 
@@ -647,27 +858,37 @@ def search_record_row(record: SearchRecord) -> dict[str, str]:
         "message": record.message,
         "cache": record.cache,
         "run_reason": record.run_reason,
+        "route": query.route or "NATIVE",
+        "completeness": record.completeness,
     }
 
 
-def search_cache_key(url: str) -> str:
+def search_cache_key(url: str, *, legacy: bool = False) -> str:
     """One key per distinct search: host case, the search words' case and spacing ignored
-    (``IdeaPad`` and ``Ideapad`` are one search on these stores)."""
+    (``IdeaPad`` and ``Ideapad`` are one search on these stores). ``legacy`` also drops the
+    predictive search's ``unavailable_products`` option, the key of a response saved before that
+    option was sent (2026-11-03; those stores already listed unavailable products last)."""
     parts = urlsplit(url)
     query = [
         (name, " ".join(value.casefold().split()) if name in {"q", "s"} else value)
         for name, value in parse_qsl(parts.query, keep_blank_values=True)
+        if not (legacy and name == _UNAVAILABLE_PARAMETER)
     ]
     return urlunsplit((parts.scheme, parts.netloc.lower(), parts.path, urlencode(query), ""))
 
 
 def unique_hits(records: Sequence[SearchRecord]) -> list[tuple[SearchHit, list[SearchRecord]]]:
-    """Each product URL once, with every search request that listed it (duplicates merged)."""
-    merged: dict[str, tuple[SearchHit, list[SearchRecord]]] = {}
+    """Each product URL once, with every search request that listed it (duplicates merged).
+
+    A result link that names a ``variant`` is a lead of its own: the same product listed with two
+    variants stays two entries, and a variant link never merges into the bare product (2026-11-03).
+    """
+    merged: dict[tuple[str, str], tuple[SearchHit, list[SearchRecord]]] = {}
     for record in records:
         for hit in record.hit_items:
-            if hit.product_url in merged:
-                merged[hit.product_url][1].append(record)
+            key = (hit.product_url, hit.variant_id)
+            if key in merged:
+                merged[key][1].append(record)
             else:
-                merged[hit.product_url] = (hit, [record])
+                merged[key] = (hit, [record])
     return list(merged.values())

@@ -11,7 +11,7 @@ Dates are recorded as **Date not recorded** when the repository or project conte
 | Default runs are local-output-only; Google Sheets writes require `--write-sheets`. | Date not recorded | Make source processing safe by default and make publication deliberate. | The write scope and guarded writer are reached only through explicit opt-in. | ACTIVE; code and safety tests present, live output write untested. |
 | `TARGET_MASTER` is intended to contain validated laptop configurations. | Date not recorded | Provide a stable target identity for later retailer comparisons. | Later scraping and matching should use reviewed configurations, not unstructured listing titles. | PLANNED; current worksheet was found empty and is not consumed by the code. |
 | Ranking GMV is M-1 GMV plus current MTD GMV. | Date not recorded | Combine the previous full calendar month with current-month activity. | Each model's period GMV is summed before ranking. | ACTIVE; implemented and tested. |
-| Only eligible models present in MTD may rank. | Date not recorded | Keep the target list current and restrict it to laptop candidates. | M-1-only models remain in the model summary but do not qualify. | ACTIVE; implemented and tested. |
+| Only eligible models present in MTD may rank. | Date not recorded | Keep the target list current and restrict it to laptop candidates. | M-1-only models remain in the model summary but do not qualify. | **SUPERSEDED 2026-11-03** by the union rule below (eligible models present in M-1 *or* MTD rank). |
 | Rank by ranking GMV descending, then MTD GMV descending, then `model_id` ascending. | Date not recorded | Make ties reproducible. | Repeated runs over the same data use stable order. | ACTIVE; implemented and tested. |
 | Collapse exact duplicate rows under `(period_month, shop_id, item_id, model_id)`; quarantine conflicting duplicates. | Date not recorded | Avoid double-counting exact repeats and avoid guessing when values disagree. | Exact copies retain one row; conflicts require fingerprint-matched `EXCLUDE_KEY` or `KEEP_SOURCE_ROW` decisions. Unresolved duplicate or model-identity conflicts block publication. | ACTIVE; implemented; the 21 historical conflicts in the latest run have recorded `EXCLUDE_KEY` decisions. Future unresolved or stale conflicts still block publication. |
 | Select an MTD price; never average prices. | Date not recorded | Price averaging can create a value that was never observed. | One distinct MTD price is selected; multiple distinct prices are flagged and left unselected. | ACTIVE; implemented and tested. |
@@ -653,6 +653,28 @@ identities.** Full specification: [CLOSE_ALTERNATIVES_2026-10-27.md](CLOSE_ALTER
   `mapping_exclusions.csv` grouping the excluded variations by mapping failure.
 - **Effect (offline, 2026-11-03 catalog).** 187 eligible, 53 verified, 53 selected (shortfall 47),
   40 contexts. Details: [MAPPED_TOP_100_2026-11-03.md](MAPPED_TOP_100_2026-11-03.md).
+
+### Selection universe: eligible variations present in either month (owner decision, 2026-11-03)
+
+- **Decision.** The Top 100 is the first 100 eligible Shopee variations with a valid configuration
+  mapping that appear in **M-1 or MTD**, ranked by the established M-1 + MTD GMV metric. This
+  explicitly supersedes the earlier requirement that a variation have an MTD record (and the
+  `Only eligible models present in MTD may rank` row of the decision table).
+- **Pool.** The union of both reporting months; existing eligibility, quarantine and content-based
+  duplicate decisions are unchanged; mappings come from fresh `SOURCE_MODEL_MAP` / `TARGET_MASTER`;
+  the qualifying-mapping filter runs before the 100-row limit; distinct seller variations stay
+  separate; `MATCH_REVIEW` completion, retailer coverage and an MTD price are not requirements; a
+  shortfall is reported, never padded.
+- **Missing months.** A missing monthly record is not an observed zero and not proof the listing is
+  inactive. `present_in_m_minus_1` / `present_in_mtd` and `m_minus_1_status` / `mtd_status` are kept
+  on every row; a missing month adds `0` to the ranking arithmetic only, labelled
+  `NO_RECORD_TREATED_AS_ZERO` (a note on the Sheets GMV cell says so).
+- **Prices.** Each variation's own latest valid price: its MTD record's price (dated by the sales
+  extract), else its M-1 record's price, dated by that monthly source record
+  (`shopee_price_date_basis = M_MINUS_1_RECORD_DATE`) with its freshness status (a price older than
+  seven days at the cutoff is shown `SNAPSHOT_PRICE_STALE`). An October price is never relabelled as a
+  November observation and no other seller's price is substituted; a missing price never removes a
+  ranked variation. Details: MAPPED_TOP_100_2026-11-03.md.
 
 ### Selected-variation precedence and the 53-row investigation (2026-11-03)
 

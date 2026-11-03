@@ -123,3 +123,20 @@ def test_missing_variation_text_reads_as_unknown(variation) -> None:
     readings = read_variation_specs("", variation)
 
     assert {r.source for r in readings.values()} == {UNKNOWN}
+
+
+def test_a_storage_amount_after_a_ram_or_ddr_label_is_not_read_as_memory() -> None:
+    # Real titles (2026-11-03): the 512GB is the drive; the memory is 16GB / 8GB.
+    asus = read_variation_specs("", "ASUS Vivobook 14 Core 5 16GB(2X8GB) DDR4 512GB M.2")
+    acer = read_variation_specs("", 'ACER Aspire Lite 14 R3 5300U 8GBRAM 512GB SSD 14" WUXGA')
+
+    assert asus["ram_capacity_gb"].value != "512" and asus["storage_capacity_gb"].value == "512"
+    assert acer["ram_capacity_gb"].value == "8" and acer["storage_capacity_gb"].value == "512"
+    matching = target(cpu_series="Core 5", ram_capacity_gb="16", storage_capacity_gb="512")
+    assert spec_conflicts(asus, matching) == []
+    assert (
+        spec_conflicts(
+            acer, target(screen_size_in="14", ram_capacity_gb="8", storage_capacity_gb="512")
+        )
+        == []
+    )

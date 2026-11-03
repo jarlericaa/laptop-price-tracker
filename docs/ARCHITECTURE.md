@@ -161,7 +161,7 @@ Validation runs on local CSV exports or on read-only sheet reads; nothing writes
 5. The pipeline detects the latest valid month and its preceding calendar month, then checks that the latest month is current in Manila time unless freshness checking is disabled.
 6. Model identity conflicts are excluded. The remaining rows are classified using `eligibility_rules.csv` and `eligibility_decisions.csv`.
 7. `aggregate_models()` calculates M-1 and MTD GMV by model, sums them for ranking GMV, selects one MTD price only when exactly one distinct value exists, and marks eligibility disagreements as `REVIEW`.
-8. `rank_eligible_models()` retains `ELIGIBLE` models present in MTD and orders them deterministically. `top_100()` selects at most 100.
+8. `rank_eligible_models()` retains `ELIGIBLE` models present in M-1 or MTD (since 2026-11-03; presence flags and `NO_RECORD_TREATED_AS_ZERO` statuses are kept) and orders them deterministically. `top_100()` selects at most 100.
 9. The pipeline saves local files and a run summary. In the CLI path, any unresolved duplicate or model-identity conflict then blocks a successful run before optional Google Sheets writes.
 
 ## Google Sheets integration and authentication

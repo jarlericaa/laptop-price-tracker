@@ -1,4 +1,14 @@
-"""Model-level M-1/MTD GMV aggregation, price selection, and deterministic ranking."""
+"""Model-level M-1/MTD GMV aggregation, price selection, and deterministic ranking.
+
+Owner decision 2026-11-03 (superseding the earlier rule that a model needs an MTD record):
+the ranking pool is the ``ELIGIBLE`` models present in **either** reporting month. A month
+without a record is not an observed zero and not proof that the listing is inactive: the
+presence flags ``present_in_m_minus_1`` / ``present_in_mtd`` and the statuses
+``m_minus_1_status`` / ``mtd_status`` keep the underlying missing-data fact, and a missing
+month contributes ``0`` to ``ranking_gmv_usd`` only as labelled ranking arithmetic
+(``NO_RECORD_TREATED_AS_ZERO``). The shown price is the model's own latest valid price: the
+MTD record's, else the M-1 record's, with its period, record date and basis kept.
+"""
 
 from __future__ import annotations
 
@@ -30,7 +40,19 @@ MODEL_SUMMARY_COLUMNS = [
     "mtd_price_values",
     "matched_include_rule",
     "matched_exclude_rule",
+    # Added 2026-11-03 (appended so earlier consumers keep their columns).
+    "present_in_m_minus_1",
+    "m_minus_1_status",
+    "mtd_status",
+    "price_period_month",
+    "price_record_date",
+    "price_basis",
+    "m_minus_1_price_values",
 ]
+PRESENT = "PRESENT"
+NO_RECORD_AS_ZERO = "NO_RECORD_TREATED_AS_ZERO"
+MTD_PRICE = "MTD_PRICE"
+M_MINUS_1_PRICE = "M_MINUS_1_PRICE"
 
 
 def _grouped_distinct_join(frame: pd.DataFrame, column: str) -> pd.Series:
@@ -40,6 +62,35 @@ def _grouped_distinct_join(frame: pd.DataFrame, column: str) -> pd.Series:
     values = values.loc[values[column].ne("")].drop_duplicates()
     values = values.sort_values(["model_id", column], kind="stable")
     return values.groupby("model_id", sort=True, dropna=False)[column].agg(";".join)
+
+
+def _period_prices(
+    scoped: pd.DataFrame, mask: pd.Series, model_ids: pd.Index
+) -> tuple[pd.Series, pd.Series, pd.Series, pd.Series]:
+    """Per model for one period: ``(distinct price count, the price if one, joined values, the
+    latest record date of the priced rows)``. Prices are never averaged."""
+    if "period_date" not in scoped.columns:  # fixtures built without source dates
+        scoped = scoped.assign(period_date="")
+    rows = scoped.loc[mask, ["model_id", "_price_numeric", "period_date"]].dropna(
+        subset=["_price_numeric"]
+    )
+    rows = rows.assign(_price_numeric=rows["_price_numeric"].astype(float))
+    distinct = rows[["model_id", "_price_numeric"]].drop_duplicates()
+    distinct = distinct.sort_values(["model_id", "_price_numeric"], kind="stable")
+    grouped = distinct.groupby("model_id", sort=True, dropna=False)["_price_numeric"]
+    counts = grouped.size().reindex(model_ids, fill_value=0)
+    first = grouped.first().reindex(model_ids)
+    joined = (
+        distinct.assign(_s=distinct["_price_numeric"].astype(str))
+        .groupby("model_id", sort=True, dropna=False)["_s"]
+        .agg(";".join)
+        .reindex(model_ids)
+        .fillna("")
+    )
+    dated = rows.assign(_date=pd.to_datetime(rows["period_date"], errors="coerce"))
+    latest = dated.groupby("model_id", sort=True, dropna=False)["_date"].max()
+    latest = latest.dt.strftime("%Y-%m-%d").reindex(model_ids).fillna("")
+    return counts, first, joined, latest
 
 
 def aggregate_models(
@@ -117,35 +168,34 @@ def aggregate_models(
         model_ids
     ).fillna("")
 
-    # Distinct numeric prices are ordered numerically, matching sorted(set(...));
-    # no averaging is performed and more than one value marks a conflict.
-    price_rows = scoped.loc[mtd_mask, ["model_id", "_price_numeric"]].dropna(
-        subset=["_price_numeric"]
-    )
-    price_rows = price_rows.assign(_price_numeric=price_rows["_price_numeric"].astype(float))
-    price_rows = price_rows.drop_duplicates().sort_values(
-        ["model_id", "_price_numeric"], kind="stable"
-    )
-    prices_by_model = price_rows.groupby("model_id", sort=True, dropna=False)[
-        "_price_numeric"
-    ]
-    price_counts = prices_by_model.size().reindex(model_ids, fill_value=0)
-    first_prices = prices_by_model.first().reindex(model_ids)
-    current_prices = pd.Series(
-        [
-            first_prices.loc[model_id] if price_counts.loc[model_id] == 1 else pd.NA
-            for model_id in model_ids
-        ],
-        index=model_ids,
-        dtype=object,
-    )
-    price_strings = price_rows.assign(_price_string=price_rows["_price_numeric"].astype(str))
-    price_values = (
-        price_strings.groupby("model_id", sort=True, dropna=False)["_price_string"]
-        .agg(";".join)
-        .reindex(model_ids)
-        .fillna("")
-    )
+    # The model's own latest valid price: the MTD record's when it has a price, else the M-1
+    # record's. Distinct numeric prices are never averaged; more than one value in the period
+    # that supplies the price is a conflict (no fallback to the older period) and none at all in
+    # either period is PRICE_MISSING. The record date is the source row's own period date.
+    mtd_count, mtd_first, price_values, mtd_date = _period_prices(scoped, mtd_mask, model_ids)
+    m1_count, m1_first, m1_price_values, m1_date = _period_prices(scoped, m1_mask, model_ids)
+    current, status_values_by_model, basis, price_month, price_date = [], [], [], [], []
+    for model_id in model_ids:
+        for count, first, kind, month, date_text in (
+            (mtd_count, mtd_first, MTD_PRICE, mtd_month, mtd_date),
+            (m1_count, m1_first, M_MINUS_1_PRICE, m_minus_1_month, m1_date),
+        ):
+            if count.loc[model_id] == 0:
+                continue
+            ok = count.loc[model_id] == 1
+            current.append(first.loc[model_id] if ok else pd.NA)
+            status_values_by_model.append("PRICE_OK" if ok else "PRICE_CONFLICT")
+            basis.append(kind)
+            price_month.append(month)
+            price_date.append(date_text.loc[model_id])
+            break
+        else:
+            current.append(pd.NA)
+            status_values_by_model.append("PRICE_MISSING")
+            basis.append("")
+            price_month.append("")
+            price_date.append("")
+    current_prices = pd.Series(current, index=model_ids, dtype=object)
 
     present_in_mtd = (
         scoped.loc[mtd_mask].groupby("model_id", sort=True, dropna=False).size().reindex(
@@ -171,27 +221,45 @@ def aggregate_models(
     result["mtd_gmv_usd"] = mtd_gmv
     result["ranking_gmv_usd"] = m1_gmv + mtd_gmv
     result["shopee_current_price_php"] = current_prices
-    result["price_status"] = price_counts.gt(1).map(
-        {True: "PRICE_CONFLICT", False: "PRICE_OK"}
-    )
+    result["price_status"] = pd.Series(status_values_by_model, index=model_ids)
     result["mtd_price_values"] = price_values
     result["eligibility_status"] = statuses
     result["eligibility_reason"] = reasons
     result["matched_include_rule"] = include_rules
     result["matched_exclude_rule"] = exclude_rules
     result["present_in_mtd"] = present_in_mtd
+    present_in_m1 = (
+        scoped.loc[m1_mask].groupby("model_id", sort=True, dropna=False).size().reindex(
+            model_ids, fill_value=0
+        )
+        > 0
+    )
+    result["present_in_m_minus_1"] = present_in_m1
+    result["m_minus_1_status"] = present_in_m1.map({True: PRESENT, False: NO_RECORD_AS_ZERO})
+    result["mtd_status"] = present_in_mtd.map({True: PRESENT, False: NO_RECORD_AS_ZERO})
+    result["price_period_month"] = pd.Series(price_month, index=model_ids)
+    result["price_record_date"] = pd.Series(price_date, index=model_ids)
+    result["price_basis"] = pd.Series(basis, index=model_ids)
+    result["m_minus_1_price_values"] = m1_price_values
     return result.reindex(columns=MODEL_SUMMARY_COLUMNS).reset_index(drop=True)
 
 
 def rank_eligible_models(model_summary: pd.DataFrame) -> pd.DataFrame:
-    """Return only active, eligible models in the deterministic publication order."""
+    """Return the eligible models present in either month in the deterministic order.
+
+    A model with an M-1 record and no MTD record is ranked (owner decision 2026-11-03); its missing
+    month adds 0 to ``ranking_gmv_usd`` and stays flagged in ``mtd_status``.
+    """
     if model_summary.empty:
         empty = model_summary.copy()
         empty.insert(0, "rank", pd.Series(dtype="int64"))
         return empty
     qualified = model_summary.loc[
         model_summary["eligibility_status"].eq("ELIGIBLE")
-        & model_summary["present_in_mtd"].astype(bool)
+        & (
+            model_summary["present_in_mtd"].astype(bool)
+            | model_summary["present_in_m_minus_1"].astype(bool)
+        )
     ].copy()
     qualified = qualified.sort_values(
         ["ranking_gmv_usd", "mtd_gmv_usd", "model_id"],

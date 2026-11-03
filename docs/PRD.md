@@ -120,7 +120,7 @@ For each model:
 ranking_gmv_usd = sum(M-1 gmv_usd) + sum(MTD gmv_usd)
 ```
 
-Only models classified `ELIGIBLE` and present in MTD qualify for ranking. The full ranking sorts by `ranking_gmv_usd` descending, then MTD GMV descending, then `model_id` ascending as a string. The Top 100 is the first 100 entries, or fewer when fewer models qualify.
+Only models classified `ELIGIBLE` and present in M-1 **or** MTD qualify for ranking (owner decision 2026-11-03; it replaced the earlier requirement of an MTD record, and a missing month is flagged, not treated as an observed zero). The full ranking sorts by `ranking_gmv_usd` descending, then MTD GMV descending, then `model_id` ascending as a string. The Top 100 is the first 100 entries, or fewer when fewer models qualify.
 
 The representative listing is the earliest source row in MTD when present, otherwise the earliest row in M-1. The price is selected from distinct valid MTD prices. One distinct value is reported; multiple values yield a `PRICE_CONFLICT` with no selected price. Prices are never averaged. Price conflicts do not, by themselves, remove a model from the GMV ranking.
 

@@ -670,3 +670,127 @@ def test_the_spec_comparison_does_not_depend_on_review_rows_or_other_variations(
     together, separate = row_of(first, "102"), row_of(alone, "102")
     assert together["variation_spec_evidence"] == separate["variation_spec_evidence"]
     assert row_of(first, "102")["exclusion_reason"] == ""
+
+
+# Union of the two reporting months (owner decision 2026-11-03)
+
+M1_ONLY = {
+    "present_in_m_minus_1": "True", "present_in_mtd": "False",
+    "m_minus_1_status": "PRESENT", "mtd_status": "NO_RECORD_TREATED_AS_ZERO",
+    "price_basis": "M_MINUS_1_PRICE", "price_record_date": "2026-09-01",
+    "price_period_month": "2026-09",
+}
+MTD_ONLY = {
+    "present_in_m_minus_1": "False", "present_in_mtd": "True",
+    "m_minus_1_status": "NO_RECORD_TREATED_AS_ZERO", "mtd_status": "PRESENT",
+    "price_basis": "MTD_PRICE", "price_period_month": "2026-10",
+}
+BOTH = {
+    "present_in_m_minus_1": "True", "present_in_mtd": "True",
+    "m_minus_1_status": "PRESENT", "mtd_status": "PRESENT",
+    "price_basis": "MTD_PRICE", "price_period_month": "2026-10",
+}
+
+
+def test_a_variation_with_only_an_m_minus_1_record_qualifies_and_ranks_by_its_own_gmv() -> None:
+    result, snapshot, target_master, mapping = build(
+        [
+            vs("101", "0", "50", item="1", **MTD_ONLY),
+            vs("102", "300", "0", item="2", **M1_ONLY),  # no current-month record, highest GMV
+            vs("103", "20", "30", item="3", **BOTH),
+            vs("104", "10", "0", item="4", **M1_ONLY),  # unmapped, still counted as eligible
+        ],
+        [target("TGT-000001")],
+        [("101", "TGT-000001"), ("102", "TGT-000001"), ("103", "TGT-000001")],
+    )
+
+    assert [r["source_model_id"] for r in result.top] == ["102", "101", "103"]
+    first = result.top[0]
+    assert (first["present_in_m_minus_1"], first["present_in_mtd"]) == ("True", "False")
+    # A missing month is flagged; it adds 0 to the arithmetic but is not an observed zero.
+    assert first["mtd_status"] == "NO_RECORD_TREATED_AS_ZERO" and first["mtd_gmv_usd"] == "0"
+    assert first["m_minus_1_status"] == "PRESENT" and first["ranking_gmv_usd"] == "300"
+    assert "not an observed zero" in first["rank_metric_scope"]
+    assert "either month" in first["rank_metric_scope"]
+    counts = result.counts
+    assert (counts["eligible_in_m_minus_1"], counts["eligible_in_mtd"]) == (3, 2)
+    assert (counts["eligible_m_minus_1_only"], counts["eligible_mtd_only"]) == (2, 1)
+    assert (counts["eligible_in_both_months"], counts["eligible_union"]) == (1, 4)
+    assert counts["qualifying_union"] == 3 and counts["qualifying_m_minus_1_only"] == 1
+    assert counts["selected_m_minus_1_only"] == 1 and counts["selected_with_m_minus_1_price"] == 1
+    assert row_of(result, "104")["exclusion_reason"] == UNMAPPED
+    assert audit_variation_ranking(
+        result.ranked, result.top, result.context_list, result.context_ledger, snapshot,
+        target_master, mapping,
+    ) == []
+
+
+def test_an_m_minus_1_price_keeps_its_own_period_record_date_and_basis() -> None:
+    result, snapshot, target_master, mapping = build(
+        [
+            vs("101", "300", "0", item="1", price="48990.0", **M1_ONLY),
+            vs("102", "0", "200", item="2", price="45990.0", **MTD_ONLY),
+        ],
+        [target("TGT-000001")], [("101", "TGT-000001"), ("102", "TGT-000001")],
+    )
+
+    october, november = row_of(result, "101"), row_of(result, "102")
+    # The earlier month's price is dated by its own record, never by the later extract.
+    assert october["shopee_current_price_php"] == "48990.00"
+    assert october["shopee_price_observed_at"] == "2026-09-01"
+    assert october["shopee_price_date_basis"] == "M_MINUS_1_RECORD_DATE"
+    assert (october["price_basis"], october["price_period_month"]) == ("M_MINUS_1_PRICE", "2026-09")
+    assert "M-1 2026-09 source record" in october["shopee_price_detail"]
+    assert november["shopee_price_observed_at"] == snapshot.extract_date
+    assert november["shopee_price_date_basis"] == "SALES_EXTRACT_DATE"
+    # Each row keeps its own seller's price: nothing is borrowed across variations.
+    assert november["shopee_current_price_php"] == "45990.00"
+    assert audit_variation_ranking(
+        result.ranked, result.top, result.context_list, result.context_ledger, snapshot,
+        target_master, mapping,
+    ) == []
+    relabelled = [dict(r, shopee_price_observed_at=snapshot.extract_date) if r is october else r
+                  for r in result.ranked]
+    assert any("price date is not its own price record" in i for i in audit_variation_ranking(
+        relabelled, relabelled, result.context_list, result.context_ledger, snapshot,
+        target_master, mapping))
+
+
+def test_a_missing_price_never_removes_an_otherwise_qualifying_variation() -> None:
+    result, *_ = build(
+        [
+            vs("101", "300", "0", item="1", price="", price_status="PRICE_MISSING",
+               **{**M1_ONLY, "price_basis": ""}),
+            vs("102", "100", "0", item="2", price="900.0", **M1_ONLY),
+        ],
+        [target("TGT-000001")], [("101", "TGT-000001"), ("102", "TGT-000001")],
+    )
+
+    assert [r["source_model_id"] for r in result.top] == ["101", "102"]
+    assert result.top[0]["shopee_current_price_php"] == ""
+    assert result.top[0]["shopee_price_status"] == "PRICE_MISSING"
+    assert result.top[1]["shopee_current_price_php"] == "900.00"  # not copied to the first row
+    assert result.counts["selected_without_own_price"] == 1
+
+
+def test_m_minus_1_only_variations_sharing_a_target_stay_separate_rows() -> None:
+    result, *_ = build(
+        [
+            vs("101", "200", "0", item="1", shop="10", **M1_ONLY),
+            vs("102", "100", "0", item="2", shop="11", **M1_ONLY),
+        ],
+        [target("TGT-000001")], [("101", "TGT-000001"), ("102", "TGT-000001")],
+    )
+
+    assert [r["source_key"] for r in result.top] == ["10|1|101", "11|2|102"]
+    assert result.counts["distinct_configuration_contexts"] == 1
+    assert result.contexts[0]["selected_variation_count"] == "2"
+
+
+def test_the_month_flags_survive_an_older_ranking_file_without_them() -> None:
+    result, *_ = build([vs("101", "100", "0", item="1")], [target("TGT-000001")],
+                       [("101", "TGT-000001")])
+
+    row = result.top[0]  # a file written before the flags existed: present in MTD, flags derived
+    assert row["present_in_mtd"] == "True" and row["present_in_m_minus_1"] == ""
+    assert row["mtd_status"] == "PRESENT" and row["shopee_price_date_basis"] == "SALES_EXTRACT_DATE"

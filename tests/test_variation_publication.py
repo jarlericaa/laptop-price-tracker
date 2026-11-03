@@ -722,3 +722,15 @@ def test_republishing_never_duplicates_retained_or_regenerated_records(world) ->
     assert code == 0
     for title, values in first.items():
         assert fake.values(title) == values
+
+
+def test_a_gmv_cell_for_a_month_without_a_record_says_the_zero_is_arithmetic() -> None:
+    from laptop_tracker.variation_publication import _missing_month_note
+
+    row = {"m_minus_1_status": "PRESENT", "mtd_status": "NO_RECORD_TREATED_AS_ZERO",
+           "m_minus_1_month": "2026-10", "mtd_month": "2026-11"}
+
+    assert _missing_month_note("m_minus_1_gmv_usd", row) == ""
+    note = _missing_month_note("mtd_gmv_usd", row)
+    assert "No 2026-11 record" in note and "not an observed zero" in note
+    assert _missing_month_note("ranking_gmv_usd", row) == ""

@@ -381,7 +381,7 @@ then are the first 100 selected.
 
 | Reason | Meaning |
 |---|---|
-| `SOURCE_NOT_ELIGIBLE` | The source is not `ELIGIBLE` or not present in MTD. |
+| `SOURCE_NOT_ELIGIBLE` | The source is not `ELIGIBLE` or not present in MTD. (Legacy configuration grain only; the variation grain admits a record in either month since 2026-11-03.) |
 | `UNMAPPED` | No approved `SOURCE_MODEL_MAP` row. |
 | `TARGET_INACTIVE` | The mapped target is inactive. |
 | `TARGET_LISTING_ONLY` | The mapped target is `LISTING_ONLY`. |

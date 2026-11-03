@@ -333,3 +333,21 @@ def test_reports_are_written_for_every_artifact_and_reload(tmp_path) -> None:
         "weekly_variation_history_associations.csv", "variation_coverage.json",
         "variation_run_summary.json"}
     assert all(p.is_file() for p in paths.values())
+
+
+def test_an_october_price_is_shown_stale_with_its_own_record_date_not_as_a_later_observation(
+    tmp_path,
+) -> None:
+    result, report = scenario(tmp_path)
+    for row in result.top:
+        row["shopee_price_observed_at"] = "2026-10-01"
+        row["shopee_price_date_basis"] = "M_MINUS_1_RECORD_DATE"
+        row["price_period_month"] = "2026-10"
+    reports = build_reports(result, report)
+
+    first = reports.comparison[0]
+    assert first["shopee_price_php"] == "48990.00"
+    assert first["shopee_price_status"] == SNAPSHOT_PRICE_STALE
+    assert first["shopee_price_observed_at"] == "2026-10-01"  # never relabelled
+    assert "M-1 2026-10 source record of 2026-10-01" in first["shopee_price_detail"]
+    assert "not an observation of a later month" in first["shopee_price_detail"]

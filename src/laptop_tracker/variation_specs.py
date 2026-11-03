@@ -52,9 +52,12 @@ _UNIT_GB = {"GB": Decimal(1), "G": Decimal(1), "TB": Decimal(1000)}
 _NUMBER = r"([0-9]{1,4}(?:\.[0-9]{1,2})?)"
 _RAM_LABEL = r"(?:RAM|memory|unified\s+memory|DDR[0-9][A-Z]?|LPDDR[0-9][A-Z]?)"
 _STORAGE_LABEL = r"(?:SSD|HDD|NVMe|eMMC|M\.2|PCIe|storage|ROM|hard\s*(?:disk|drive))"
+# "16GB RAM", "8GBRAM" (no space or boundary), "16GB DDR4": the amount precedes its label. A label
+# that precedes an amount counts only for RAM/memory itself and never when a storage label follows
+# the amount ("DDR4 512GB M.2" and "RAM 512GB SSD" describe the drive, not the memory).
 _RAM_PATTERNS = (
-    re.compile(rf"(?<![0-9.]){_NUMBER}\s*(GB|G)\b\s*(?:of\s+)?{_RAM_LABEL}", re.I),
-    re.compile(rf"{_RAM_LABEL}\s*[:\-]?\s*{_NUMBER}\s*(GB|G)\b", re.I),
+    re.compile(rf"(?<![0-9.]){_NUMBER}\s*(GB|G)\s*(?:of\s+)?{_RAM_LABEL}", re.I),
+    re.compile(rf"\b(?:RAM|memory)\s*[:\-]?\s*{_NUMBER}\s*(GB|G)\b(?!\s*{_STORAGE_LABEL})", re.I),
 )
 _STORAGE_PATTERNS = (
     re.compile(rf"(?<![0-9.]){_NUMBER}\s*(GB|TB)\b\s*(?:of\s+)?{_STORAGE_LABEL}", re.I),
