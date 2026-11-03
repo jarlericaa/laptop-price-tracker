@@ -296,7 +296,7 @@ def test_live_run_routes_adapters_stores_and_matches(tmp_path: Path, capsys) -> 
     )
     assert (lf["selected_list_status"], lf["selected_rank"]) == ("SELECTED", "1")
     assert lf["retrieved_at"] == "2026-09-29T04:00:00.000000Z"
-    assert lf["adapter_version"] == "lf-1" and len(lf["content_sha256"]) == 64
+    assert lf["adapter_version"] == "lf-2" and len(lf["content_sha256"]) == 64
     # A secondary conflict stays in review, even though it was the expected target.
     pcc = results["pcc"]
     assert (pcc["match_status"], pcc["target_id"]) == ("REVIEW_REQUIRED", "")

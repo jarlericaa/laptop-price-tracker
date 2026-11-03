@@ -83,7 +83,9 @@ class LaptopFactoryAdapter:
     retailer_id = RETAILER_ID
     retailer_code = RETAILER_CODE
     # Bump when parsing rules change; recorded in every observation's source metadata.
-    adapter_version = "lf-1"
+    # lf-2 (2026-10-27): the product page's "Additional information" attribute table is read as a
+    # third spec source, because current pages carry their specifications only there.
+    adapter_version = "lf-2"
     allowed_hosts = frozenset({HOST})
     # Project-owner policy; retailer permission is not independently verified.
     live_use_approved = True
@@ -105,7 +107,11 @@ class LaptopFactoryAdapter:
         offer = _single_offer(product)
         price = _resolve_price(offer, parsed.price_blocks)
         availability, evidence = _resolve_availability(offer, parsed)
-        specs = parsed.short_description_rows or parsed.description_tab_rows
+        specs = (
+            parsed.short_description_rows
+            or parsed.description_tab_rows
+            or parsed.additional_info_rows
+        )
         raw_configuration = " | ".join(
             f"{label}: {value}" if value else label for label, value in specs
         ) or (_text(product.get("description")) if product else "")
@@ -417,6 +423,7 @@ class _ProductPageParser(HTMLParser):
         self.cart_buttons: list[bool] = []  # True when disabled
         self.short_description_rows: list[tuple[str, str]] = []
         self.description_tab_rows: list[tuple[str, str]] = []
+        self.additional_info_rows: list[tuple[str, str]] = []
         self.skus: list[str] = []
         self.categories: list[str] = []
         self.bundle_components: list[str] = []
@@ -546,6 +553,11 @@ class _ProductPageParser(HTMLParser):
             return "short"
         if self._inside(classes={"woocommerce-Tabs-panel--description"}, ids={"tab-description"}):
             return "tab"
+        if self._inside(
+            classes={"woocommerce-Tabs-panel--additional_information"},
+            ids={"tab-additional_information"},
+        ):
+            return "additional"
         return None
 
     def _finish_row(self, source: str | None) -> None:
@@ -554,5 +566,8 @@ class _ProductPageParser(HTMLParser):
         if not cells:
             return
         pair = (cells[0], " ".join(cells[1:]))
-        target = self.short_description_rows if source == "short" else self.description_tab_rows
+        target = {
+            "short": self.short_description_rows,
+            "additional": self.additional_info_rows,
+        }.get(source or "", self.description_tab_rows)
         target.append(pair)

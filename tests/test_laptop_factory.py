@@ -84,7 +84,7 @@ def test_jsonld_page_yields_an_attributed_sale_offer() -> None:
         "stock text: In stock; JSON-LD availability: https://schema.org/InStock; "
         "add to cart: enabled"
     )
-    assert offer.source.adapter_version == "lf-1"
+    assert offer.source.adapter_version == "lf-2"
     details = offer.details
     assert details.price_type is PriceType.SALE
     assert (details.regular_price, details.regular_price_text) == (
@@ -364,3 +364,81 @@ def test_live_use_is_enabled_by_owner_policy() -> None:
 def test_default_fetcher_is_live_but_do_not_make_a_network_request() -> None:
     assert Fetcher().is_live is True
     assert LaptopFactoryAdapter.live_use_approved is True
+
+
+# Additional-information specification table (layout seen on live pages 2026-10-27)
+
+ADDITIONAL_INFO_ROWS = (
+    ("Model Name", "Acer Aspire AI 14 A14-11M-X3BP (Steam Blue)"),
+    ("Processor", "Qualcomm Snapdragon X, X1-26-100 processor"),
+    ("RAM", "16GB of onboard LPDDR5X"),
+    ("Storage", "512GB NVMe SSD"),
+)
+
+
+def additional_info_tabs(rows: tuple[tuple[str, str], ...] = ADDITIONAL_INFO_ROWS) -> str:
+    """The WooCommerce Additional-information tab with its attribute table."""
+    item = "woocommerce-product-attributes-item"
+    body = "".join(
+        f'<tr class="{item}"><th class="{item}__label" scope="row">{label}</th>'
+        f'<td class="{item}__value"><p>{value}</p></td></tr>\n'
+        for label, value in rows
+    )
+    return (
+        '<div class="woocommerce-tabs wc-tabs-wrapper"><div class="tab-panels">\n'
+        '<div class="woocommerce-Tabs-panel woocommerce-Tabs-panel--additional_information '
+        'panel entry-content active" id="tab-additional_information" role="tabpanel">\n'
+        '<table class="woocommerce-product-attributes shop_attributes" '
+        f'aria-label="Product Details">\n{body}</table>\n</div></div></div>\n'
+    )
+
+
+def additional_info_page() -> str:
+    """The sale fixture with its specifications moved from the short description to the tab."""
+    body = fixture("lf_product_sale.html")
+    start = body.index('    <div class="product-short-description">')
+    end = body.index('    <p class="stock in-stock">')
+    return body[:start] + additional_info_tabs() + body[end:]
+
+
+def test_additional_information_table_supplies_the_specifications() -> None:
+    offer = only_offer(additional_info_page())
+
+    assert offer.source.adapter_version == "lf-2"
+    assert offer.details.raw_specifications == (
+        ("Model Name", "Acer Aspire AI 14 A14-11M-X3BP (Steam Blue)"),
+        ("Processor", "Qualcomm Snapdragon X, X1-26-100 processor"),
+        ("RAM", "16GB of onboard LPDDR5X"),
+        ("Storage", "512GB NVMe SSD"),
+    )
+    assert offer.raw_configuration_text == (
+        "Model Name: Acer Aspire AI 14 A14-11M-X3BP (Steam Blue) | "
+        "Processor: Qualcomm Snapdragon X, X1-26-100 processor | "
+        "RAM: 16GB of onboard LPDDR5X | Storage: 512GB NVMe SSD"
+    )
+    # Price, stock and bundle signals are unaffected by where the specifications sit.
+    assert (offer.price, offer.availability) == (Decimal("45999.00"), Availability.IN_STOCK)
+    assert offer.details.bundle_flag is False
+
+
+def test_short_description_specifications_win_over_the_additional_information_table() -> None:
+    both = mutate(
+        fixture("lf_product_sale.html"),
+        '    <p class="stock in-stock">',
+        additional_info_tabs((*ADDITIONAL_INFO_ROWS[:3], ("Storage", "1TB NVMe SSD")))
+        + '    <p class="stock in-stock">',
+    )
+    offer = only_offer(both)
+
+    assert ("Storage", "512GB NVMe SSD") in offer.details.raw_specifications
+    assert ("Storage", "1TB NVMe SSD") not in offer.details.raw_specifications
+
+
+def test_a_page_without_any_specification_table_keeps_the_json_ld_description() -> None:
+    body = fixture("lf_product_sale.html")
+    start = body.index('    <div class="product-short-description">')
+    end = body.index('    <p class="stock in-stock">')
+    offer = only_offer(body[:start] + body[end:])
+
+    assert offer.details.raw_specifications == ()
+    assert offer.raw_configuration_text.startswith("Tech Specs: Model Name")

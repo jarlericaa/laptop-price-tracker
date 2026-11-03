@@ -1,6 +1,6 @@
 # Laptop Factory (LF) Adapter
 
-**Status:** Offline adapter implemented and tested on 2026-09-29 (`adapter_version = "lf-1"`). Live use is enabled under the project-owner policy in [DECISIONS.md](../DECISIONS.md). The retailer's published permission remains unverified (external-policy finding UNKNOWN; project status OWNER_APPROVED). A controlled bare-URL live check on 2026-10-01 returned one in-stock Acer Aspire AI 14 offer at PHP 45,999.00 (SALE, regular PHP 50,999.00); the requested, final, and offer URLs were the same plain string. See [PROGRESS_LOG.md](../PROGRESS_LOG.md#phase-7-live-follow-up-checks-2026-10-01). Adapter maintainer: Jarelle Ricaforte.
+**Status:** Offline adapter implemented and tested on 2026-09-29 (`adapter_version = "lf-1"`; `lf-2` since 2026-10-27, see below). Live use is enabled under the project-owner policy in [DECISIONS.md](../DECISIONS.md). The retailer's published permission remains unverified (external-policy finding UNKNOWN; project status OWNER_APPROVED). A controlled bare-URL live check on 2026-10-01 returned one in-stock Acer Aspire AI 14 offer at PHP 45,999.00 (SALE, regular PHP 50,999.00); the requested, final, and offer URLs were the same plain string. See [PROGRESS_LOG.md](../PROGRESS_LOG.md#phase-7-live-follow-up-checks-2026-10-01). Adapter maintainer: Jarelle Ricaforte.
 
 | Item | Value |
 |---|---|
@@ -39,7 +39,7 @@ These come from two product pages reviewed on 2026-09-29. The site is WooCommerc
 | SKU | JSON-LD `sku`, kept as text. It may be descriptive text or a number equal to the post ID. | `span.sku` in `.product_meta` |
 | Product ID | `div#product-<id>` | Add to Cart button `value` |
 | Brand, MPN | JSON-LD `brand`, `mpn` only. The reviewed pages have neither, so they stay blank. | None. The brand is never guessed from categories or the title. |
-| Raw specifications | "Tech Specs" table in `.product-short-description` | Table in the description tab, then the JSON-LD `description` text |
+| Raw specifications | "Tech Specs" table in `.product-short-description` | Table in the description tab, then (`lf-2`) the "Additional information" attribute table (`woocommerce-product-attributes`), then the JSON-LD `description` text |
 | Categories | `a[rel=tag]` in `.product_meta .posted_in`, kept raw | None |
 
 Only markup inside the product summary is read. Related products and smart-bundle (`woosb`) component rows have their own prices and stock and are ignored. Screen-reader text ("Original price was …") is skipped.
@@ -72,3 +72,17 @@ Only markup inside the product summary is read. Related products and smart-bundl
 - Bundle detection is keyword and markup based and can over-flag, for example a title mentioning a monitor size. That is intentional, since review happens downstream.
 - Brand and MPN are blank on the reviewed pages. Phase 8 must use the raw title, specs, and categories as evidence without treating them as verified identity.
 - The adapter parses product pages only. Search is handled separately by `discover_products.py` (bounded, manual runs; see [SETUP_AND_OPERATIONS.md](../SETUP_AND_OPERATIONS.md#automatic-product-discovery-phase-10-manual-runs)); collection and category pages are not crawled.
+
+## lf-2 (2026-10-27)
+
+Current Laptop Factory pages no longer have a short description or a description tab: their
+specifications (Model Name, Processor, RAM, Storage, Graphics, Display Size, Inclusions) sit only in
+the **Additional information** tab. `lf-1` therefore recorded no specifications, every observation
+came back `MISSING_CORE_FIELDS` / `REVIEW_REQUIRED`, and Laptop Factory contributed no comparable
+price (found on the 2026-10-27 full run: 20 of 20 collected pages, price and stock correct, no
+spec rows; throttling was not involved). `lf-2` reads that table as a third source, used only when
+the short description and the description tab give nothing; price, stock, bundle and category
+parsing are unchanged. Replay of the four pages saved by that run: 3 `EXACT`, 1 genuinely
+different configuration. Earlier `lf-1` observations stay in history unchanged; new retrievals
+carry `lf-2`.
+
