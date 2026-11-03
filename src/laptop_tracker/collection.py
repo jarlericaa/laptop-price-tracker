@@ -39,10 +39,12 @@ from .observation_store import (
 from .offers import OfferObservation
 from .price_tracking import match_stored_observations
 from .scraping import (
+    RATE_LIMIT_CODES,
     Fetcher,
     RetailerAdapter,
     ScrapeRequest,
     ScrapeResult,
+    Stage,
     live_use_approved,
     redact_url,
     scrape_one,
@@ -227,10 +229,23 @@ def validate_manifest(
 # Collection
 
 
+DEFERRED_RATE_LIMITED = "DEFERRED_RATE_LIMITED"
+REUSED_COLLECTION_RECORD = "REUSED_COLLECTION_RECORD"
+
+
+def is_rate_limit_deferral(result: ScrapeResult) -> bool:
+    """No observation and every failure is a fetch-stage rate-limit failure (429 or deferred)."""
+    return not result.observations and bool(result.failures) and all(
+        f.stage is Stage.FETCH and f.error_code in RATE_LIMIT_CODES for f in result.failures
+    )
+
+
 @dataclass(frozen=True)
 class RequestOutcome:
     entry: ManifestEntry
     result: ScrapeResult
+    # Non-empty when no request was sent for this entry: where the saved result came from.
+    reused_from: str = ""
 
     @property
     def status(self) -> str:
@@ -238,20 +253,45 @@ class RequestOutcome:
             return "SUCCEEDED"
         if self.result.observations:
             return "PARTIAL"
+        if is_rate_limit_deferral(self.result):
+            return DEFERRED_RATE_LIMITED  # Retailer-level wait; the URL itself is not at fault.
         return "FAILED" if self.result.failures else "NO_OFFERS"
 
+    @property
+    def page_source(self) -> str:
+        return self.reused_from or self.result.page_source or "NETWORK"
 
-def collect(entries: Sequence[ManifestEntry], fetcher: Fetcher) -> list[RequestOutcome]:
+
+def collect(
+    entries: Sequence[ManifestEntry],
+    fetcher: Fetcher,
+    reuse: Mapping[tuple[str, ...], object] | None = None,
+) -> list[RequestOutcome]:
     """Fetch each enabled entry once, in manifest order, through one shared fetcher.
 
-    ``scrape_one`` applies the request, host, and live-use gates before anything is sent.
+    ``scrape_one`` applies the request, host, and live-use gates before anything is sent. An entry
+    that an earlier collection already answered (``reuse``, by request key) is not requested: its
+    saved observations are used unchanged. A response the fetcher's page cache holds for the exact
+    same request is parsed without a request. A retailer that is paused or cooling longer than the
+    run can wait is not requested either: the entry is ``DEFERRED_RATE_LIMITED`` and stays in the
+    manifest for a later run.
     """
     adapters = {retailer_id: route.adapter_factory() for retailer_id, route in ROUTES.items()}
-    return [
-        RequestOutcome(entry, scrape_one(adapters[entry.retailer_id], entry.request, fetcher))
-        for entry in entries
-        if entry.enabled
-    ]
+    outcomes = []
+    with fetcher.purpose_scope("COLLECTION"):
+        for entry in entries:
+            if not entry.enabled:
+                continue
+            saved = (reuse or {}).get(_request_key(entry.retailer_id, entry.product_url))
+            if saved is not None:
+                result = ScrapeResult(entry.request, saved.observations, saved.failures)  # type: ignore[attr-defined]
+                outcomes.append(RequestOutcome(
+                    entry, result,
+                    f"{REUSED_COLLECTION_RECORD}:{saved.folder}#{saved.request_id}"))  # type: ignore[attr-defined]
+                continue
+            outcomes.append(RequestOutcome(
+                entry, scrape_one(adapters[entry.retailer_id], entry.request, fetcher)))
+    return outcomes
 
 
 def adapter_summary() -> dict[str, dict[str, object]]:
@@ -335,6 +375,7 @@ REQUEST_COLUMNS: tuple[str, ...] = (
     "observation_ids",
     "failure_stages",
     "failure_codes",
+    "page_source",
 )
 
 FAILURE_COLUMNS: tuple[str, ...] = (
@@ -350,6 +391,7 @@ FAILURE_COLUMNS: tuple[str, ...] = (
     "attempts",
     "http_status",
     "offer_index",
+    "retry_not_before_utc",
 )
 
 RESULT_COLUMNS: tuple[str, ...] = (
@@ -405,6 +447,7 @@ def request_rows(
                 if result
                 else "",
                 "failure_codes": ";".join(f.error_code for f in result.failures) if result else "",
+                "page_source": outcome.page_source if outcome else "",
             }
         )
     return rows
@@ -429,6 +472,9 @@ def failure_rows(outcomes: Sequence[RequestOutcome]) -> list[dict[str, str]]:
                     "attempts": str(failure.attempts),
                     "http_status": "" if failure.http_status is None else str(failure.http_status),
                     "offer_index": "" if failure.offer_index is None else str(failure.offer_index),
+                    "retry_not_before_utc": ""
+                    if failure.retry_not_before is None
+                    else failure.retry_not_before.strftime("%Y-%m-%dT%H:%M:%SZ"),
                 }
             )
     return rows
@@ -493,6 +539,8 @@ def evidence_rows(match: CollectedMatch) -> list[dict[str, str]]:
 def run_status(outcomes: Sequence[RequestOutcome], stored: bool) -> str:
     """SUCCESS only when every enabled request gave observations, without failures, and stored."""
     observations = sum(len(o.result.observations) for o in outcomes)
+    if outcomes and all(o.status == DEFERRED_RATE_LIMITED for o in outcomes):
+        return DEFERRED_RATE_LIMITED  # Nothing failed on its own: the retailers must cool down.
     if not observations or not stored:
         return "FAILED"
     if all(o.status == "SUCCEEDED" for o in outcomes):

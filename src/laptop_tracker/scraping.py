@@ -13,10 +13,12 @@ import hashlib
 import http.client
 import logging
 import re
+import threading
 import time
 import urllib.error
 import urllib.request
 from collections.abc import Iterable, Mapping, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from enum import StrEnum
@@ -36,11 +38,31 @@ from .offers import (
     redact_url,
     url_host,
 )
+from .rate_limit import (
+    RateLimitDecision,
+    RateLimitPolicy,
+    RetailerDeferred,
+    RetailerRateLimiter,
+    parse_retry_after,
+)
 
 LOGGER = logging.getLogger(__name__)
 
 # Response headers kept from a transport. Everything else, including Set-Cookie, is dropped.
 KEPT_RESPONSE_HEADERS = frozenset({"content-type", "retry-after", "location"})
+# Non-sensitive headers that show which system answered (CDN, platform or origin). They are
+# written to the rate-limit event log for HTTP 429 responses only.
+DIAGNOSTIC_RESPONSE_HEADERS = frozenset(
+    {
+        "server", "via", "date", "age", "cf-ray", "cf-cache-status", "cf-mitigated",
+        "x-cache", "x-served-by", "x-request-id", "x-shopify-stage", "x-shopid",
+        "x-sorting-hat-podid", "x-sorting-hat-shopid", "x-amz-cf-id", "x-amz-cf-pop",
+        "ratelimit", "ratelimit-policy", "x-ratelimit-limit", "x-ratelimit-remaining",
+        "x-ratelimit-reset", "x-envoy-upstream-service-time", "content-length",
+    }
+)
+# Characters of a 429 response body kept as evidence (a block page names its sender).
+RATE_LIMIT_BODY_EXCERPT = 300
 REDIRECT_STATUSES = frozenset({301, 302, 303, 307, 308})
 
 
@@ -52,17 +74,34 @@ class Stage(StrEnum):
 
 
 class TransportError(Exception):
-    """Raised by a transport when no HTTP response was received (timeout, connection, size)."""
+    """Raised by a transport when no HTTP response was received (timeout, connection, size).
 
-    def __init__(self, code: str, message: str, *, retryable: bool = True) -> None:
+    ``sent`` is False when nothing reached the network (refused URL, exhausted request budget),
+    so the attempt is not counted against the retailer.
+    """
+
+    def __init__(
+        self, code: str, message: str, *, retryable: bool = True, sent: bool = True
+    ) -> None:
         super().__init__(message)
         self.code = code
         self.message = message
         self.retryable = retryable
+        self.sent = sent
+
+
+# Rate limiting is its own failure class, never folded into HTTP errors, 404s or parse failures.
+RATE_LIMITED = "RATE_LIMITED"  # The retailer answered HTTP 429 and no further attempt is allowed.
+RETAILER_DEFERRED = "RETAILER_DEFERRED"  # Nothing sent: paused, or the wait is not affordable.
+RATE_LIMIT_CODES = frozenset({RATE_LIMITED, RETAILER_DEFERRED})
 
 
 class FetchError(Exception):
-    """Retrieval failed after the framework's retry policy was applied."""
+    """Retrieval failed after the framework's retry policy was applied.
+
+    ``RATE_LIMITED`` and ``RETAILER_DEFERRED`` carry ``retry_not_before`` (UTC) and, for the
+    former, the server's ``retry_after_seconds`` when it gave a valid ``Retry-After``.
+    """
 
     def __init__(
         self,
@@ -72,6 +111,9 @@ class FetchError(Exception):
         retryable: bool,
         attempts: int,
         http_status: int | None = None,
+        retry_not_before: datetime | None = None,
+        retry_after_seconds: float | None = None,
+        reason: str = "",
     ) -> None:
         super().__init__(message)
         self.code = code
@@ -79,6 +121,13 @@ class FetchError(Exception):
         self.retryable = retryable
         self.attempts = attempts
         self.http_status = http_status
+        self.retry_not_before = retry_not_before
+        self.retry_after_seconds = retry_after_seconds
+        self.reason = reason
+
+    @property
+    def rate_limited(self) -> bool:
+        return self.code in RATE_LIMIT_CODES
 
 
 class ParseError(Exception):
@@ -131,9 +180,18 @@ class FetchConfig:
         return self.retailer_min_intervals.get(retailer_id, self.min_request_interval_seconds)
 
     def backoff_seconds(self, attempt: int) -> float:
-        """Delay after failed ``attempt`` (1-based). No jitter, so tests are deterministic."""
+        """Delay after a failed ``attempt`` (1-based) for timeouts and 5xx; no jitter.
+
+        HTTP 429 is not delayed here: the shared limiter sets that cooldown (see rate_limit.py).
+        """
         delay = self.backoff_initial_seconds * self.backoff_multiplier ** (attempt - 1)
         return min(delay, self.backoff_max_seconds)
+
+    def rate_limit_policy(self) -> RateLimitPolicy:
+        return RateLimitPolicy(
+            min_interval_seconds=self.min_request_interval_seconds,
+            retailer_min_intervals=dict(self.retailer_min_intervals),
+        )
 
 
 @dataclass(frozen=True)
@@ -217,7 +275,10 @@ class UrllibTransport:
     ) -> TransportResponse:
         if not is_http_url(url):
             raise TransportError(
-                "INVALID_URL", "Only absolute HTTP or HTTPS URLs are fetched.", retryable=False
+                "INVALID_URL",
+                "Only absolute HTTP or HTTPS URLs are fetched.",
+                retryable=False,
+                sent=False,
             )
         request = urllib.request.Request(url, headers=dict(headers), method="GET")
         try:
@@ -234,9 +295,16 @@ class UrllibTransport:
                 )
         except urllib.error.HTTPError as error:
             # Includes unfollowed 3xx responses. The body is not read: status and headers are
-            # enough to decide on a retry or a redirect.
+            # enough to decide on a retry or a redirect. A 429 body is read, truncated, only
+            # to record who sent it.
             with error:
-                return TransportResponse(error.code, url, b"", _kept_headers(error.headers))
+                body = b""
+                if error.code == 429:
+                    try:
+                        body = error.read(RATE_LIMIT_BODY_EXCERPT)
+                    except (OSError, http.client.HTTPException):
+                        body = b""
+                return TransportResponse(error.code, url, body, _kept_headers(error.headers))
         except TimeoutError:
             raise TransportError("TIMEOUT", "The request timed out.") from None
         except urllib.error.URLError as error:
@@ -253,9 +321,21 @@ class UrllibTransport:
 
 def _kept_headers(headers: object) -> dict[str, str]:
     items = headers.items() if headers is not None else []  # type: ignore[attr-defined]
-    return {
-        name.lower(): value for name, value in items if name.lower() in KEPT_RESPONSE_HEADERS
+    kept = KEPT_RESPONSE_HEADERS | DIAGNOSTIC_RESPONSE_HEADERS
+    return {name.lower(): value for name, value in items if name.lower() in kept}
+
+
+def _rate_limit_evidence(response: TransportResponse) -> dict[str, str]:
+    """Who answered an HTTP 429: diagnostic headers plus a short, whitespace-collapsed body."""
+    evidence = {
+        name: value[:200]
+        for name, value in sorted(response.headers.items())
+        if name in DIAGNOSTIC_RESPONSE_HEADERS or name == "retry-after"
     }
+    text = " ".join(response.body.decode("utf-8", "replace").split())
+    if text:
+        evidence["body_excerpt"] = text[:RATE_LIMIT_BODY_EXCERPT]
+    return evidence
 
 
 @dataclass(frozen=True)
@@ -270,6 +350,9 @@ class FetchedPage:
     content_type: str
     retrieved_at: datetime
     attempts: int
+    # Non-empty when no request was sent: the response was reused (page_cache.py). The original
+    # retrieval time, status, attempts and hash stay as they were.
+    reused_from: str = ""
 
     @property
     def content_sha256(self) -> str:
@@ -285,31 +368,14 @@ class FetchedPage:
             return self.body.decode("utf-8", errors="replace")
 
 
-class Throttle:
-    """Enforces a minimum interval between request starts, tracked separately per retailer."""
-
-    def __init__(self, config: FetchConfig, clock: Clock) -> None:
-        self._config = config
-        self._clock = clock
-        self._last_start: dict[str, float] = {}
-
-    def wait(self, retailer_id: str) -> float:
-        """Sleep if needed, record this request start, and return the seconds slept."""
-        last = self._last_start.get(retailer_id)
-        delay = 0.0
-        if last is not None:
-            ready_at = last + self._config.interval_for(retailer_id)
-            delay = max(0.0, ready_at - self._clock.monotonic())
-        if delay > 0:
-            self._clock.sleep(delay)
-        self._last_start[retailer_id] = self._clock.monotonic()
-        return delay
-
-
 class Fetcher:
-    """Fetches with timeouts, bounded retries, per-retailer throttling, and checked redirects.
+    """Fetches with timeouts, bounded retries, checked redirects and one limiter per retailer.
 
-    Share one fetcher across adapters and requests so throttling state is shared.
+    Every HTTP request, retries and redirect hops included, passes through the
+    ``RetailerRateLimiter``: spacing, one request in flight per retailer, retailer-wide cooldowns
+    after 429, pauses and probes. The fetcher never sleeps for a retry itself, so no retry can run
+    underneath the limiter. Share one fetcher (and so one limiter) across adapters, stages and
+    callers. An optional ``page_cache`` answers a request from an earlier identical response.
     """
 
     def __init__(
@@ -317,16 +383,36 @@ class Fetcher:
         transport: Transport | None = None,
         config: FetchConfig | None = None,
         clock: Clock | None = None,
+        limiter: RetailerRateLimiter | None = None,
+        page_cache=None,
     ) -> None:
         self.transport = transport if transport is not None else UrllibTransport()
         self.config = config if config is not None else FetchConfig()
         self.clock = clock if clock is not None else SystemClock()
-        self.throttle = Throttle(self.config, self.clock)
+        self.limiter = limiter if limiter is not None else RetailerRateLimiter(
+            self.config.rate_limit_policy(), self.clock
+        )
+        self.page_cache = page_cache
+        self._local = threading.local()
 
     @property
     def is_live(self) -> bool:
         """True unless the transport explicitly declares ``live = False`` (fail closed)."""
         return getattr(self.transport, "live", True) is not False
+
+    @property
+    def purpose(self) -> str:
+        return getattr(self._local, "purpose", "")
+
+    @contextmanager
+    def purpose_scope(self, purpose: str):
+        """Label requests made inside (SEARCH, INSPECTION, COLLECTION) in rate-limit events."""
+        previous = self.purpose
+        self._local.purpose = purpose
+        try:
+            yield
+        finally:
+            self._local.purpose = previous
 
     def fetch(
         self, request: ScrapeRequest, allowed_hosts: frozenset[str] | None = None
@@ -334,72 +420,119 @@ class Fetcher:
         """Fetch ``request.url``. Redirects are followed only to ``allowed_hosts``.
 
         The default allows only the request's own host. A redirect elsewhere fails before the
-        redirected request is sent.
+        redirected request is sent. A reusable cached response is returned without any request.
+        Failures: ``RATE_LIMITED`` (HTTP 429, attempts used up or the retailer paused) and
+        ``RETAILER_DEFERRED`` (nothing sent) are retailer-level and carry ``retry_not_before``.
         """
         config = self.config
+        log_fields = {"retailer": request.retailer_id, "url": redact_url(request.url)}
+        if self.page_cache is not None:
+            cached = self.page_cache.get(request, self.clock.now().astimezone(UTC))
+            if cached is not None:
+                _log(
+                    logging.INFO,
+                    "fetch reused",
+                    **log_fields,
+                    stage=Stage.FETCH,
+                    reused_from=cached.reused_from,
+                )
+                return cached
         hosts = allowed_hosts if allowed_hosts is not None else frozenset({url_host(request.url)})
         headers = {"User-Agent": config.user_agent, **config.extra_headers}
-        log_fields = {"retailer": request.retailer_id, "url": redact_url(request.url)}
-        for attempt in range(1, config.max_attempts + 1):
-            retry_after: float | None = None
-            try:
-                response, retrieved_at = self._send(request, hosts, headers, attempt, log_fields)
-            except TransportError as error:
-                failure = FetchError(
-                    error.code, error.message, retryable=error.retryable, attempts=attempt
-                )
-            except FetchError as failure_from_redirect:
-                failure = failure_from_redirect
-            else:
-                status = response.status_code
-                if 200 <= status < 300:
-                    _log(
-                        logging.INFO,
-                        "fetch succeeded",
-                        **log_fields,
-                        stage=Stage.FETCH,
-                        attempt=attempt,
-                        http_status=status,
-                        bytes=len(response.body),
+        retailer_key = self.limiter.key_for(request.url, request.retailer_id)
+        sent_attempts = 0
+        with self.limiter.context_scope(
+            url=redact_url(request.url), purpose=self.purpose
+        ):
+            for attempt in range(1, config.max_attempts + 1):
+                retry_after: str | None = None
+                decision: RateLimitDecision | None = None
+                progress: list[int] = []
+                try:
+                    response, retrieved_at, decision = self._send(
+                        request, hosts, headers, attempt, log_fields, progress
                     )
-                    return FetchedPage(
-                        retailer_id=request.retailer_id,
-                        requested_url=request.url,
-                        final_url=response.final_url or request.url,
-                        status_code=status,
-                        body=response.body,
-                        content_type=response.headers.get("content-type", ""),
-                        retrieved_at=retrieved_at,
-                        attempts=attempt,
-                    )
-                failure = FetchError(
-                    "HTTP_STATUS",
-                    f"Retailer returned HTTP {status}.",
-                    retryable=status in config.retry_statuses,
-                    attempts=attempt,
-                    http_status=status,
-                )
-                retry_after = _retry_after_seconds(response.headers.get("retry-after"))
-
-            if not failure.retryable or attempt == config.max_attempts:
-                _log_failure(failure, log_fields, attempt, final=True)
-                raise failure
-            delay = config.backoff_seconds(attempt)
-            if retry_after is not None:
-                if retry_after > config.backoff_max_seconds:
+                except RetailerDeferred as deferred:
+                    sent_attempts += 1 if progress else 0
                     failure = FetchError(
-                        "RETRY_AFTER_TOO_LONG",
-                        f"Retailer asked to wait {retry_after:g}s, above the "
-                        f"{config.backoff_max_seconds:g}s limit; not retrying now.",
+                        RETAILER_DEFERRED,
+                        f"Retailer deferred ({deferred.reason.value}); not before "
+                        f"{deferred.retry_not_before:%Y-%m-%dT%H:%M:%SZ}. Nothing was sent.",
                         retryable=True,
-                        attempts=attempt,
-                        http_status=failure.http_status,
+                        attempts=sent_attempts,
+                        retry_not_before=deferred.retry_not_before,
+                        reason=deferred.reason.value,
                     )
                     _log_failure(failure, log_fields, attempt, final=True)
+                    raise failure from None
+                except TransportError as error:
+                    sent_attempts += 1 if error.sent else 0
+                    failure = FetchError(
+                        error.code, error.message, retryable=error.retryable,
+                        attempts=sent_attempts,
+                    )
+                except FetchError as failure_from_redirect:
+                    sent_attempts += 1
+                    failure_from_redirect.attempts = sent_attempts
+                    failure = failure_from_redirect
+                else:
+                    sent_attempts += 1
+                    status = response.status_code
+                    if 200 <= status < 300:
+                        _log(
+                            logging.INFO,
+                            "fetch succeeded",
+                            **log_fields,
+                            stage=Stage.FETCH,
+                            attempt=attempt,
+                            http_status=status,
+                            bytes=len(response.body),
+                        )
+                        return FetchedPage(
+                            retailer_id=request.retailer_id,
+                            requested_url=request.url,
+                            final_url=response.final_url or request.url,
+                            status_code=status,
+                            body=response.body,
+                            content_type=response.headers.get("content-type", ""),
+                            retrieved_at=retrieved_at,
+                            attempts=sent_attempts,
+                        )
+                    retry_after = response.headers.get("retry-after")
+                    if status == 429 and decision is not None:
+                        failure = FetchError(
+                            RATE_LIMITED,
+                            "Retailer returned HTTP 429 (rate limited); cooldown "
+                            f"{decision.cooldown_seconds:g}s ({decision.source}).",
+                            retryable=429 in config.retry_statuses,
+                            attempts=sent_attempts,
+                            http_status=429,
+                            retry_not_before=decision.retry_not_before,
+                            retry_after_seconds=decision.retry_after_seconds,
+                            reason="RETAILER_PAUSED" if decision.paused else "COOLDOWN",
+                        )
+                    else:
+                        failure = FetchError(
+                            "HTTP_STATUS",
+                            f"Retailer returned HTTP {status}.",
+                            retryable=status in config.retry_statuses,
+                            attempts=sent_attempts,
+                            http_status=status,
+                        )
+
+                paused = decision is not None and decision.paused
+                if not failure.retryable or attempt == config.max_attempts or paused:
+                    _log_failure(failure, log_fields, attempt, final=True)
                     raise failure
-                delay = max(delay, retry_after)
-            _log_failure(failure, log_fields, attempt, final=False, retry_in_seconds=delay)
-            self.clock.sleep(delay)
+                if failure.code == RATE_LIMITED and decision is not None:
+                    delay = decision.cooldown_seconds  # applied by the limiter, retailer-wide
+                else:
+                    delay = config.backoff_seconds(attempt)
+                    requested = parse_retry_after(retry_after, self.clock.now().astimezone(UTC))
+                    if requested is not None:
+                        delay = max(delay, requested)
+                    self.limiter.note_backoff(retailer_key, delay)
+                _log_failure(failure, log_fields, attempt, final=False, retry_in_seconds=delay)
         raise AssertionError("unreachable")  # pragma: no cover
 
     def _send(
@@ -409,22 +542,38 @@ class Fetcher:
         headers: Mapping[str, str],
         attempt: int,
         log_fields: Mapping[str, str],
-    ) -> tuple[TransportResponse, datetime]:
-        """One attempt: GET, then follow allowed redirects, each hop throttled.
+        progress: list[int],
+    ) -> tuple[TransportResponse, datetime, RateLimitDecision | None]:
+        """One attempt: GET, then follow allowed redirects, each hop through the limiter.
 
-        Returns the last response and the UTC time its request started. The response's
-        ``final_url`` is set to the URL that produced it.
+        Returns the last response, the UTC time its request started, and the limiter's decision
+        when that response was HTTP 429. The response's ``final_url`` is the URL that produced it.
         """
         url = request.url
         for hop in range(self.config.max_redirects + 1):
-            self.throttle.wait(request.retailer_id)
-            started_at = self.clock.now().astimezone(UTC)
-            response = self.transport.fetch(
-                url,
-                timeout=self.config.timeout_seconds,
-                headers=headers,
-                max_bytes=self.config.max_response_bytes,
-            )
+            key = self.limiter.key_for(url, request.retailer_id)
+            with self.limiter.slot(key) as slot:
+                started_at = self.clock.now().astimezone(UTC)
+                progress.append(hop)
+                try:
+                    response = self.transport.fetch(
+                        url,
+                        timeout=self.config.timeout_seconds,
+                        headers=headers,
+                        max_bytes=self.config.max_response_bytes,
+                    )
+                except TransportError as error:
+                    if error.sent:
+                        slot.record_transport_error()
+                    else:
+                        slot.cancel()
+                        progress.pop()
+                    raise
+                decision = slot.record(
+                    response.status_code,
+                    response.headers.get("retry-after"),
+                    _rate_limit_evidence(response) if response.status_code == 429 else None,
+                )
             location = response.headers.get("location", "")
             if response.status_code not in REDIRECT_STATUSES or not location:
                 return (
@@ -435,6 +584,7 @@ class Fetcher:
                         response.headers,
                     ),
                     started_at,
+                    decision,
                 )
             target = urljoin(url, location.strip())
             if not is_http_url(target):
@@ -470,13 +620,6 @@ class Fetcher:
             retryable=False,
             attempts=attempt,
         )
-
-
-def _retry_after_seconds(value: str | None) -> float | None:
-    """Integer-seconds ``Retry-After`` only; the HTTP-date form is ignored (normal backoff)."""
-    if value is None or not value.strip().isdigit():
-        return None
-    return float(value.strip())
 
 
 @dataclass(frozen=True)
@@ -533,6 +676,7 @@ class ScrapeFailure:
     attempts: int
     http_status: int | None = None
     offer_index: int | None = None
+    retry_not_before: datetime | None = None  # Rate-limit failures: earliest UTC retry.
 
 
 @dataclass(frozen=True)
@@ -540,6 +684,8 @@ class ScrapeResult:
     request: ScrapeRequest
     observations: tuple[OfferObservation, ...]
     failures: tuple[ScrapeFailure, ...]
+    # Empty: the page came from the network. Otherwise where a reused response came from.
+    page_source: str = ""
 
     @property
     def ok(self) -> bool:
@@ -595,6 +741,7 @@ def scrape(
 
 def scrape_one(adapter: RetailerAdapter, request: ScrapeRequest, fetcher: Fetcher) -> ScrapeResult:
     safe_url = redact_url(request.url)
+    page_source = ""
 
     def failed(stage: Stage, code: str, message: str, attempts: int, **extra) -> ScrapeResult:
         failure = ScrapeFailure(
@@ -609,7 +756,7 @@ def scrape_one(adapter: RetailerAdapter, request: ScrapeRequest, fetcher: Fetche
             attempt=attempts,
             error_code=code,
         )
-        return ScrapeResult(request, (), (failure,))
+        return ScrapeResult(request, (), (failure,), page_source)
 
     if request.retailer_id != adapter.retailer_id:
         return failed(
@@ -645,7 +792,9 @@ def scrape_one(adapter: RetailerAdapter, request: ScrapeRequest, fetcher: Fetche
             error.attempts,
             retryable=error.retryable,
             http_status=error.http_status,
+            retry_not_before=error.retry_not_before,
         )
+    page_source = page.reused_from
     if url_host(page.final_url) not in _allowed_hosts(adapter):
         # Defense in depth for a transport that reports a different final URL.
         return failed(
@@ -709,7 +858,7 @@ def scrape_one(adapter: RetailerAdapter, request: ScrapeRequest, fetcher: Fetche
         observations=len(observations),
         rejected=len(failures),
     )
-    return ScrapeResult(request, tuple(observations), tuple(failures))
+    return ScrapeResult(request, tuple(observations), tuple(failures), page_source)
 
 
 def _allowed_hosts(adapter: RetailerAdapter) -> frozenset[str]:

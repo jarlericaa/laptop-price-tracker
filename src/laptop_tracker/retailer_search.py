@@ -333,7 +333,7 @@ class BudgetedTransport:
         if self.sent >= self.limit:
             raise TransportError(
                 BUDGET_CODE, "The run's request budget is used up; nothing was sent.",
-                retryable=False,
+                retryable=False, sent=False,
             )
         self.sent += 1
         return self.inner.fetch(url, timeout=timeout, headers=headers, max_bytes=max_bytes)

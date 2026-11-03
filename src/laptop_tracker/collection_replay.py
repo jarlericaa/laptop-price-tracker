@@ -131,6 +131,17 @@ def load_saved_collections(folders: Sequence[Path]) -> dict[tuple[str, ...], Sav
     return saved
 
 
+def resumable_records(
+    saved: Mapping[tuple[str, ...], SavedRequest],
+) -> dict[tuple[str, ...], SavedRequest]:
+    """The saved requests a live resume may reuse: only those that produced observations.
+
+    A failed, deferred or rate-limited request is never reused: resuming exists to retry it. A
+    partly invalid page (``PARTIAL``) keeps the offers it did yield.
+    """
+    return {key: record for key, record in saved.items() if record.observations}
+
+
 def parse_saved_page(entry: ManifestEntry, page: FetchedPage) -> ScrapeResult:
     """The adapter's offers from a saved page body, as a live fetch of it would have given."""
     adapter = ROUTES[entry.retailer_id].adapter_factory()
@@ -171,12 +182,14 @@ def replay_outcomes(
         record = saved.get(_request_key(entry.retailer_id, entry.product_url))
         if record is not None:
             outcomes.append(RequestOutcome(entry, ScrapeResult(
-                entry.request, record.observations, record.failures)))
+                entry.request, record.observations, record.failures),
+                f"{SAVED_RECORD}:{record.folder}#{record.request_id}"))
             sources[entry.request_id] = f"{SAVED_RECORD}:{record.folder}#{record.request_id}"
             continue
         page = saved_pages.get(entry.product_url)
         if page is not None:
-            outcomes.append(RequestOutcome(entry, parse_saved_page(entry, page)))
+            outcomes.append(RequestOutcome(
+                entry, parse_saved_page(entry, page), f"{SAVED_PAGE}:{page.content_sha256}"))
             sources[entry.request_id] = f"{SAVED_PAGE}:{page.content_sha256}"
             continue
         sources[entry.request_id] = NOT_SENT_REPLAY_ONLY
@@ -294,6 +307,8 @@ def merge_collection_rounds(round_dirs: Sequence[Path], out_dir: Path) -> dict[s
         status = "REPLAY_ONLY"
     elif any(status in {"SUCCESS", "PARTIAL_SUCCESS"} for status in statuses):
         status = "PARTIAL_SUCCESS"
+    elif statuses and all(status == "DEFERRED_RATE_LIMITED" for status in statuses):
+        status = "DEFERRED_RATE_LIMITED"
     else:
         status = "FAILED"
     results = merged["results"]

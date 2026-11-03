@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import logging
 import urllib.request
 from datetime import timedelta
@@ -11,6 +12,7 @@ from example_adapter import EXAMPLE_HOST, EXAMPLE_URL, ExampleShopAdapter, fixtu
 from scraping_fakes import START, FakeClock, FakeTransport, no_network  # noqa: F401
 
 from laptop_tracker.offers import Availability
+from laptop_tracker.rate_limit import EVENT_COLUMNS
 from laptop_tracker.scraping import (
     FetchConfig,
     FetchedPage,
@@ -119,8 +121,9 @@ def test_retryable_status_backs_off_then_succeeds_with_throttling() -> None:
     result, transport, clock = run(status(503), status(503), page("example_listing.html"))
 
     assert result.ok and result.observations[0].source.attempts == 3
-    # Backoff 5s, then the 10s per-retailer interval adds 5s; backoff 10s already satisfies it.
-    assert clock.sleeps == [5.0, 5.0, 10.0]
+    # The limiter alone waits: backoff 5s / 10s are inside the 10s per-retailer spacing, so each
+    # retry waits one 10s interval (the fetcher itself never sleeps for a retry).
+    assert clock.sleeps == [10.0, 10.0]
     assert [call["at"] for call in transport.calls] == [0.0, 10.0, 20.0]
     assert all(call["timeout"] == 20.0 for call in transport.calls)
 
@@ -160,12 +163,43 @@ def test_retry_after_seconds_are_honored() -> None:
     assert clock.sleeps == [30.0]
 
 
+def test_429_events_record_who_answered() -> None:
+    throttled = TransportResponse(
+        429,
+        EXAMPLE_URL,
+        b"<html>\n  <body>Too   many requests</body></html>",
+        {
+            "retry-after": "60",
+            "server": "cloudflare",
+            "cf-ray": "abc123-MNL",
+            "content-type": "text/html",
+        },
+    )
+    clock = FakeClock()
+    transport = FakeTransport(clock, throttled, page("example_listing.html"))
+    fetcher = Fetcher(transport, FetchConfig(), clock)
+    fetcher.fetch(ScrapeRequest("example_shop", EXAMPLE_URL))
+
+    [event] = fetcher.limiter.events
+    evidence = json.loads(event["response_evidence"])
+    # Diagnostic headers and a collapsed body excerpt; the content type is not diagnostic.
+    assert evidence == {
+        "retry-after": "60",
+        "server": "cloudflare",
+        "cf-ray": "abc123-MNL",
+        "body_excerpt": "<html> <body>Too many requests</body></html>",
+    }
+    assert set(event) == set(EVENT_COLUMNS)
+
+
 def test_retry_after_above_the_limit_stops_without_waiting() -> None:
     result, transport, clock = run(status(503, retry_after="3600"))
 
     assert len(transport.calls) == 1 and clock.sleeps == []
     [failure] = result.failures
-    assert (failure.error_code, failure.retryable) == ("RETRY_AFTER_TOO_LONG", True)
+    # A wait the run will not sleep defers the retailer; it is never shortened to the retry cap.
+    assert (failure.error_code, failure.retryable) == ("RETAILER_DEFERRED", True)
+    assert failure.attempts == 1 and failure.retry_not_before is not None
 
 
 def test_throttling_is_tracked_per_retailer() -> None:
@@ -177,7 +211,8 @@ def test_throttling_is_tracked_per_retailer() -> None:
 
     for retailer in ("example_shop", "example_shop", "other_shop", "slow_shop"):
         fetcher.fetch(ScrapeRequest(retailer, EXAMPLE_URL))
-    fetcher.throttle.wait("slow_shop")
+    with fetcher.limiter.slot("slow_shop") as slot:
+        slot.cancel()
 
     assert [call["at"] for call in transport.calls] == [0.0, 10.0, 10.0, 10.0]
     assert clock.elapsed == 40.0

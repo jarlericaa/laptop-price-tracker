@@ -22,6 +22,7 @@ from laptop_tracker.collection import (
     REVIEW_COLUMNS,
     ManifestError,
     adapter_summary,
+    DEFERRED_RATE_LIMITED,
     collect,
     collected_observations,
     evidence_rows,
@@ -50,6 +51,9 @@ from laptop_tracker.price_tracking import (
     utc_text,
     validate_selected_list,
 )
+from laptop_tracker import rate_limit
+from laptop_tracker.collection_replay import load_saved_collections, resumable_records
+from laptop_tracker.page_cache import PageCache, add_saved_inspections
 from laptop_tracker.scraping import Clock, FetchConfig, Fetcher, SystemClock, Transport
 from laptop_tracker.sheets_source import SheetsSourceError, read_target_table_values
 from laptop_tracker.target_master import (
@@ -78,7 +82,9 @@ OUTPUT_FILES = {
     "evidence": "match_evidence.csv",
     "summary": "collection_run_summary.json",
 }
-EXIT_CODES = {"PREVIEW_ONLY": 0, "SUCCESS": 0, "PARTIAL_SUCCESS": 2, "FAILED": 1}
+EXIT_CODES = {
+    "PREVIEW_ONLY": 0, "SUCCESS": 0, "PARTIAL_SUCCESS": 2, "FAILED": 1, "DEFERRED_RATE_LIMITED": 2,
+}
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -128,7 +134,32 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--output-dir", type=Path, help="Exact run directory; it must not exist yet."
     )
-    return parser.parse_args(argv)
+    parser.add_argument(
+        "--min-seconds-between-requests",
+        type=float,
+        default=FetchConfig().min_request_interval_seconds,
+        help="Per-retailer spacing between requests; never below the default "
+        f"{FetchConfig().min_request_interval_seconds:g} seconds (a recovery pilot used 30).",
+    )
+    parser.add_argument(
+        "--resume-from",
+        type=Path,
+        action="append",
+        default=[],
+        help="An earlier collection or discovery folder (repeatable). A manifest URL it already "
+        "collected with observations is reused, not requested again; a product page it saved "
+        "while inspecting candidates (discovery evidence) answers the identical request without "
+        "a request. Failed, deferred and rate-limited requests are retried.",
+    )
+    rate_limit.add_arguments(parser)
+    args = parser.parse_args(argv)
+    if args.min_seconds_between_requests < FetchConfig().min_request_interval_seconds:
+        parser.error("--min-seconds-between-requests may not be below the default spacing.")
+    return args
+
+
+def limiter_attempts(fetcher: Fetcher) -> int:
+    return sum(stats["run"]["http_attempts"] for stats in fetcher.limiter.snapshot().values())
 
 
 def load_target_master(args: argparse.Namespace) -> tuple[list[list[str]], str, str]:
@@ -152,7 +183,11 @@ def main(
     *,
     transport: Transport | None = None,
     clock: Clock | None = None,
+    fetcher: Fetcher | None = None,
+    reuse: dict | None = None,
 ) -> int:
+    """``fetcher`` and ``reuse`` let a caller (discovery) share its limiter, page cache and the
+    saved records of earlier collections, so every stage obeys one set of retailer cooldowns."""
     args = parse_args(argv)
     clock = clock or SystemClock()
     started = clock.now().astimezone(UTC)
@@ -186,6 +221,37 @@ def main(
     ) as exc:
         print(f"Collection stopped before any retailer request: {exc}", file=sys.stderr)
         return 1
+
+    own_fetcher = fetcher is None and args.live
+    if own_fetcher:
+        # One limiter for the whole run, loaded from the persistent state before any request, so a
+        # restart keeps its cooldowns, pauses and failure streaks.
+        live_transport = getattr(transport, "live", True) is not False
+        try:
+            limiter = rate_limit.RetailerRateLimiter(
+                rate_limit.policy_from_args(args, args.min_seconds_between_requests),
+                clock,
+                state_path=rate_limit.resolve_state_path(args, ROOT, live_transport),
+            )
+        except rate_limit.RateLimitStateError as exc:
+            print(f"Collection stopped before any retailer request: {exc}", file=sys.stderr)
+            return 1
+        page_cache = PageCache()
+        fetcher = Fetcher(
+            transport,
+            FetchConfig(min_request_interval_seconds=args.min_seconds_between_requests),
+            clock,
+            limiter,
+            page_cache,
+        )
+        if args.resume_from:
+            resume_folders = [
+                folder / "collection" if (folder / "collection" / "observations.csv").is_file()
+                else folder
+                for folder in args.resume_from
+            ]
+            reuse = resumable_records(load_saved_collections(resume_folders))
+            add_saved_inspections(page_cache, args.resume_from, now=started)
 
     run_id = f"{started.strftime('%Y%m%dT%H%M%S%fZ')}_{mode.lower()}"
     run_dir = args.output_dir or args.output_root / run_id
@@ -251,8 +317,8 @@ def main(
         print(f"Plan written to {run_dir}.")
         return 0
 
-    # 2. Collect: one shared fetcher, so throttling state is shared across all requests.
-    fetcher = Fetcher(transport, FetchConfig(), clock)
+    # 2. Collect: one shared fetcher and limiter, so spacing and cooldowns hold across stages.
+    assert fetcher is not None
     summary["outputs"] = {key: str(path) for key, path in outputs.items()}
     summary["fetch_config"] = {
         "timeout_seconds": fetcher.config.timeout_seconds,
@@ -261,7 +327,9 @@ def main(
         "max_redirects": fetcher.config.max_redirects,
         "live_transport": fetcher.is_live,
     }
-    outcomes = collect(entries, fetcher)
+    attempts_before = limiter_attempts(fetcher)
+    outcomes = collect(entries, fetcher, reuse)
+    http_attempts = limiter_attempts(fetcher) - attempts_before
     collected = collected_observations(outcomes)
     write_csv(outputs["requests"], REQUEST_COLUMNS, request_rows(entries, outcomes))
     write_csv(outputs["failures"], FAILURE_COLUMNS, failure_rows(outcomes))
@@ -321,7 +389,17 @@ def main(
     summary |= {
         "run_status": status,
         "finished_at_utc": utc_text(clock.now()),
-        "requests_sent": len(outcomes),
+        # Manifest requests that needed the network, the HTTP attempts they cost (retries and
+        # redirect hops included), and those answered by a saved record or a reused page.
+        "requests_sent": sum(1 for o in outcomes if o.page_source == "NETWORK"),
+        "http_attempts": http_attempts,
+        "requests_reused": dict(sorted(Counter(
+            o.page_source.split(":", 1)[0] for o in outcomes if o.page_source != "NETWORK"
+        ).items())),
+        "deferred_rate_limited": [
+            {"request_id": o.entry.request_id, "retailer_id": o.entry.retailer_id}
+            for o in outcomes if o.status == DEFERRED_RATE_LIMITED
+        ],
         "request_statuses": dict(sorted(statuses.items())),
         "failure_codes": dict(
             sorted(
@@ -345,12 +423,16 @@ def main(
         "availability": dict(sorted(Counter(r["availability"] for r in results).items())),
         "review_rows": sum(1 for row in results if review_reasons(row)),
     }
+    if own_fetcher:
+        summary["rate_limiting"] = rate_limit.limiter_summary(fetcher.limiter)
+        write_csv(run_dir / "rate_limit_events.csv", rate_limit.EVENT_COLUMNS,
+                  fetcher.limiter.events)
     outputs["summary"].write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")
 
     # Counts and codes only: URLs, prices, and target IDs stay in the run directory.
     print(
-        f"Live collection {status}: {len(outcomes)} requests sent "
-        f"({', '.join(f'{k} {v}' for k, v in sorted(statuses.items()))}); "
+        f"Live collection {status}: {len(outcomes)} manifest requests, {http_attempts} HTTP "
+        f"attempts ({', '.join(f'{k} {v}' for k, v in sorted(statuses.items()))}); "
         f"{len(collected)} valid observations."
     )
     if summary["failure_codes"]:
