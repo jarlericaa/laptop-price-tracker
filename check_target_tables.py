@@ -5,10 +5,12 @@ from __future__ import annotations
 
 import argparse
 import sys
+from datetime import UTC, datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent / "src"))
 
+from laptop_tracker.catalog_provenance import MANIFEST_NAME, write_retrieval_manifest
 from laptop_tracker.config import Settings
 from laptop_tracker.sheets_source import (
     TARGET_TABLE_TABS,
@@ -26,6 +28,7 @@ from laptop_tracker.target_master import (
     read_table_snapshot_csv,
     validate_target_master,
 )
+from laptop_tracker.verified_top import sha256_values
 
 ROOT = Path(__file__).resolve().parent
 TEMPLATES = {
@@ -86,6 +89,7 @@ def load_tables(args: argparse.Namespace) -> dict[str, list[list[str]] | None]:
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
+    retrieved_at = datetime.now(UTC)
     try:
         tables = load_tables(args)
     except (FileNotFoundError, UnicodeDecodeError, SheetsSourceError, ValueError) as exc:
@@ -93,6 +97,7 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
+    (args.output_dir / MANIFEST_NAME).unlink(missing_ok=True)  # never a stale record
     passed = True
     results = {}
     for name, values in tables.items():
@@ -133,6 +138,26 @@ def main(argv: list[str] | None = None) -> int:
             results["SOURCE_MODEL_MAP"], results["MATCH_REVIEW"]
         )
         print(f"Mapped source_model_ids still open in MATCH_REVIEW (informational): {overlap}")
+    validated = {
+        name: (args.output_dir / f"{name.lower()}_validated.csv")
+        if (args.output_dir / f"{name.lower()}_validated.csv").is_file()
+        else None
+        for name in tables
+    }
+    write_retrieval_manifest(
+        args.output_dir / MANIFEST_NAME,
+        source="GOOGLE_SHEETS_READ_ONLY" if args.from_sheets else "LOCAL_SNAPSHOT",
+        spreadsheet_id=Settings.from_env().spreadsheet_id if args.from_sheets else None,
+        retrieved_at=retrieved_at,
+        raw_tables=tables,
+        raw_fingerprint=sha256_values,
+        validated_files=validated,
+        check_passed=passed,
+    )
+    print(
+        f"Catalog retrieval record: {args.output_dir / MANIFEST_NAME} (retrieved "
+        f"{retrieved_at.isoformat(timespec='seconds')})."
+    )
     print("Target table check " + ("passed." if passed else "failed."))
     return 0 if passed else 1
 
