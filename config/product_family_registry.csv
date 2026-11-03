@@ -1,0 +1,27 @@
+brand,family,names,includes,evidence,reviewed_on
+Apple,MacBook Air,MacBook Air,,"Registered product name (product_name_registry.csv). MacBook Air and MacBook Pro are different families.",2026-10-27
+Apple,MacBook Pro,MacBook Pro,,"Registered product name (product_name_registry.csv).",2026-10-27
+Apple,MacBook Neo,MacBook Neo,,"Registered product name (product_name_registry.csv).",2026-10-27
+Acer,Aspire,Aspire,Aspire Go;Aspire Lite,"Registered broad family (product_name_registry.csv): covers the Aspire Go, Aspire Lite and Aspire 3 lines. A target recorded under the broad name accepts offers of its lines; a line target does not accept the broad name.",2026-10-27
+Acer,Aspire Go,Aspire Go,,"Line of the Aspire family (codes AG15-71P, AG14-71M); catalog target TGT-000005 names 'Aspire Go 15'.",2026-10-27
+Acer,Aspire Lite,Aspire Lite,,"Line of the Aspire family (codes AL14-45P-R10U, AL15-42P-R9Y9); registered family name (product_name_registry.csv).",2026-10-27
+Acer,Nitro,Nitro;Nitro V,,"Catalog targets TGT-000059 and TGT-000229 (Nitro V 15/16, codes ANV15-42-R2UH and ANV16-71-524U).",2026-10-27
+Acer,Swift Go,Swift Go,,"Catalog targets TGT-000030 (SFG14-75-55MB) and TGT-000271.",2026-10-27
+ASUS,Vivobook,Vivobook;Vivo Book,,"Registered family name (product_name_registry.csv); retailers also write 'VivoBook'.",2026-10-27
+ASUS,TUF Gaming,TUF Gaming;TUF,,"Catalog targets TGT-000023, TGT-000038 and TGT-000064 (codes FA607NUQ, FA506NCG).",2026-10-27
+ASUS,ExpertBook,ExpertBook,,"Catalog target TGT-000232.",2026-10-27
+ASUS,Chromebook,Chromebook,,"Catalog target TGT-000019 (C204MA-YB02-GR).",2026-10-27
+Lenovo,IdeaPad,IdeaPad,,"Registered broad family name (product_name_registry.csv); covers IdeaPad Slim 3/5 machine types.",2026-10-27
+Lenovo,ThinkPad,ThinkPad,,"Catalog targets TGT-000046, -058, -068, -075 and the X-series ThinkPads.",2026-10-27
+Lenovo,ThinkBook,ThinkBook,,"Catalog target TGT-000066.",2026-10-27
+Lenovo,Yoga,Yoga,,"Catalog targets TGT-000100 and TGT-000230.",2026-10-27
+HP,Victus,Victus,,"Registered family name (product_name_registry.csv).",2026-10-27
+HP,HP Laptop,HP Laptop;HP 14;HP 15,,"Catalog targets TGT-000013, -014, -233, -239 (HP Laptop 14/15, 14-ep0445TU, HP 14).",2026-10-27
+HP,ProBook,ProBook,,"Catalog target TGT-000094.",2026-10-27
+MSI,Thin,Thin 15;Thin GF63,,"Catalog targets TGT-000028, -219, -257, -258 (Thin 15 B12UC/B13UC). The bare word Thin is not a name: retailers write it as an adjective (Thin and Light).",2026-10-27
+MSI,Cyborg,Cyborg,,"Catalog targets TGT-000042 and TGT-000262 (Cyborg 15 B13WEKG-1225PH).",2026-10-27
+Dell,Latitude,Latitude,,"Catalog targets TGT-000049, -053, -108.",2026-10-27
+Chuwi,RZBook,RZBook,,"Catalog target TGT-000223.",2026-10-27
+Chuwi,MiniBook,MiniBook,,"Catalog target TGT-000227.",2026-10-27
+Chuwi,Corebook,Corebook,,"Catalog target TGT-000235.",2026-10-27
+Infinix,XBook,XBook,,"Catalog target TGT-000260.",2026-10-27

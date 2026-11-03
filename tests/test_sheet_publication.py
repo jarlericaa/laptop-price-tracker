@@ -140,6 +140,8 @@ class FakeSpreadsheet:
                 for cell in by_id[payload["range"]["sheetId"]]["grid"].values():
                     cell.pop("userEnteredValue", None)
                     cell.pop("hyperlink", None)
+                    if "userEnteredFormat" in fields.split(","):
+                        cell.pop("userEnteredFormat", None)  # the whole format is cleared
                     fmt = cell.get("userEnteredFormat", {})
                     fmt.pop("numberFormat", None)
                     fmt.get("textFormat", {}).pop("link", None)
@@ -201,8 +203,19 @@ class FakeSpreadsheet:
         used = [key for key, cell in cells.items() if cell]
         height = max((r for r, _ in used), default=-1) + 1
         width = max((c for _, c in used), default=-1) + 1
+        layout = sheet["layout"]
+
+        def read(r: int, c: int) -> dict:
+            # Cell content as stored, with the background a layout request painted over it (the
+            # real API reads both from ``userEnteredFormat``).
+            cell = copy.deepcopy(cells.get((r, c), {}))
+            colour = layout.get((r, c), {}).get("backgroundColor")
+            if colour:
+                cell.setdefault("userEnteredFormat", {})["backgroundColor"] = dict(colour)
+            return cell
+
         rows = [
-            {"values": [copy.deepcopy(cells.get((r, c), {})) for c in range(width)]}
+            {"values": [read(r, c) for c in range(width)]}
             for r in range(height)
         ]
         columns = max([width, *(c + 1 for c in sheet["widths"])])

@@ -22,6 +22,7 @@ from test_shopee_summary import ledger
 
 from laptop_tracker.price_tracking import RETAILERS
 from laptop_tracker.sheet_publication import (
+    ALTERNATIVES_TAB,
     BLANK,
     COMPARISON_TAB,
     DATA_TABS,
@@ -110,13 +111,15 @@ def report_for(rows: list[dict[str, str]]) -> PilotReport:
 # The overview plan
 
 
-def test_overview_has_twelve_columns_in_the_requested_order(world) -> None:
+def test_overview_keeps_its_twelve_columns_and_adds_one_text_column_at_the_right(
+        world) -> None:
     plan = plan_for(world)
     overview = plan.tabs[OVERVIEW_TAB]
     assert overview.header == OVERVIEW_HEADER == (
         "Rank", "Laptop", "Screen (in)", "CPU family", "RAM (GB)", "Storage (GB)",
         "Shopee (PHP, historical snapshot)", "DataBlitz (PHP)", "PC Express (PHP)",
-        "Laptop Factory (PHP)", "PC Central (PHP)", "Octagon (PHP)")
+        "Laptop Factory (PHP)", "PC Central (PHP)", "Octagon (PHP)",
+        "Comparison labels (text)")
     assert len(plan.tabs[SUMMARY_TAB].header) == 7
 
 
@@ -148,12 +151,12 @@ def test_a_hundred_row_overview_keeps_order_identity_and_blanks() -> None:
             for rank in range(1, 101)]
     comparison = comparison_tab(rows)
     overview = overview_plan(report_for(rows), comparison)
-    assert len(overview.rows) == 100 and overview.width == 12
+    assert len(overview.rows) == 100 and overview.width == 13
     assert [r[0].value for r in overview.rows] == [str(n) for n in range(1, 101)]
     assert [r[1].note.split(" ")[2] for r in overview.rows] == [row["target_id"] for row in rows]
     priced = [r for r in overview.rows if r[OVERVIEW_HEADER.index("DataBlitz (PHP)")].value]
     assert len(priced) == 33
-    blank = sum(1 for r in overview.rows for cell in r[7:] if cell.kind == "blank")
+    blank = sum(1 for r in overview.rows for cell in r[7:12] if cell.kind == "blank")
     assert blank == 100 * 5 - 33
     assert overview_issues(report_for(rows), comparison, overview) == []
 
@@ -397,7 +400,7 @@ def test_house_layout_freezes_key_columns_and_reads_back(world) -> None:
         assert sheet["heights"][0] == layout.header_height
     comparison = fake.sheets[COMPARISON_TAB]
     assert comparison["widths"][0] < comparison["widths"][4]  # rank narrow, model wide
-    assert comparison["filter"]["endColumnIndex"] == 56
+    assert comparison["filter"]["endColumnIndex"] == len(comparison_header())
     # Readback catches a width someone changed after the write.
     plan = plan_for(world)
     comparison["widths"][4] = 999
@@ -407,7 +410,8 @@ def test_house_layout_freezes_key_columns_and_reads_back(world) -> None:
 
 def test_history_review_and_run_log_keep_their_plain_layout() -> None:
     for title in (*[t for t in DATA_TABS if t not in {COMPARISON_TAB, SUMMARY_TAB,
-                                                      OVERVIEW_TAB}], RUN_LOG_TAB):
+                                                      OVERVIEW_TAB, ALTERNATIVES_TAB}],
+                  RUN_LOG_TAB):
         assert tab_layout(title, ["A"]) is None
 
 
@@ -424,4 +428,5 @@ def test_comparison_columns_used_by_live_conditional_formats_stay_put() -> None:
                                              ("AG", "AI"), ("AM", "AO")), strict=True):
         expected |= {price: f"{name} price (PHP)", status: f"{name} status"}
     assert {letter: header[index] for letter, index in letters.items()} == expected
-    assert len(header) == 56
+    # Close alternatives (2026-10-27) only add columns at the right of the earlier layout.
+    assert header[:56] == comparison_header(alternatives=False) and len(header) == 82

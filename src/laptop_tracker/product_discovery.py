@@ -22,8 +22,10 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from urllib.parse import parse_qs, urlsplit
 
+from .alternatives import MAX_DIFFERENCES
 from .collection import ROUTES
 from .conventions import (
+    canonical_gpu_models,
     cpu_series_forms,
     is_model_code,
     is_part_number_shape,
@@ -31,8 +33,10 @@ from .conventions import (
     product_name_tokens,
 )
 from .discovery import _NOT_A_SUFFIX, _compact, normalize
-from .normalization import CORE_MATCH_COLUMNS, core_value_key
+from .matching import verified_secondary_difference
+from .normalization import CORE_MATCH_COLUMNS, core_value_key, is_blank
 from .offers import clean_text
+from .product_families import default_family_registry
 from .retailer_search import SearchHit, SearchMethod, SearchRecord
 from .variant_axes import (
     PageStatements,
@@ -257,8 +261,11 @@ class RankedCandidate:
         bundle = "BUNDLE_WORDING_IN_TITLE" in self.flags
         own_code = self.category == FAMILY_SPEC_CANDIDATE and "recorded code" in (
             self.code_evidence)
-        return (CATEGORY_PRIORITY[self.category], not own_code, differ, bundle, -agree, tier,
-                first, self.hit.product_url)
+        # Matching configurations first, then one-difference and two-difference close
+        # alternatives, then relevant candidates with incomplete title evidence; pages that are
+        # not relevant keep their earlier relative order after them (2026-10-27).
+        return (title_alternative_potential(self).sort_tier, CATEGORY_PRIORITY[self.category],
+                not own_code, differ, bundle, -agree, tier, first, self.hit.product_url)
 
 
 # Accessory products (2026-10-19, second review). The product noun of an accessory listing comes
@@ -507,6 +514,140 @@ def configuration_difference(candidate: RankedCandidate) -> str:
             stated = value.split("(", 1)[-1].rstrip(")")
             parts.append(f"{name}: title {stated} vs target {candidate.target.core[name]}")
     return "; ".join(parts)
+
+
+# Close-alternative potential of a search title (2026-10-27). A page whose *title* states one or
+# two differences from the target is worth inspecting: the page's own evidence decides whether it
+# is an alternative (alternatives.py). The title only prioritises and gates fetching; it never
+# supplies a specification or a price. A field the title does not state is unknown, never
+# agreement and never a difference.
+TITLE_MATCH_TIER = "MATCH_CONFIGURATION"
+TITLE_ALT_1_TIER = "ALTERNATIVE_1"
+TITLE_ALT_2_TIER = "ALTERNATIVE_2"
+TITLE_INCOMPLETE_TIER = "INCOMPLETE_TITLE"
+TITLE_TOO_MANY_TIER = "TOO_MANY_DIFFERENCES"
+_CLUE_DIMENSIONS = {"screen_size_in": "screen", "cpu_series": "cpu", "ram_capacity_gb": "ram",
+                    "storage_capacity_gb": "storage"}
+_DIMENSION_ORDER = ("model", "screen", "cpu", "ram", "storage", "gpu")
+_SORT_TIERS = {TITLE_MATCH_TIER: 0, TITLE_ALT_1_TIER: 1, TITLE_ALT_2_TIER: 2,
+               TITLE_INCOMPLETE_TIER: 3}
+_SEED_CATEGORIES = frozenset({HISTORICAL_VERIFIED_URL, SUPPLIED_URL})
+
+
+@dataclass(frozen=True)
+class TitleAlternativePotential:
+    """The established title differences of one search result, one per dimension."""
+
+    differences: tuple[str, ...] = ()
+    unknown: tuple[str, ...] = ()
+    agrees: tuple[str, ...] = ()
+    # False for a page that is not a laptop of this target's brand and family (no tier).
+    relevant: bool = False
+    seed: bool = False
+    incomplete: bool = False
+
+    @property
+    def count(self) -> int:
+        return len(self.differences)
+
+    @property
+    def over_budget(self) -> bool:
+        return self.count > MAX_DIFFERENCES
+
+    @property
+    def model_difference(self) -> bool:
+        return "model" in self.differences
+
+    @property
+    def tier(self) -> str:
+        if not self.relevant:
+            return ""
+        if self.over_budget:
+            return TITLE_TOO_MANY_TIER
+        if self.count:
+            return TITLE_ALT_1_TIER if self.count == 1 else TITLE_ALT_2_TIER
+        return TITLE_INCOMPLETE_TIER if self.incomplete else TITLE_MATCH_TIER
+
+    @property
+    def sort_tier(self) -> int:
+        if self.seed:
+            return -1  # A page that matched before, or a person supplied, is re-checked first.
+        return _SORT_TIERS.get(self.tier, 9)
+
+    def describe(self) -> str:
+        return ", ".join(self.differences)
+
+
+def assess_title_alternative(
+    clues: Mapping[str, str], *, category: str, title: str, vendor: str = "",
+    brand: str = "", series: str = "", model: str = "", gpu_model: str = "",
+) -> TitleAlternativePotential:
+    """Count the established differences between a search title and a target.
+
+    ``clues`` are the ``AGREES`` / ``DIFFERS (...)`` / ``MIXED (...)`` / ``NOT_STATED`` states
+    of ``clue_comparison``. A GPU is a difference only when the title states one canonical GPU
+    and the target records another. A model difference exists only for a ``DIFFERENT_MODEL_CODE``
+    result of the target's own brand and recognised product family (``product_families``): the
+    same brand with another family, or an unrelated brand, is never a close alternative.
+    """
+    differences, unknown, agrees = [], [], []
+    for name, dimension in _CLUE_DIMENSIONS.items():
+        state = clues.get(name, "NOT_STATED")
+        if state.startswith(("DIFFERS", "MIXED")):
+            differences.append(dimension)
+        elif state == "AGREES":
+            agrees.append(dimension)
+        else:
+            unknown.append(dimension)
+    stated = canonical_gpu_models(title)
+    if len(stated) == 1 and not is_blank(gpu_model):
+        if verified_secondary_difference("gpu_model", next(iter(stated)), gpu_model):
+            differences.append("gpu")
+        else:
+            agrees.append("gpu")
+    else:
+        unknown.append("gpu")
+    family_model = False
+    if category == DIFFERENT_MODEL and brand and name_in_title(f"{title} {vendor}", brand):
+        registry = default_family_registry()
+        target_family = registry.recognize(brand, series, model).family
+        offer_family = registry.recognize(brand, title).family
+        family_model = target_family is not None and offer_family is not None and (
+            registry.same_family(target_family, offer_family))
+        if family_model:
+            differences.append("model")
+    seed = category in _SEED_CATEGORIES
+    relevant = seed or category in COLLECTABLE or family_model
+    incomplete = category == FAMILY_SPEC_CANDIDATE and sum(
+        value == "AGREES" for value in clues.values()) < 2
+
+    def ordered(names: list[str]) -> tuple[str, ...]:
+        return tuple(d for d in _DIMENSION_ORDER if d in names)
+
+    return TitleAlternativePotential(
+        ordered(differences), ordered(unknown), ordered(agrees), relevant, seed, incomplete)
+
+
+def title_alternative_potential(candidate: RankedCandidate) -> TitleAlternativePotential:
+    target = candidate.target
+    return assess_title_alternative(
+        candidate.clues, category=candidate.category, title=candidate.hit.title,
+        vendor=candidate.hit.vendor, brand=target.brand, series=target.series,
+        model=target.model, gpu_model=str(target.record.get("gpu_model", "") or ""))
+
+
+def title_alternative_potential_from_row(
+    row: Mapping[str, str], target: Mapping[str, object] | None = None
+) -> TitleAlternativePotential:
+    """The same assessment from a saved ``candidates.csv`` row (its ``clue_*`` columns, category
+    and title) and the target's catalog row, so earlier runs can be reassessed offline."""
+    target = target or {}
+    clues = {name: row.get(f"clue_{name}", "") or "NOT_STATED" for name in _CLUE_DIMENSIONS}
+    return assess_title_alternative(
+        clues, category=row.get("category", ""), title=row.get("title", ""),
+        vendor=row.get("vendor", ""), brand=str(target.get("brand", "") or ""),
+        series=str(target.get("series", "") or ""), model=str(target.get("model", "") or ""),
+        gpu_model=str(target.get("gpu_model", "") or ""))
 
 
 def is_plausible(candidate: RankedCandidate) -> bool:
@@ -883,11 +1024,15 @@ CANDIDATE_COLUMNS: tuple[str, ...] = (
     "configuration_difference", "plausible", "seed_url",
     # Lineage (2026-10-19): search job -> candidate -> collection request -> observation.
     "discovery_round", "collection_url", "collection_request_id",
+    # Close-alternative assessment of the search title (2026-10-27).
+    "title_difference_count", "title_difference_dimensions", "title_unknown_dimensions",
+    "alternative_tier",
 )
 
 
 def candidate_row(candidate: RankedCandidate) -> dict[str, str]:
     hit = candidate.hit
+    potential = title_alternative_potential(candidate)
     row = {
         "target_id": candidate.target.target_id,
         "rank": candidate.target.rank,
@@ -919,6 +1064,10 @@ def candidate_row(candidate: RankedCandidate) -> dict[str, str]:
         "discovery_round": str(candidate.discovery_round),
         "collection_url": candidate.collection_url,
         "collection_request_id": candidate.collection_request_id,
+        "title_difference_count": str(potential.count),
+        "title_difference_dimensions": ";".join(potential.differences),
+        "title_unknown_dimensions": ";".join(potential.unknown),
+        "alternative_tier": potential.tier,
     }
     return {column: row.get(column, "") for column in CANDIDATE_COLUMNS}
 

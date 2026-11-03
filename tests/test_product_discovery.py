@@ -296,7 +296,8 @@ def test_multi_variant_pages_list_variants_from_their_own_structured_data() -> N
     ("retailer", "ram", "decision", "manifest_url_suffix"),
     [
         ("pcc", "16", "COLLECT_VARIANT", "?variant=50000000000002"),
-        ("pcc", "32", "REVIEW_NO_MATCHING_VARIANT", None),
+        # No variant states 32GB: one close-alternative variant (RAM only) is collected, 2026-10-27.
+        ("pcc", "32", "COLLECT_VARIANT_ALTERNATIVE", "?variant=50000000000002"),
         ("datablitz", "16", "REVIEW_MULTI_VARIANT_NOT_SUPPORTED", None),
     ],
 )

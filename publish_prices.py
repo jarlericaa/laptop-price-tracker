@@ -13,6 +13,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent / "src"))
 
 from laptop_tracker.sheet_publication import (
+    ALTERNATIVES_TAB,
     DATA_TABS,
     OVERVIEW_TAB,
     PUBLISHER_TABS,
@@ -29,6 +30,7 @@ from laptop_tracker.sheet_publication import (
     load_pilot_report,
     publish,
     read_tab,
+    refuse_variation_workbook,
     rollback,
     snapshot_tab,
     write_displayed_csv,
@@ -221,6 +223,15 @@ def main(
         f"History observations requiring match review in this week: "
         f"{counts['week_matching_problems']}."
     )
+    print(
+        f"Close alternatives (not matching configurations; never in the matching minimums or "
+        f"counts): {counts['alternative_prices']} retailer cells show one (ALT 1 "
+        f"{counts['alternative_prices_alt_1']}, ALT 2 {counts['alternative_prices_alt_2']}); "
+        f"{counts['configurations_with_alternative']} configurations have an eligible "
+        f"alternative; {ALTERNATIVES_TAB}: {len(plan.tabs[ALTERNATIVES_TAB].rows)} rows "
+        f"({counts['alternative_rows_eligible']} price-eligible); retailer cells tagged RECHECK "
+        f"(unresolved, no price): {counts['alternative_recheck_cells']}."
+    )
     local_report["offers_pricing_several_targets"] = report.shared
     for offer, targets in report.shared.items():
         print(f"Review: one offer prices {len(targets)} configurations ({', '.join(targets)}): "
@@ -236,7 +247,12 @@ def main(
     factory = spreadsheet_factory or open_configured_spreadsheet
     try:
         spreadsheet = factory(not args.write_sheets)
+        refuse_variation_workbook(spreadsheet)
         states = {title: read_tab(spreadsheet, title) for title in PUBLISHER_TABS}
+    except DestinationError as exc:
+        local_report |= {"status": "DESTINATION_REFUSED", "error": str(exc)}
+        print(f"Destination refused: {exc}", file=sys.stderr)
+        return finish(1)
     except Exception as exc:  # Access problems are reported without credentials.
         local_report |= {"status": "ACCESS_FAILED", "error": f"{type(exc).__name__}: {exc}"}
         print(

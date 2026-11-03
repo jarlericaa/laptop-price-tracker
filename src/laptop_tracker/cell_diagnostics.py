@@ -36,10 +36,12 @@ MATCH_REVIEW = "MATCH_REVIEW_REQUIRED"
 CONFIGURATION_MISMATCH = "CONFIGURATION_MISMATCH"
 NOT_COMPARABLE = "PRICE_KNOWN_NOT_COMPARABLE"
 PUBLISHED = "COMPARABLE_PUBLISHED"
+# The cell shows a close alternative (2026-10-27): a labelled price, not a matching configuration.
+ALTERNATIVE_PUBLISHED = "ALTERNATIVE_PUBLISHED"
 STAGES: tuple[str, ...] = (
     NOT_SEARCHED, SEARCH_FAILED, ZERO_RESULTS, NO_RELEVANT_CANDIDATE,
     CATALOG_IDENTITY_UNRESOLVED, NOT_FETCHED, FETCH_ERROR, PARSED_NO_PRICE, VARIANT_UNRESOLVED,
-    MATCH_REVIEW, CONFIGURATION_MISMATCH, NOT_COMPARABLE, PUBLISHED,
+    MATCH_REVIEW, CONFIGURATION_MISMATCH, NOT_COMPARABLE, PUBLISHED, ALTERNATIVE_PUBLISHED,
 )
 
 # coverage_report.py pair statuses -> stage.
@@ -155,6 +157,8 @@ def diagnose_cells(
                 report_status, NOT_SEARCHED)
             if report_status == "SELECTED":
                 stage = PUBLISHED
+            elif report_status == "ALTERNATIVE_SELECTED":
+                stage = ALTERNATIVE_PUBLISHED
             elif report_status == "NO_COMPARABLE_OFFER":
                 stage = NOT_COMPARABLE
             sent_records = [r for r in records if not r.get("outcome", "").startswith("NOT_SENT")]
@@ -229,8 +233,8 @@ def diagnose_cells(
                     "observation_id", ""),
                 "match_status": observation.get("match_status", ""),
                 "match_reason_codes": observation.get("reason_codes", ""),
-                "observed_listing_price": observed if stage != PUBLISHED else chosen.get(
-                    "price", ""),
+                "observed_listing_price": observed if stage not in {
+                    PUBLISHED, ALTERNATIVE_PUBLISHED} else chosen.get("price", ""),
                 "observed_availability": (chosen.get("availability")
                                           or observation.get("availability", "")),
                 "owner_policy_comparable_price": (chosen.get("price", "")

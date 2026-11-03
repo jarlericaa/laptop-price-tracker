@@ -31,11 +31,18 @@ from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
+from .alternatives import DIMENSIONS, alternative_tag
 from .price_tracking import (
+    ALTERNATIVE_COLUMNS,
+    ALTERNATIVE_SELECTED,
     CANDIDATE_NOT_CONFIRMED,
+    CLOSE_ALTERNATIVE_REVIEW,
+    COMPARABLE,
     COMPARISON_COLUMNS,
+    EVALUATION_COLUMNS,
     HISTORY_COLUMNS,
     LEGACY_COMPARISON_COLUMNS,
+    LEGACY_HISTORY_COLUMNS,
     LEGACY_SELECTION_COLUMNS,
     NO_COMPARABLE_OFFER,
     NO_OBSERVATION_IN_WEEK,
@@ -67,7 +74,7 @@ UNPRICED_STATUS_TEXT = {
     "DISCOVERY_NOT_ATTEMPTED": "Search not attempted",
 }
 
-PUBLISHER_VERSION = "pilot-sheets-6"
+PUBLISHER_VERSION = "pilot-sheets-7"
 COMPARISON_TAB = "PILOT_PRICE_COMPARISON"
 # The minimal side-by-side price grid (pilot-sheets-5, 2026-10-20): the detailed comparison's
 # own selected prices, one row per configuration, context in cell notes.
@@ -75,15 +82,21 @@ SUMMARY_TAB = "PILOT_PRICE_SUMMARY"
 # Rank, specifications and prices in twelve columns (pilot-sheets-6, 2026-10-22): the detailed
 # comparison's own cells, one row per configuration in comparison-rank order.
 OVERVIEW_TAB = "PILOT_PRICE_OVERVIEW"
+# One row per target-retailer-offer association that qualifies as a close alternative
+# (pilot-sheets-7, 2026-10-27): at most two established differences, clearly labelled.
+ALTERNATIVES_TAB = "PILOT_PRICE_ALTERNATIVES"
 HISTORY_TAB = "PILOT_PRICE_HISTORY"
 REVIEW_TAB = "PILOT_PRICE_REVIEW"
 RUN_LOG_TAB = "PILOT_PRICE_RUN_LOG"
 # The exact destination allowlist. Names are compared exactly: no trimming or case folding.
 PUBLISHER_TABS: tuple[str, ...] = (
-    COMPARISON_TAB, SUMMARY_TAB, OVERVIEW_TAB, HISTORY_TAB, REVIEW_TAB, RUN_LOG_TAB)
-DATA_TABS: tuple[str, ...] = (COMPARISON_TAB, SUMMARY_TAB, OVERVIEW_TAB, HISTORY_TAB, REVIEW_TAB)
+    COMPARISON_TAB, SUMMARY_TAB, OVERVIEW_TAB, ALTERNATIVES_TAB, HISTORY_TAB, REVIEW_TAB,
+    RUN_LOG_TAB)
+DATA_TABS: tuple[str, ...] = (
+    COMPARISON_TAB, SUMMARY_TAB, OVERVIEW_TAB, ALTERNATIVES_TAB, HISTORY_TAB, REVIEW_TAB)
 # Tabs whose cells carry notes and italics: their field mask, clearing and readback include them.
-NOTE_TABS: tuple[str, ...] = (SUMMARY_TAB, OVERVIEW_TAB)
+NOTE_TABS: tuple[str, ...] = (SUMMARY_TAB, OVERVIEW_TAB, ALTERNATIVES_TAB,
+                              "TOP_100_SHOPEE_VARIATIONS")
 
 RETAILER_NAMES = {
     "DBZ": "DataBlitz",
@@ -112,6 +125,11 @@ REASON_TEXT = {
     "PRICE_TYPE_UNKNOWN": "price type unknown",
     "PRICE_INVALID": "invalid price",
     "RETAILER_NOT_IN_COMPARISON": "retailer not compared",
+    "CPU_EXACT_PROCESSOR_UNKNOWN": "exact processor not stated; CPU compared by series only",
+    "GPU_UNKNOWN": "GPU unknown on the target or the retailer (not compared)",
+    "SPECIFIC_MODEL_UNKNOWN": "specific model unknown (compared at family level)",
+    "SECONDARY_WARNING_OS": "operating system differs",
+    "SECONDARY_WARNING_COLOR": "colour differs",
 }
 NUMBER_FORMATS = {
     "php": {"type": "CURRENCY", "pattern": '"₱"#,##0.00'},
@@ -128,7 +146,7 @@ READ_FIELDS = (
     "sheets(properties(sheetId,title,gridProperties(rowCount,columnCount,frozenRowCount,"
     "frozenColumnCount)),"
     "data(startRow,startColumn,rowData(values(userEnteredValue,hyperlink,note,"
-    "userEnteredFormat(numberFormat,textFormat(link,bold,italic))))))"
+    "userEnteredFormat(numberFormat,backgroundColor,textFormat(link,bold,italic))))))"
 )
 
 
@@ -144,9 +162,32 @@ class DestinationError(RuntimeError):
     """A destination tab is not safe to write (not allowlisted, or not publisher-owned)."""
 
 
-def assert_publisher_tab(title: str) -> None:
-    if title not in PUBLISHER_TABS:
+# Tabs the owner retired on 2026-10-27 (shopee-variation-sheets-1): no publisher may write or
+# recreate them, and no allowlist may name them.
+RETIRED_TABS: tuple[str, ...] = (SUMMARY_TAB, "P1_TOP_100_CONFIGURATIONS")
+# Present only in a workbook prepared for the Shopee-variation grain.
+VARIATION_WORKBOOK_MARKER = "TOP_100_SHOPEE_VARIATIONS"
+
+
+def assert_publisher_tab(title: str, allowed: Sequence[str] = PUBLISHER_TABS) -> None:
+    if title not in allowed:
         raise DestinationError(f"Tab {title!r} is not a pilot publisher destination.")
+
+
+def is_variation_workbook(spreadsheet) -> bool:
+    """True for a workbook prepared for the Shopee-variation grain (its Top list tab exists)."""
+    return any(ws.title == VARIATION_WORKBOOK_MARKER for ws in spreadsheet.worksheets())
+
+
+def refuse_variation_workbook(spreadsheet) -> None:
+    """The configuration-grain (pilot-sheets-7) publisher never writes a variation workbook: its
+    outputs are the wrong grain for the new templates and it would recreate a retired tab."""
+    if is_variation_workbook(spreadsheet):
+        raise DestinationError(
+            "This workbook uses the Shopee-variation grain (shopee-variation-sheets-1); legacy "
+            "configuration outputs are not published into it. Use publish_variation_prices.py. "
+            f"Retired tabs ({', '.join(RETIRED_TABS)}) are never recreated."
+        )
 
 
 # Cells and tab plans
@@ -163,35 +204,44 @@ class Cell:
     # grid. A blank cell may carry a note that explains the blank.
     note: str = ""
     italic: bool = False
+    # A comparison-status fill (pilot-sheets-7): "match", "alt1", "alt2" or "recheck" (see
+    # ``STATUS_FILLS``); colour is never the only signal, the tag text and note say the same.
+    fill: str = ""
 
     def plain(self) -> list[str]:
         plain = [self.kind, self.value, self.link, self.number_format]
-        # Notes and italics are part of the published content (and its SHA-256) when present.
-        return plain + ([self.note, "italic" if self.italic else ""]
-                        if self.note or self.italic else [])
+        # Notes, italics and fills are part of the published content (and its SHA-256) when
+        # present.
+        if self.note or self.italic or self.fill:
+            plain += [self.note, "italic" if self.italic else ""]
+        if self.fill:
+            plain.append(self.fill)
+        return plain
 
 
 BLANK = Cell()
 
 
-def text(value: object, *, link: str = "", bold: bool = False, note: str = "") -> Cell:
+def text(value: object, *, link: str = "", bold: bool = False, note: str = "",
+         fill: str = "") -> Cell:
     value = "" if value is None else str(value)
     if not value:
-        return Cell(note=note) if note else BLANK
-    return Cell("text", value, link, "", bold, note)
+        return Cell(note=note, fill=fill) if note or fill else BLANK
+    return Cell("text", value, link, "", bold, note, fill=fill)
 
 
-def number(value: str, number_format: str, *, note: str = "", italic: bool = False) -> Cell:
+def number(value: str, number_format: str, *, note: str = "", italic: bool = False,
+           fill: str = "") -> Cell:
     """A numeric cell from exact decimal text; blank text stays blank, never zero."""
     if value == "":
-        return Cell(note=note) if note else BLANK
+        return Cell(note=note, fill=fill) if note or fill else BLANK
     try:
         parsed = Decimal(value)
     except InvalidOperation:
         raise PublicationInputError([f"{value!r} is not a decimal number"]) from None
     if not parsed.is_finite():
         raise PublicationInputError(["a number is not finite"])
-    return Cell("number", value, "", number_format, note=note, italic=italic)
+    return Cell("number", value, "", number_format, note=note, italic=italic, fill=fill)
 
 
 @dataclass(frozen=True)
@@ -232,7 +282,10 @@ REPORT_FILES = {
 }
 # Report files that older report folders do not have (read when present).
 OPTIONAL_REPORT_FILES = {"rechecks": "recheck_candidates.csv",
-                         "ledger": "configuration_source_ledger.csv"}
+                         "ledger": "configuration_source_ledger.csv",
+                         # Close alternatives (2026-10-27): reports saved before have neither.
+                         "alternatives": "weekly_price_alternatives.csv",
+                         "evaluations": "alternative_evaluations.csv"}
 COLLECTION_FILES = {
     "summary": "collection_run_summary.json",
     "results": "match_results.csv",
@@ -281,6 +334,20 @@ class PilotReport:
     rechecks: list[dict[str, str]] = field(default_factory=list)
     # Selected offers priced in several targets' cells (shared_offers), for review.
     shared: dict[str, list[str]] = field(default_factory=dict)
+    # Close-alternative associations of the pilot scope (weekly_price_alternatives.csv; absent
+    # before 2026-10-27) and every evaluation (alternative_evaluations.csv, audit only).
+    alternatives: list[dict[str, str]] = field(default_factory=list)
+    evaluations: list[dict[str, str]] = field(default_factory=list)
+
+    def displayed_alternative(self, target_id: str, code: str) -> dict[str, str] | None:
+        """The alternative a retailer cell shows (``displayed_in_comparison``), if any."""
+        return next((row for row in self.alternatives
+                     if row["target_id"] == target_id and row["retailer_code"] == code
+                     and row["displayed_in_comparison"] == "TRUE"), None)
+
+    def alternatives_of(self, target_id: str, code: str) -> list[dict[str, str]]:
+        return [row for row in self.alternatives
+                if row["target_id"] == target_id and row["retailer_code"] == code]
 
     @property
     def week_start(self) -> date:
@@ -327,7 +394,12 @@ def load_pilot_report(
             dict.fromkeys(SELECTION_COLUMNS, "") | row for row in read_csv_rows(
                 paths["selections"], LEGACY_SELECTION_COLUMNS, "Selections report")
         ]
-        history = read_csv_rows(paths["history"], HISTORY_COLUMNS, "History report")
+        # Reports saved before 2026-10-27 lack the close-alternative columns: blank, never
+        # invented.
+        history = [
+            dict.fromkeys(HISTORY_COLUMNS, "") | row for row in read_csv_rows(
+                paths["history"], LEGACY_HISTORY_COLUMNS, "History report")
+        ]
         review = read_csv_rows(paths["review"], REVIEW_COLUMNS, "Review report")
         scope = read_csv_rows(pilot_scope, CONFIGURATION_COLUMNS, "Pilot scope")
     except VerifiedRankingInputError as exc:
@@ -347,6 +419,21 @@ def load_pilot_report(
     fingerprints = {f"report/{name}": sha256_file(path) for name, path in
                     ((p.name, p) for p in paths.values())}
     fingerprints["pilot_scope"] = sha256_file(pilot_scope)
+    alternatives_path = report_dir / OPTIONAL_REPORT_FILES["alternatives"]
+    evaluations_path = report_dir / OPTIONAL_REPORT_FILES["evaluations"]
+    all_alternatives: list[dict[str, str]] = []
+    all_evaluations: list[dict[str, str]] = []
+    try:
+        if alternatives_path.is_file():
+            all_alternatives = read_csv_rows(alternatives_path, ALTERNATIVE_COLUMNS,
+                                             "Alternatives report")
+            fingerprints[f"report/{alternatives_path.name}"] = sha256_file(alternatives_path)
+        if evaluations_path.is_file():
+            all_evaluations = read_csv_rows(evaluations_path, EVALUATION_COLUMNS,
+                                            "Alternative evaluations")
+            fingerprints[f"report/{evaluations_path.name}"] = sha256_file(evaluations_path)
+    except VerifiedRankingInputError as exc:
+        raise PublicationInputError([str(exc)]) from None
 
     # Report-level consistency.
     if week_end - week_start != timedelta(days=7) or week_start.weekday() != 0:
@@ -424,6 +511,15 @@ def load_pilot_report(
         issues.append("history report repeats an observation_id")
     by_observation = {row["observation_id"]: row for row in history}
 
+    # Close alternatives of the pilot scope; every row is checked against the history report.
+    alternatives = [row for row in all_alternatives if row["target_id"] in scope_set]
+    evaluations = [row for row in all_evaluations if row["target_id"] in scope_set]
+    issues += _alternative_issues(alternatives, by_observation, start_utc, end_utc, as_of)
+    alternative_index: dict[str, dict[str, dict[str, str]]] = {}
+    for alt in alternatives:
+        alternative_index.setdefault(alt["target_id"], {})[alt["observation_id"]] = alt
+    alternative_observations = {alt["observation_id"] for alt in alternatives}
+
     # Comparison cells: blank prices stay blank; links come only from exact current-week offers.
     pilot_comparison = sorted(
         (by_target[target_id] for target_id in scope_ids), key=lambda r: int(r["rank"])
@@ -439,9 +535,15 @@ def load_pilot_report(
             if selection is None or selection["price_status"] != status:
                 issues.append(f"{where} status disagrees with the selections report")
                 continue
-            if status not in {SELECTED, NO_COMPARABLE_OFFER, REVIEW_REQUIRED_ONLY,
-                              NO_OBSERVATION_IN_WEEK, *UNPRICED_STATUS_TEXT}:
+            if status not in {SELECTED, ALTERNATIVE_SELECTED, NO_COMPARABLE_OFFER,
+                              REVIEW_REQUIRED_ONLY, NO_OBSERVATION_IN_WEEK,
+                              *UNPRICED_STATUS_TEXT}:
                 issues.append(f"{where} has an unknown price status")
+                continue
+            if status == ALTERNATIVE_SELECTED:
+                issues += _alternative_cell_issues(
+                    row, code, selection, by_observation, alternative_index.get(target_id, {}),
+                    start_utc, end_utc, as_of)
                 continue
             if status == SELECTED:
                 try:
@@ -510,6 +612,7 @@ def load_pilot_report(
         stated = row["Lowest_In_Stock_Price"]
         if (Decimal(stated) if stated else None) != lowest_in_stock:
             issues.append(f"{target_id} lowest in-stock price disagrees with its selections")
+        issues += _alternative_minimum_issues(row, alternative_index.get(target_id, {}))
 
     # Manifest expectations scope the pilot without assigning an uncertain offer to a target.
     pilot_observation_ids: set[str] = set()
@@ -539,7 +642,7 @@ def load_pilot_report(
         listed = set(filter(None, ";".join((
             row.get("listed_spec_target_ids", ""), row.get("listed_spec_ambiguous_target_ids", ""),
         )).split(";")))
-        if listed & scope_set:
+        if listed & scope_set or row["observation_id"] in alternative_observations:
             return True
         if row["match_status"] == "EXACT":
             return row["target_id"] in scope_set
@@ -680,6 +783,22 @@ def load_pilot_report(
         # code target and a listed-spec match for a family target with the same specifications).
         # Allowed by the listed-spec policy, but a possible duplicate target: owner review.
         "offers_pricing_several_targets": len(shared),
+        # Close alternatives (2026-10-27); the matching counts above never include them.
+        "alternative_prices": sum(
+            1 for r, c in cells if r[f"{c}_Price_Status"] == ALTERNATIVE_SELECTED),
+        "alternative_prices_alt_1": sum(
+            1 for r, c in cells if r[f"{c}_Price_Status"] == ALTERNATIVE_SELECTED
+            and r.get(f"{c}_Alternative_Level") == "1"),
+        "alternative_prices_alt_2": sum(
+            1 for r, c in cells if r[f"{c}_Price_Status"] == ALTERNATIVE_SELECTED
+            and r.get(f"{c}_Alternative_Level") == "2"),
+        "alternative_rows": len(alternatives),
+        "alternative_rows_eligible": sum(
+            1 for a in alternatives if a["price_eligibility"] == COMPARABLE),
+        "alternative_recheck_cells": sum(
+            1 for r, c in cells if r.get(f"{c}_Comparison_Tag") == "RECHECK"),
+        "configurations_with_alternative": sum(
+            1 for r in pilot_comparison if r.get("Alternative_Retailer_Count") not in {"", "0"}),
     }
     return PilotReport(
         report_dir=report_dir,
@@ -695,7 +814,149 @@ def load_pilot_report(
         counts=counts,
         rechecks=rechecks,
         shared=shared,
+        alternatives=alternatives,
+        evaluations=evaluations,
     )
+
+
+def _decimal_or_none(value: str) -> Decimal | None:
+    try:
+        amount = Decimal(value)
+    except InvalidOperation:
+        return None
+    return amount if amount.is_finite() and amount > 0 else None
+
+
+def _alternative_issues(
+    alternatives: Sequence[Mapping[str, str]],
+    by_observation: Mapping[str, Mapping[str, str]],
+    start_utc: datetime,
+    end_utc: datetime,
+    as_of: datetime,
+) -> list[str]:
+    """Every alternative association must be internally consistent and backed by the history
+    report: its observation is in the week and not after the cutoff, its price and link are the
+    observation's own, 1 or 2 differences name that many differing dimensions, and its tag says
+    the same."""
+    issues: list[str] = []
+    seen: set[tuple[str, str]] = set()
+    for alt in alternatives:
+        where = (f"{alt['target_id']} {alt['retailer_code']} alternative "
+                 f"{alt['observation_id'][:12]}")
+        key = (alt["target_id"], alt["observation_id"])
+        if key in seen:
+            issues.append(f"{where} is repeated")
+        seen.add(key)
+        observed = by_observation.get(alt["observation_id"])
+        if observed is None:
+            issues.append(f"{where} has no history observation")
+        else:
+            if (observed["price"], observed["offer_url"]) != (alt["price"], alt["offer_url"]):
+                issues.append(f"{where} price or link is not the observation's own")
+            if observed["retrieved_at_utc"] != alt["retrieved_at_utc"]:
+                issues.append(f"{where} observation time differs from the history report")
+        try:
+            retrieved = _utc(alt["retrieved_at_utc"])
+        except ValueError:
+            issues.append(f"{where} has no valid observation time")
+        else:
+            if not (start_utc <= retrieved < end_utc and retrieved <= as_of):
+                issues.append(f"{where} was not observed in the report week")
+        if _decimal_or_none(alt["price"]) is None:
+            issues.append(f"{where} price is not a positive decimal")
+        if alt["price_eligibility"] not in {COMPARABLE, "NOT_COMPARABLE"}:
+            issues.append(f"{where} has an unknown price eligibility")
+        dimensions = [d for d in alt["differing_dimensions"].split(";") if d]
+        if (alt["difference_count"] not in {"1", "2"}
+                or alt["difference_count"] != str(len(dimensions))
+                or len(set(dimensions)) != len(dimensions)
+                or not set(dimensions) <= set(DIMENSIONS)):
+            issues.append(f"{where} difference count does not match its differing dimensions")
+        elif alt["alternative_tag"] != alternative_tag(len(dimensions), dimensions):
+            issues.append(f"{where} tag does not match its differences")
+        if alt["displayed_in_comparison"] not in {"TRUE", "FALSE"}:
+            issues.append(f"{where} has an unknown display flag")
+    return issues
+
+
+def _alternative_cell_issues(
+    row: Mapping[str, str],
+    code: str,
+    selection: Mapping[str, str],
+    by_observation: Mapping[str, Mapping[str, str]],
+    alternatives: Mapping[str, Mapping[str, str]],
+    start_utc: datetime,
+    end_utc: datetime,
+    as_of: datetime,
+) -> list[str]:
+    """A cell that shows a close alternative: the selections row supplies the same price and
+    link, the offer is a comparable alternative association displayed for that cell, observed in
+    the week, and the cell's tag agrees with it."""
+    where = f"{row['target_id']} {code}"
+    issues = []
+    price, url = row[f"{code}_Price"], row[f"{code}_Offer_URL"]
+    if _decimal_or_none(price) is None:
+        return [f"{where} alternative price is not a positive decimal"]
+    if (price, url) != (selection["price"], selection["offer_url"]):
+        issues.append(f"{where} alternative price or link is not the offer that supplied it")
+    if selection["currency"] != REPORTING_CURRENCY:
+        issues.append(f"{where} alternative price is not PHP")
+    try:
+        retrieved = _utc(selection["retrieved_at_utc"])
+    except ValueError:
+        return [*issues, f"{where} alternative has no valid observation time"]
+    if not (start_utc <= retrieved < end_utc and retrieved <= as_of):
+        issues.append(f"{where} alternative price was not observed in the report week")
+    alt = alternatives.get(selection["observation_id"])
+    if (alt is None or alt["retailer_code"] != code or alt["price_eligibility"] != COMPARABLE
+            or alt["displayed_in_comparison"] != "TRUE"
+            or (alt["price"], alt["offer_url"]) != (price, url)):
+        issues.append(f"{where} alternative price is not a comparable, displayed alternative "
+                      "association")
+    elif row.get(f"{code}_Comparison_Tag") != alt["alternative_tag"] or (
+            selection.get("alternative_tag") not in {"", alt["alternative_tag"]}):
+        issues.append(f"{where} tag differs from its alternative association")
+    if by_observation.get(selection["observation_id"]) is None:
+        issues.append(f"{where} alternative has no history observation")
+    return issues
+
+
+def _alternative_minimum_issues(
+    row: Mapping[str, str], alternatives: Mapping[str, Mapping[str, str]]
+) -> list[str]:
+    """The alternative counts and minimums must be those of the full eligible alternative pool
+    in the alternatives report: each retailer once, hidden offers included, out-of-stock offers
+    never in the in-stock minimum. Reports without the columns (earlier than 2026-10-27) skip."""
+    if not row.get("Comparison_Retailer_Count"):
+        return []
+    target_id = row["target_id"]
+    issues = []
+    pool = [a for a in alternatives.values() if a["price_eligibility"] == COMPARABLE]
+    for prefix, count_column, pool_rows in (
+        ("Lowest_Alternative_Price", "Alternative_Retailer_Count", pool),
+        ("Lowest_Alternative_In_Stock_Price", "",
+         [a for a in pool if a["availability"] == "IN_STOCK"]),
+    ):
+        per_retailer: dict[str, Decimal] = {}
+        for alt in pool_rows:
+            amount = _decimal_or_none(alt["price"])
+            if amount is not None and (alt["retailer_code"] not in per_retailer
+                                       or amount < per_retailer[alt["retailer_code"]]):
+                per_retailer[alt["retailer_code"]] = amount
+        lowest = min(per_retailer.values(), default=None)
+        stated = row[prefix]
+        if (Decimal(stated) if stated else None) != lowest:
+            issues.append(f"{target_id} {prefix} disagrees with the alternatives report")
+        tied = ";".join(code for code, _ in RETAILERS if per_retailer.get(code) == lowest)
+        if row[f"{prefix}_Retailers"] != (tied if lowest is not None else ""):
+            issues.append(f"{target_id} {prefix} retailers are wrong")
+        if count_column and row[count_column] != str(len(per_retailer)):
+            issues.append(f"{target_id} alternative retailer count is wrong")
+    shown = sum(1 for code, _ in RETAILERS if row[f"{code}_Price_Status"] in
+                {SELECTED, ALTERNATIVE_SELECTED})
+    if row["Comparison_Retailer_Count"] != str(shown):
+        issues.append(f"{target_id} retailers-shown count is wrong")
+    return issues
 
 
 def shared_offers(
@@ -727,7 +988,7 @@ BASIS_TEXT = {
 
 def _status_text(
     status: str, reasons: str, availability: str = "", basis: str = "", warnings: str = "",
-    details: str = "",
+    details: str = "", tag: str = "", differences: str = "", unknowns: str = "",
 ) -> str:
     """Short status for one retailer cell. "Matched configuration" means the five-field policy
     matched; it does not claim an identical factory SKU or processor number. A listed-spec price
@@ -745,6 +1006,16 @@ def _status_text(
         detail = ", ".join(BASIS_TEXT[tag] for tag in basis.split("+") if tag in BASIS_TEXT)
         if detail:
             text_value += f"; matched configuration ({detail})"
+    elif status == ALTERNATIVE_SELECTED:
+        # A close alternative (2026-10-27): the tag, the differences, and a plain statement that
+        # it is not a matching configuration.
+        text_value = "Alternative price" + (" (OUT OF STOCK)" if availability == "OUT_OF_STOCK"
+                                             else "")
+        text_value += f" — {tag}: {differences}".rstrip(": ")
+        text_value += (" Not a matching configuration; shown because no matching offer is "
+                       "comparable at this retailer")
+        if unknowns:
+            text_value += f"; unknown: {unknowns}"
     elif status == NO_COMPARABLE_OFFER:
         text_value = "Matched, not comparable: " + (_reason_text(_codes(reasons)) or "excluded")
     elif status == REVIEW_REQUIRED_ONLY:
@@ -819,14 +1090,50 @@ def _minimum_retailers(retailers: str, notes: str) -> str:
     )
 
 
+# Close-alternative columns (pilot-sheets-7, 2026-10-27), strictly at the right of the earlier
+# layout. Each retailer's cell is tagged (MATCH, ALT 1 · RAM, RECHECK); the minimums below are
+# ALTERNATIVES ONLY (the retailer minimums stay matching-only) and are taken from the full
+# eligible alternative pool, including offers a retailer's main display does not show.
+ALTERNATIVE_MINIMUM_HEADER: tuple[str, ...] = (
+    "Lowest alternative price (PHP, alternatives only)",
+    "Lowest alternative price retailer(s)",
+    "Lowest alternative price tag",
+    "Lowest alternative price difference count",
+    "Lowest alternative price differences",
+    "Lowest alternative price unknown fields",
+    "Lowest alternative price stock",
+    "Lowest alternative price link",
+    "Lowest alternative price observed (Asia/Singapore)",
+    "Lowest alternative price observation ID",
+    "Lowest in-stock alternative price (PHP, alternatives only)",
+    "Lowest in-stock alternative retailer(s)",
+    "Lowest in-stock alternative tag",
+    "Lowest in-stock alternative difference count",
+    "Lowest in-stock alternative differences",
+    "Lowest in-stock alternative unknown fields",
+    "Lowest in-stock alternative link",
+    "Lowest in-stock alternative observed (Asia/Singapore)",
+    "Lowest in-stock alternative observation ID",
+)
+ALTERNATIVE_COMPARISON_HEADER: tuple[str, ...] = (
+    *(f"{RETAILER_NAMES[code]} comparison tag" for code, _ in RETAILERS),
+    "Alternative retailers (eligible alternatives)",
+    "Retailers shown (matching or alternative)",
+    *ALTERNATIVE_MINIMUM_HEADER,
+)
+
+
 def comparison_header(
-    *, recheck: bool = True, basis: bool = True, shopee: bool = True
+    *, recheck: bool = True, basis: bool = True, shopee: bool = True,
+    alternatives: bool = True,
 ) -> tuple[str, ...]:
     """The comparison tab header. ``recheck=False`` is the pilot-sheets-2 layout (before the
     recheck columns of 2026-10-19), ``basis=False`` the pilot-sheets-3 layout (before the
     matching-basis columns of 2026-10-20) and ``shopee=False`` the pilot-sheets-4 layout (before
-    the Shopee snapshot columns and the retailer-minimum headers); all are recognised as this
-    publisher's, so the next publication migrates the layout."""
+    the Shopee snapshot columns and the retailer-minimum headers) and ``alternatives=False`` the
+    pilot-sheets-6 layout (before the close-alternative columns of 2026-10-27, appended at the
+    right); all are recognised as this publisher's, so the next publication migrates the
+    layout."""
     header = [
         "Rank",
         "Target ID",
@@ -868,14 +1175,16 @@ def comparison_header(
         "Week status",
         "Report cutoff (Asia/Singapore)",
     ]
+    if alternatives:
+        header += list(ALTERNATIVE_COMPARISON_HEADER)
     return tuple(header)
 
 
 # The pilot-sheets-2 and pilot-sheets-3 comparison layouts are this publisher's own too.
 EARLIER_HEADERS[COMPARISON_TAB] += (
-    comparison_header(recheck=False, basis=False, shopee=False),
-    comparison_header(basis=False, shopee=False),
-    comparison_header(shopee=False),
+    comparison_header(recheck=False, basis=False, shopee=False, alternatives=False),
+    comparison_header(basis=False, shopee=False, alternatives=False),
+    comparison_header(shopee=False, alternatives=False),
 )
 BASIS_WORDS = {"EXACT_PRODUCT": "exact product match", "LISTED_SPEC": "listed-spec match",
                "MIXED": "exact product and listed-spec matches"}
@@ -906,6 +1215,9 @@ RETAILER_MINIMUM_HEADER: tuple[str, ...] = (
     "Lowest in-stock retailer(s)",
     "Lowest in-stock retailer price basis",
 )
+# The pilot-sheets-6 comparison header (before the close-alternative columns) is this
+# publisher's too; it needs the Shopee and minimum headers above.
+EARLIER_HEADERS[COMPARISON_TAB] += (comparison_header(alternatives=False),)
 SHOPEE_STATUS_TEXT = {
     "SNAPSHOT_PRICE": "Lowest eligible mapped-listing snapshot price",
     "NO_MAPPED_SOURCE": "No snapshot price: no contributing listing is still mapped",
@@ -1009,6 +1321,61 @@ def _recheck_cells(report: PilotReport, row: Mapping[str, str], code: str) -> li
     return [text(url, link=url), text(note)]
 
 
+def cell_tag(row: Mapping[str, str], code: str) -> str:
+    """The comparison tag of one retailer cell: MATCH, ``ALT 1 · RAM``, RECHECK or blank. A report
+    saved before the tags (2026-10-27) tags every priced cell MATCH."""
+    tag = row.get(f"{code}_Comparison_Tag", "")
+    if not tag and row.get(f"{code}_Price"):
+        return "MATCH"
+    return tag
+
+
+def tag_fill(tag: str, *, priced: bool) -> str:
+    """The status fill of a tag: green MATCH, yellow ALT 1, orange ALT 2, gray RECHECK (only
+    where no comparison price is shown)."""
+    if tag == "MATCH":
+        return "match"
+    if tag.startswith("ALT 1"):
+        return "alt1"
+    if tag.startswith("ALT 2"):
+        return "alt2"
+    return "recheck" if tag == "RECHECK" and not priced else ""
+
+
+def _named(value: str, separator: str = ";") -> str:
+    """``DBZ:ALT 1 · RAM;LF:ALT 2 · …`` -> ``DataBlitz: ALT 1 · RAM; Laptop Factory: …``."""
+    parts = []
+    for part in value.split(separator):
+        code, _, rest = part.strip().partition(":")
+        parts.append(f"{RETAILER_NAMES[code]}: {rest.strip()}" if code in RETAILER_NAMES
+                     else part.strip())
+    joiner = "; " if separator == ";" else separator
+    return joiner.join(part for part in parts if part)
+
+
+def _alternative_minimum_cells(row: Mapping[str, str], prefix: str, *, stock: bool) -> list[Cell]:
+    """The cells of one alternative-only minimum group, in ``ALTERNATIVE_MINIMUM_HEADER`` order.
+    The offer link is a cell link only when one retailer wins."""
+    url = row.get(f"{prefix}_Offer_URL", "")
+    cells = [
+        number(row.get(prefix, ""), "php"),
+        text(_minimum_retailers(row.get(f"{prefix}_Retailers", ""),
+                                row.get(f"{prefix}_Notes", ""))),
+        text(_named(row.get(f"{prefix}_Tag", ""))),
+        text(_named(row.get(f"{prefix}_Difference_Count", ""))),
+        text(_named(row.get(f"{prefix}_Differences", ""), " | ")),
+        text(_named(row.get(f"{prefix}_Unknowns", ""), " | ")),
+    ]
+    if stock:
+        cells.append(text(row.get(f"{prefix}_Stock", "")))
+    cells += [
+        text(url, link=url if ";" not in url else ""),
+        text(row.get(f"{prefix}_Observed_At", "")),
+        text(_named(row.get(f"{prefix}_Observation_IDs", ""))),
+    ]
+    return cells
+
+
 def comparison_plan(report: PilotReport) -> TabPlan:
     header = list(comparison_header())
     stock_by_observation = {row["observation_id"]: row["availability"] for row in report.history}
@@ -1040,7 +1407,10 @@ def comparison_plan(report: PilotReport) -> TabPlan:
                                   selection["not_comparable_reasons"],
                                   stock_by_observation.get(selection["observation_id"], ""),
                                   row[f"{code}_Match_Basis"], row[f"{code}_Warnings"],
-                                  row.get(f"{code}_Offer_Details", ""))),
+                                  row.get(f"{code}_Offer_Details", ""),
+                                  cell_tag(row, code),
+                                  row.get(f"{code}_Alternative_Differences", ""),
+                                  row.get(f"{code}_Alternative_Unknowns", ""))),
                 text(row[f"{code}_Observed_At"]),
                 *_recheck_cells(report, row, code),
             ]
@@ -1061,7 +1431,21 @@ def comparison_plan(report: PilotReport) -> TabPlan:
             text(week),
             text(report.summary["report_week"]["status"]),
             text(_local(report.as_of)),
+            # Close alternatives (pilot-sheets-7), at the right of the earlier layout.
+            *(text(cell_tag(row, code), fill=tag_fill(
+                cell_tag(row, code), priced=bool(row[f"{code}_Price"])))
+              for code, _ in RETAILERS),
+            number(row.get("Alternative_Retailer_Count", ""), "integer"),
+            number(row.get("Comparison_Retailer_Count", ""), "integer"),
+            *_alternative_minimum_cells(row, "Lowest_Alternative_Price", stock=True),
+            *_alternative_minimum_cells(row, "Lowest_Alternative_In_Stock_Price", stock=False),
         ]
+        # An alternative's price is filled like its tag (not a matching configuration).
+        for code, _ in RETAILERS:
+            price_at = header.index(f"{RETAILER_NAMES[code]} price (PHP)")
+            fill = tag_fill(cell_tag(row, code), priced=True)
+            if fill in {"alt1", "alt2"} and cells[price_at].kind == "number":
+                cells[price_at] = replace(cells[price_at], fill=fill)
         rows.append(tuple(cells))
     return TabPlan(COMPARISON_TAB, tuple(header), tuple(rows))
 
@@ -1085,7 +1469,13 @@ NOTE_WARNING_TEXT = {
     "SHARED_DESCRIPTION_DIFFERS_STORAGE_CAPACITY_GB": (
         "a shared description states different storage"),
 }
-DETAIL_TABS_TEXT = f"Detailed evidence: {COMPARISON_TAB} and {REVIEW_TAB}."
+# The colour legend, also written as text: colour is never the only signal.
+STATUS_LEGEND = ("Fill: green = MATCH (matching configuration), yellow = ALT 1, orange = ALT 2 "
+                 "(close alternatives, not matching configurations), gray = RECHECK (unresolved, "
+                 "no comparison price), none = no price. The tag is also written in "
+                 f"{COMPARISON_TAB} and in each cell's note.")
+DETAIL_TABS_TEXT = (f"Detailed evidence: {COMPARISON_TAB}, {ALTERNATIVES_TAB} and "
+                    f"{REVIEW_TAB}.")
 _LABEL_TIEBREAK_FIELDS = ("Resolution", "Display Type", "Refresh Rate", "GPU_Model", "RAM_Type",
                           "Storage_Type", "CPU_Generation")
 
@@ -1183,12 +1573,16 @@ def _retailer_summary_note(
     """Basis, stock, bundle, warnings and link of a price; the explanation of a blank."""
     name = RETAILER_NAMES[code]
     warnings = _codes(row[f"{code}_Warnings"])
+    tag = cell_tag(row, code)
     if not row[f"{code}_Price"]:
         lines = [f"{name}: no comparable price this week. " + _status_text(
             row[f"{code}_Price_Status"],
             report.selections[(row["target_id"], code)]["not_comparable_reasons"], stock,
             row[f"{code}_Match_Basis"], row[f"{code}_Warnings"],
             row.get(f"{code}_Offer_Details", "")) + "."]
+        if tag == "RECHECK":
+            lines.insert(0, "RECHECK — unresolved evidence; there is no confirmed comparison "
+                         "price for this cell.")
         url = row.get(f"{code}_Candidate_URL", "")
         if url:
             count = int(row.get(f"{code}_Recheck_Count") or 1)
@@ -1197,7 +1591,15 @@ def _retailer_summary_note(
                          + (f" — {note}" if note else "")
                          + (f" (+{count - 1} more in {REVIEW_TAB})" if count > 1 else ""))
         return "\n".join([*lines, DETAIL_TABS_TEXT])
-    if row[f"{code}_Match_Basis"] == "LISTED_SPEC":
+    if row[f"{code}_Price_Status"] == ALTERNATIVE_SELECTED:
+        lines = [f"{tag} — close alternative, not a matching configuration (at most two "
+                 "established differences from the target).",
+                 f"Differences: {row.get(f'{code}_Alternative_Differences', '')}"]
+        if row.get(f"{code}_Alternative_Unknowns"):
+            lines.append(f"Unknown / limited: {row[f'{code}_Alternative_Unknowns']}")
+        lines.append(f"Detailed record: {ALTERNATIVES_TAB}, observation "
+                     f"{row.get(f'{code}_Alternative_Observation_ID', '')}.")
+    elif row[f"{code}_Match_Basis"] == "LISTED_SPEC":
         lines = ["LISTED-SPEC MATCH — not an exact product match: brand, family, screen, CPU "
                  "series, installed RAM and storage agree; the specific Shopee model is unknown."]
         if row.get(f"{code}_Offer_Details"):
@@ -1216,8 +1618,10 @@ def _retailer_summary_note(
     disagreements = [w for w in warnings if w.startswith("OFFERS_DISAGREE_")]
     if disagreements:
         lines.append("Warning: " + _reason_text(disagreements) + ".")
+    limits = {"CPU_EXACT_PROCESSOR_UNKNOWN", "GPU_UNKNOWN", "SPECIFIC_MODEL_UNKNOWN"}
     other = [w for w in warnings if w != "BUNDLE_OFFER" and w not in disagreements
-             and w != "SPECIFIC_IDENTITY_UNRESOLVED"]
+             and w != "SPECIFIC_IDENTITY_UNRESOLVED"
+             and not (row[f"{code}_Price_Status"] == ALTERNATIVE_SELECTED and w in limits)]
     if other:
         lines.append("Notes: " + ", ".join(
             REASON_TEXT.get(w) or (f"{NOTE_WARNING_TEXT[w]} ({w})" if w in NOTE_WARNING_TEXT
@@ -1245,7 +1649,9 @@ def summary_plan(report: PilotReport) -> TabPlan:
             stock = stock_by_observation.get(selection["observation_id"], "")
             cells.append(number(row[f"{code}_Price"], "php",
                                 note=_retailer_summary_note(report, row, code, stock),
-                                italic=row[f"{code}_Match_Basis"] == "LISTED_SPEC"))
+                                italic=row[f"{code}_Match_Basis"] == "LISTED_SPEC",
+                                fill=tag_fill(cell_tag(row, code),
+                                              priced=bool(row[f"{code}_Price"]))))
         rows.append(tuple(cells))
     snapshot = (f"the Shopee sales extract of {extract} (sales run {sales.get('run_id', '')}; "
                 f"{sales.get('label', '')})" if extract else "the Shopee sales extract")
@@ -1263,7 +1669,7 @@ def summary_plan(report: PilotReport) -> TabPlan:
           f"Out-of-stock and bundle prices are kept under the owner-approved policy. Each cell's "
           f"note gives the matching basis, stock, bundle terms and warnings; a blank cell's note "
           f"explains the blank and links an unconfirmed page to recheck when one exists. "
-          f"{DETAIL_TABS_TEXT}" for code, _ in RETAILERS),
+          f"{DETAIL_TABS_TEXT} {STATUS_LEGEND}" for code, _ in RETAILERS),
     )
     return TabPlan(SUMMARY_TAB, SUMMARY_HEADER, tuple(rows), notes)
 
@@ -1294,10 +1700,16 @@ def summary_issues(comparison: TabPlan, summary: TabPlan) -> list[str]:
 # detailed comparison (overview_issues checks it); a blank comparable price stays blank.
 OVERVIEW_RETAILERS: tuple[str, ...] = ("DBZ", "PCX", "LF", "PCC", "OCT")
 OVERVIEW_SHOPEE = "Shopee (PHP, historical snapshot)"
-OVERVIEW_HEADER: tuple[str, ...] = (
+# The twelve columns of pilot-sheets-6 (2026-10-22); a live tab with exactly this header is still
+# this publisher's. pilot-sheets-7 appends one text column at the right: colour is never the
+# only signal for a MATCH, an alternative or a recheck.
+OVERVIEW_LABELS = "Comparison labels (text)"
+OVERVIEW_HEADER_PILOT_SHEETS_6: tuple[str, ...] = (
     "Rank", "Laptop", "Screen (in)", "CPU family", "RAM (GB)", "Storage (GB)", OVERVIEW_SHOPEE,
     *(f"{RETAILER_NAMES[code]} (PHP)" for code in OVERVIEW_RETAILERS),
 )
+OVERVIEW_HEADER: tuple[str, ...] = (*OVERVIEW_HEADER_PILOT_SHEETS_6, OVERVIEW_LABELS)
+EARLIER_HEADERS[OVERVIEW_TAB] = (OVERVIEW_HEADER_PILOT_SHEETS_6,)
 # Overview columns and the comparison columns they repeat.
 _OVERVIEW_SOURCES: dict[str, str] = {
     "Rank": "Rank", "Screen (in)": "Screen (in)", "CPU family": "CPU family",
@@ -1327,13 +1739,114 @@ def _identity_note(row: Mapping[str, str], label: str) -> str:
             f"match basis, why a price is blank) is in {SUMMARY_TAB} notes.")
 
 
+def _stock_text(stock: str) -> str:
+    return {
+        "IN_STOCK": "in stock",
+        "OUT_OF_STOCK": "OUT OF STOCK (price kept under the owner-approved policy)",
+    }.get(stock, REASON_TEXT.get("AVAILABILITY_" + stock, stock or "not stated"))
+
+
+def _alternative_configuration(alt: Mapping[str, str]) -> str:
+    """The configuration an alternative offer actually has, as its page states it."""
+    cpu = " ".join(filter(None, (alt["offer_cpu_series"],
+                                 f"({alt['offer_cpu_model']})" if alt["offer_cpu_model"] else "")))
+    parts = [
+        f"model {alt['offer_model']}" if alt["offer_model"] else "",
+        f"{alt['offer_screen_in']}in" if alt["offer_screen_in"] else "",
+        f"CPU {cpu}" if cpu else "",
+        f"RAM {_capacity_text(alt['offer_ram_gb'])}" if alt["offer_ram_gb"] else "",
+        f"storage {_capacity_text(alt['offer_storage_gb'])}" if alt["offer_storage_gb"] else "",
+        f"GPU {alt['offer_gpu']}" if alt["offer_gpu"] else "",
+    ]
+    return "; ".join(part for part in parts if part)
+
+
+def _overview_note(report: PilotReport, row: Mapping[str, str], code: str, label: str) -> str:
+    """The note of one overview price (or recheck) cell: the tag and its meaning, the matching
+    basis, the actual configuration, differences, unknowns, stock and a reference to the
+    detailed record. A cell with neither a price nor a recheck has no note."""
+    name, tag = RETAILER_NAMES[code], cell_tag(row, code)
+    priced = bool(row[f"{code}_Price"])
+    if not priced and tag != "RECHECK":
+        return ""
+    target_id, url = row["target_id"], row.get(f"{code}_Offer_URL", "")
+    alt = report.displayed_alternative(target_id, code) if priced and tag.startswith("ALT") \
+        else None
+    lines = []
+    if tag == "RECHECK":
+        lines = [
+            f"{name}: RECHECK — unresolved evidence; no confirmed comparison price.",
+            _status_text(row[f"{code}_Price_Status"], "", "", "", "") + ".",
+        ]
+        note = row.get(f"{code}_Recheck_Note") or row.get(f"{code}_Candidate_Detail", "")
+        if note:
+            lines.append(f"Why: {note}")
+        if url:
+            lines.append(f"Page to recheck (unconfirmed, not a price): {url}")
+        lines.append(f"Detailed record: {COMPARISON_TAB} row for {target_id}; {REVIEW_TAB}.")
+        return "\n".join(lines)
+    if tag.startswith("ALT"):
+        lines = [
+            f"{name}: {tag} — close alternative, NOT a matching configuration.",
+            "Matching basis: none (ALTERNATIVE; at most two established differences from the "
+            f"target: {label}).",
+            "Actual configuration: " + (_alternative_configuration(alt) if alt else
+                                        row.get(f"{code}_Offer_Details", "") or "see the link"),
+            f"Differences: {row.get(f'{code}_Alternative_Differences', '')}",
+        ]
+        unknown = row.get(f"{code}_Alternative_Unknowns", "")
+        if unknown:
+            lines.append(f"Unknown / limited: {unknown}")
+        if alt and alt["warnings"]:
+            lines.append("Notes: " + _reason_text(_codes(alt["warnings"])))
+    else:
+        if row[f"{code}_Match_Basis"] == "LISTED_SPEC":
+            lines = [f"{name}: MATCH — matching configuration (listed-spec match).",
+                     "Matching basis: listed specs — brand, family, screen, CPU series, installed "
+                     "RAM and storage agree; the specific Shopee model is unknown."]
+            if row.get(f"{code}_Offer_Details"):
+                lines.append(f"Offer as listed: {row[f'{code}_Offer_Details']}")
+        else:
+            detail = ", ".join(BASIS_TEXT[tag_] for tag_ in row[f"{code}_Match_Basis"].split("+")
+                               if tag_ in BASIS_TEXT)
+            lines = [f"{name}: MATCH — matching configuration (exact product match).",
+                     "Matching basis: exact product" + (f" ({detail})" if detail else "") + "."]
+        lines.append(f"Configuration: the target, {label}.")
+        warnings = [w for w in _codes(row.get(f"{code}_Warnings", ""))
+                    if w not in {"SPECIFIC_IDENTITY_UNRESOLVED"}]
+        if warnings:
+            lines.append("Notes: " + _reason_text(warnings) + ".")
+        hidden = row.get(f"{code}_Alternative_Offers", "")
+        if hidden not in {"", "0"}:
+            lines.append(f"{hidden} close alternative offer(s) at this retailer are also listed "
+                         f"in {ALTERNATIVES_TAB}.")
+    lines += [f"Stock: {_stock_text(row.get(f'{code}_Stock', ''))}.",
+              f"Observed: {row.get(f'{code}_Observed_At', '')} (Asia/Singapore).",
+              f"Offer: {url}"]
+    if alt:
+        lines.append(f"Detailed record: {ALTERNATIVES_TAB} row for {target_id}, observation "
+                     f"{alt['observation_id']}.")
+    else:
+        lines.append(f"Detailed record: {COMPARISON_TAB} row for {target_id}.")
+    return "\n".join(lines)
+
+
+def _overview_labels(row: Mapping[str, str]) -> str:
+    """``DataBlitz: ALT 1 · RAM; PC Express: MATCH``: the text of every colour."""
+    return "; ".join(f"{RETAILER_NAMES[code]}: {cell_tag(row, code)}"
+                     for code in OVERVIEW_RETAILERS if cell_tag(row, code))
+
+
 def overview_plan(report: PilotReport, comparison: TabPlan) -> TabPlan:
     """One row per configuration in the comparison's order; values copied from its cells.
 
     The Laptop column names brand, series and model; screen, CPU and capacities have their own
     columns. Where two configurations would still read the same, ``configuration_labels`` adds
     the catalog fields that differ, so rows are never visually merged. The target ID is kept in
-    the Laptop cell's note. Listed-spec prices are italic, as in the summary."""
+    the Laptop cell's note. Listed-spec prices are italic, as in the summary. Each retailer
+    cell is filled by its comparison tag (green MATCH, yellow ALT 1, orange ALT 2, gray RECHECK
+    without a price), carries a note, and an alternative's price links to its offer; the last
+    column writes the tags as text."""
     column = {name: comparison.header.index(name) for name in set(_OVERVIEW_SOURCES.values())}
     labels = configuration_labels(report.comparison)
     rows = []
@@ -1345,12 +1858,22 @@ def overview_plan(report: PilotReport, comparison: TabPlan) -> TabPlan:
             if name == "Laptop":
                 cells.append(text(laptop, note=_identity_note(row, label)))
                 continue
+            if name == OVERVIEW_LABELS:
+                cells.append(text(_overview_labels(row)))
+                continue
             source = detailed[column[_OVERVIEW_SOURCES[name]]]
             code = next((c for c in OVERVIEW_RETAILERS
                          if name == f"{RETAILER_NAMES[c]} (PHP)"), "")
-            italic = bool(code) and source.kind == "number" and (
-                row[f"{code}_Match_Basis"] == "LISTED_SPEC")
-            cells.append(replace(source, note="", italic=italic, bold=False))
+            if not code:
+                cells.append(replace(source, note="", italic=False, bold=False))
+                continue
+            tag = cell_tag(row, code)
+            priced = source.kind == "number"
+            italic = priced and row[f"{code}_Match_Basis"] == "LISTED_SPEC"
+            link = row.get(f"{code}_Offer_URL", "") if priced and tag.startswith("ALT") else ""
+            cells.append(replace(
+                source, note=_overview_note(report, row, code, label), italic=italic,
+                bold=False, fill=tag_fill(tag, priced=priced), link=link))
         rows.append(tuple(cells))
     week = (f"{report.week_start.isoformat()} to "
             f"{(report.week_end - timedelta(days=1)).isoformat()}")
@@ -1361,13 +1884,20 @@ def overview_plan(report: PilotReport, comparison: TabPlan) -> TabPlan:
                 f"{COMPARISON_TAB} (reporting week {week}, Asia/Singapore). The target ID is in "
                 "each Laptop cell's note. Screen, CPU family, installed RAM and storage have "
                 "their own columns.")
-    retailer = (f"The comparable price selected in {COMPARISON_TAB} for the week {week}. Blank "
-                "means no comparable price (not 'not sold'); out-of-stock and bundle prices are "
-                f"kept under the owner-approved policy. Italic = listed-spec match. Why a cell is "
-                f"blank, stock and match basis: {SUMMARY_TAB} notes.")
+    retailer = (f"The price shown in {COMPARISON_TAB} for the week {week}: a matching "
+                "configuration when one is comparable, otherwise the best close alternative "
+                "(ALT 1 before ALT 2, then the lowest price). Blank means no comparable price "
+                "(not 'not sold'); out-of-stock and bundle prices are kept under the "
+                "owner-approved policy. Italic = listed-spec match. " + STATUS_LEGEND +
+                f" Why a cell is blank, stock and match basis: {SUMMARY_TAB} notes; every "
+                f"alternative: {ALTERNATIVES_TAB}.")
+    labels_note = ("The tag of every retailer cell, as text (the fills repeat it): MATCH, "
+                   "ALT 1 · …, ALT 2 · … (the differing specifications) or RECHECK. "
+                   + STATUS_LEGEND)
     notes = tuple(
         identity if name in {"Rank", "Laptop", "Screen (in)", "CPU family", "RAM (GB)",
                              "Storage (GB)"}
+        else labels_note if name == OVERVIEW_LABELS
         else (f"HISTORICAL SHOPEE SNAPSHOT, not a current price: the lowest eligible "
               f"mapped-listing price of the Shopee sales extract of {extract or 'unknown date'}. "
               f"Stock is not verified and it is never part of the retailer prices. Listing, "
@@ -1382,9 +1912,10 @@ def overview_issues(
     report: PilotReport, comparison: TabPlan, overview: TabPlan
 ) -> list[str]:
     """The overview repeats the comparison: same rows, order and targets, every repeated cell
-    (value, kind and format) identical, and no two rows that read the same."""
+    (value, kind and format) identical, every status fill and the text labels agreeing with the
+    comparison tags, and no two rows that read the same."""
     if overview.header != OVERVIEW_HEADER:
-        return [f"{OVERVIEW_TAB} header differs from its twelve columns"]
+        return [f"{OVERVIEW_TAB} header differs from its thirteen columns"]
     if len(overview.rows) != len(comparison.rows) or len(overview.rows) != len(
             report.comparison):
         return [f"{OVERVIEW_TAB} has a different number of rows from {COMPARISON_TAB}"]
@@ -1400,15 +1931,131 @@ def overview_issues(
             if name == "Laptop":
                 continue
             mine = brief[index]
+            if name == OVERVIEW_LABELS:
+                if mine.value != _overview_labels(row):
+                    issues.append(f"{OVERVIEW_TAB} {target_id} labels differ from the "
+                                  f"{COMPARISON_TAB} tags")
+                continue
             theirs = detailed[comparison.header.index(_OVERVIEW_SOURCES[name])]
             if (mine.kind, mine.value, mine.number_format) != (
                     theirs.kind, theirs.value, theirs.number_format):
                 issues.append(f"{OVERVIEW_TAB} {target_id} {name} differs from {COMPARISON_TAB}")
+            code = next((c for c in OVERVIEW_RETAILERS
+                         if name == f"{RETAILER_NAMES[c]} (PHP)"), "")
+            if code:
+                tag = cell_tag(row, code)
+                if mine.fill != tag_fill(tag, priced=mine.kind == "number"):
+                    issues.append(f"{OVERVIEW_TAB} {target_id} {name} fill differs from its tag")
+                if (mine.kind == "number" or tag == "RECHECK") and not mine.note:
+                    issues.append(f"{OVERVIEW_TAB} {target_id} {name} has no cell note")
+                if tag.startswith("ALT") and mine.kind == "number" and (
+                        mine.link != row.get(f"{code}_Offer_URL", "")):
+                    issues.append(f"{OVERVIEW_TAB} {target_id} {name} alternative has no link")
         key = tuple(cell.value for cell in brief[1:6])
         if key in visible:
             issues.append(f"{OVERVIEW_TAB} rows for {visible[key]} and {target_id} read the same")
         visible[key] = target_id
     return issues
+
+
+# PILOT_PRICE_ALTERNATIVES (pilot-sheets-7, 2026-10-27): one row per target-retailer-offer
+# association that qualifies as a close alternative (at most two established differences across
+# model, screen, CPU, installed RAM, installed storage and GPU), including alternatives of
+# retailers that also have a matching offer and offers the main comparison does not show.
+ALTERNATIVES_HEADER: tuple[str, ...] = (
+    "Rank", "Target ID", "Target configuration", "Retailer", "Actual product / model code",
+    "Actual screen (in)", "Actual CPU series", "Actual CPU (exact processor)", "Actual RAM (GB)",
+    "Actual storage (GB)", "Actual GPU", "Price (PHP)", "Currency", "Stock", "Product link",
+    "Difference count", "Comparison tag", "Differences (target vs retailer)",
+    "Model comparison", "Screen comparison", "CPU comparison", "RAM comparison",
+    "Storage comparison", "GPU comparison", "Unknown fields", "Limitations", "Warnings",
+    "Price eligibility", "Shown in main comparison", "Matching offer at this retailer",
+    "Observed (Asia/Singapore)", "Observation ID", "Evidence references",
+    "Initiating target(s)", "Exact target of this offer", "Policy version",
+)
+STATE_TEXT = {"AGREES": "agrees", "DIFFERS": "differs", "UNKNOWN": "unknown",
+              "CONFLICTING_EVIDENCE": "conflicting evidence"}
+_NUMERIC = re.compile(r"[0-9]+(?:\.[0-9]+)?\Z")
+
+
+def _numeric(value: str, kind: str) -> Cell:
+    """A number when the value is one (an unparseable value stays text, never zero)."""
+    return number(value, kind) if _NUMERIC.fullmatch(value) else text(value)
+
+
+def _alternative_sort_key(alt: Mapping[str, str]) -> tuple:
+    codes = [code for code, _ in RETAILERS]
+    return (int(alt["rank"]), codes.index(alt["retailer_code"]), int(alt["difference_count"]),
+            Decimal(alt["price"]), alt["observation_id"])
+
+
+def alternatives_plan(report: PilotReport) -> TabPlan:
+    """The close-alternative associations of the pilot scope in rank, retailer, difference-count
+    and price order. Prices are numbers; every row says what the offer actually is, how it
+    differs, what stays unknown, and whether its price is eligible and shown."""
+    labels = {row["target_id"]: configuration_label(row) + (
+        f" · {row['GPU_Model']}" if row.get("GPU_Model") else "") for row in report.comparison}
+    rows = []
+    for alt in sorted(report.alternatives, key=_alternative_sort_key):
+        states = {dimension: alt[f"{dimension}_state"] for dimension in DIMENSIONS}
+        fill = tag_fill(alt["alternative_tag"], priced=True)
+        eligible = ("Comparable" if alt["price_eligibility"] == COMPARABLE else
+                    "Excluded: " + (_reason_text(_codes(alt["price_exclusion_reasons"]))
+                                    or "not comparable"))
+        url = alt["offer_url"]
+        rows.append((
+            number(alt["rank"], "integer"),
+            text(alt["target_id"]),
+            text(labels.get(alt["target_id"], "")),
+            text(RETAILER_NAMES.get(alt["retailer_code"], alt["retailer_id"])),
+            text(alt["offer_model"] or alt["title"]),
+            _numeric(alt["offer_screen_in"], "decimal"),
+            text(alt["offer_cpu_series"]),
+            text(alt["offer_cpu_model"]),
+            _numeric(alt["offer_ram_gb"], "integer"),
+            _numeric(alt["offer_storage_gb"], "integer"),
+            text(alt["offer_gpu"]),
+            number(alt["price"], "php"),
+            text(alt["currency"]),
+            text(alt["availability"]),
+            text(url, link=url),
+            number(alt["difference_count"], "integer", fill=fill),
+            text(alt["alternative_tag"], fill=fill),
+            text(alt["differences"]),
+            *(text(STATE_TEXT.get(states[d], states[d])) for d in DIMENSIONS),
+            text(alt["unknown_fields"]),
+            text(alt["limitations"].replace(";", ", ")),
+            text(alt["warnings"].replace(";", ", ")),
+            text(eligible),
+            text("Yes" if alt["displayed_in_comparison"] == "TRUE" else "No"),
+            text("Yes" if alt["retailer_has_matching_offer"] == "TRUE" else "No"),
+            text(alt["retrieved_at_local"]),
+            text(alt["observation_id"]),
+            text(alt["evidence_references"]),
+            text(alt["initiating_target_ids"].replace(";", ", ")),
+            text(alt["exact_target_id"]),
+            text(alt["policy_version"]),
+        ))
+    week = (f"{report.week_start.isoformat()} to "
+            f"{(report.week_end - timedelta(days=1)).isoformat()}")
+    intro = (f"Close alternatives for the reporting week {week} (Asia/Singapore): offers that are "
+             "NOT matching configurations of the target but differ in at most two established "
+             "specifications (model, screen, CPU, installed RAM, installed storage, GPU share "
+             "that budget). One row per target-retailer-offer, including alternatives of "
+             f"retailers that also have a matching offer. The main comparison ({COMPARISON_TAB}) "
+             "shows an alternative only where no matching offer is comparable. "
+             f"{STATUS_LEGEND}")
+    notes = tuple(
+        intro if name == "Rank" else
+        "Fewest differences first within a retailer, then the lowest price." if name ==
+        "Price (PHP)" else
+        "Unknown fields are never counted as agreement or as a difference; limitations say "
+        "what could not be compared (for example the exact processor or the GPU)."
+        if name == "Unknown fields" else
+        "Shown in main comparison = this offer is the one displayed for the target and "
+        "retailer in the comparison and overview." if name == "Shown in main comparison" else ""
+        for name in ALTERNATIVES_HEADER)
+    return TabPlan(ALTERNATIVES_TAB, ALTERNATIVES_HEADER, tuple(rows), notes)
 
 
 def history_plan(report: PilotReport) -> TabPlan:
@@ -1505,20 +2152,27 @@ def review_plan(report: PilotReport) -> TabPlan:
         exact = row["match_status"] == "EXACT"
         extra = collection.get(row["observation_id"], {}).get("review_reasons", "")
         seen.add(row["observation_id"])
+        close = row["review_reason"].startswith(CLOSE_ALTERNATIVE_REVIEW)
         category = (
-            "Matched, excluded from comparison"
+            "Close alternative (confirmed)"
+            if close
+            else "Matched, excluded from comparison"
             if exact and row["comparability_status"] == "NOT_COMPARABLE"
             else "Matching problem"
             if not exact
             else "Other review"
         )
         details = _reason_text(_codes(row["comparability_reasons"])) if exact else ""
+        if close:
+            # A qualifying alternative (at most two established differences) is not an
+            # unresolved "different configuration"; its tags and differences are the details.
+            details = row["review_reason"][len(CLOSE_ALTERNATIVE_REVIEW):].strip()
         if extra:
             details = "; ".join(filter(None, [details, f"collection: {extra}"]))
         rows.append(
             (
                 text(category),
-                text(row["review_reason"]),
+                text(CLOSE_ALTERNATIVE_REVIEW if close else row["review_reason"]),
                 text(details),
                 text(row["report_week_start"]),
                 text(_local(_utc(row["retrieved_at_utc"]))),
@@ -1656,8 +2310,12 @@ RUN_LOG_HEADER = (
 )
 # pilot-sheets-6 (2026-10-22) appends the overview row count and any adopted tab.
 RUN_LOG_HEADER_PILOT_SHEETS_5 = RUN_LOG_HEADER
-RUN_LOG_HEADER = (*RUN_LOG_HEADER_PILOT_SHEETS_5, "Overview rows", "Adopted tabs")
-EARLIER_HEADERS[RUN_LOG_TAB] = (RUN_LOG_HEADER_PILOT_SHEETS_4, RUN_LOG_HEADER_PILOT_SHEETS_5)
+RUN_LOG_HEADER_PILOT_SHEETS_6 = (*RUN_LOG_HEADER_PILOT_SHEETS_5, "Overview rows", "Adopted tabs")
+# pilot-sheets-7 (2026-10-27) appends the close-alternative counts.
+RUN_LOG_HEADER = (*RUN_LOG_HEADER_PILOT_SHEETS_6, "Alternative prices shown",
+                  "Alternative association rows", "Alternatives rows published")
+EARLIER_HEADERS[RUN_LOG_TAB] = (RUN_LOG_HEADER_PILOT_SHEETS_4, RUN_LOG_HEADER_PILOT_SHEETS_5,
+                                RUN_LOG_HEADER_PILOT_SHEETS_6)
 
 
 def publication_id(report: PilotReport) -> str:
@@ -1746,6 +2404,12 @@ class PublicationPlan:
                  if r.get("Shopee_Snapshot_Date")), "")),
             "Overview rows": number(str(len(self.tabs[OVERVIEW_TAB].rows)), "integer"),
             "Adopted tabs": text(", ".join(self.adopted)),
+            "Alternative prices shown": number(str(counts.get("alternative_prices", 0)),
+                                               "integer"),
+            "Alternative association rows": number(str(counts.get("alternative_rows", 0)),
+                                                   "integer"),
+            "Alternatives rows published": number(
+                str(len(self.tabs[ALTERNATIVES_TAB].rows)), "integer"),
         }
         return values
 
@@ -1756,6 +2420,7 @@ def build_plan(report: PilotReport) -> PublicationPlan:
         COMPARISON_TAB: comparison,
         SUMMARY_TAB: summary_plan(report),
         OVERVIEW_TAB: overview_plan(report, comparison),
+        ALTERNATIVES_TAB: alternatives_plan(report),
         HISTORY_TAB: history_plan(report),
         REVIEW_TAB: review_plan(report),
     }
@@ -1860,9 +2525,9 @@ def _cell_text(cell: Mapping) -> str:
     return str(next(iter(value.values()), "")) if value else ""
 
 
-def read_tab(spreadsheet, title: str) -> TabState:
+def read_tab(spreadsheet, title: str, allowed: Sequence[str] = PUBLISHER_TABS) -> TabState:
     """Read one destination tab (values, links, formats); a missing tab is reported, not made."""
-    assert_publisher_tab(title)
+    assert_publisher_tab(title, allowed)
     found = next((ws for ws in spreadsheet.worksheets() if ws.title == title), None)
     if found is None:
         return TabState(title, False)
@@ -1944,9 +2609,11 @@ SNAPSHOT_FIELDS = (
 RESTORE_CELL_FIELDS = "userEnteredValue,userEnteredFormat,note"
 
 
-def snapshot_tab(spreadsheet, title: str) -> dict | None:
+def snapshot_tab(
+    spreadsheet, title: str, allowed: Sequence[str] = PUBLISHER_TABS
+) -> dict | None:
     """The whole destination tab as the Sheets API returns it, or None when it is missing."""
-    assert_publisher_tab(title)
+    assert_publisher_tab(title, allowed)
     if not any(ws.title == title for ws in spreadsheet.worksheets()):
         return None
     metadata = spreadsheet.fetch_sheet_metadata(
@@ -2058,14 +2725,25 @@ class RollbackOutcome:
     issues: list[str]
 
 
-def rollback(spreadsheet, backup_dir: Path, *, progress=None) -> RollbackOutcome:
+def rollback(
+    spreadsheet,
+    backup_dir: Path,
+    *,
+    progress=None,
+    tabs: Sequence[str] = DATA_TABS,
+    allowed: Sequence[str] = PUBLISHER_TABS,
+) -> RollbackOutcome:
     """Restore every data tab backed up in ``backup_dir`` (a publication folder) to its snapshot.
 
     Only publisher tabs are touched, each only when it is still the same sheet (same ID) that
     was backed up; the run log is never rewritten (it remains the record of publications). A
-    tab the publication created has no backup and is left as it is (reported as skipped)."""
+    tab the publication created has no backup and is left as it is (reported as skipped).
+    ``tabs`` / ``allowed`` select the data tabs and the destination allowlist of another
+    publisher schema (the Shopee-variation publisher); retired tabs are never restorable."""
     restored, skipped, issues = [], [], []
-    for title in DATA_TABS:
+    if allowed is not PUBLISHER_TABS and (set(tabs) | set(allowed)) & set(RETIRED_TABS):
+        raise DestinationError("A retired tab cannot be a rollback destination.")
+    for title in tabs:
         path = backup_dir / f"backup_{title}.json"
         if not path.is_file():
             skipped.append(f"{title}: no backup in this folder (left as it is)")
@@ -2073,7 +2751,7 @@ def rollback(spreadsheet, backup_dir: Path, *, progress=None) -> RollbackOutcome
         backup = json.loads(path.read_text(encoding="utf-8"))
         if backup.get("title") != title:
             raise DestinationError(f"{path.name} does not hold {title}.")
-        state = read_tab(spreadsheet, title)
+        state = read_tab(spreadsheet, title, allowed)
         if not state.exists or state.sheet_id != backup.get("sheet_id"):
             raise DestinationError(f"{title} is not the sheet that was backed up; not restored.")
         snapshot = backup.get("snapshot") or {
@@ -2084,7 +2762,7 @@ def rollback(spreadsheet, backup_dir: Path, *, progress=None) -> RollbackOutcome
         if progress is not None:
             progress(f"restoring {title}")
         spreadsheet.batch_update({"requests": requests})
-        after = read_tab(spreadsheet, title)
+        after = read_tab(spreadsheet, title, allowed)
         for r, row in enumerate(snapshot_rows(snapshot)):
             for c, cell in enumerate(row):
                 actual = after.grid[r][c] if r < len(after.grid) and c < len(after.grid[r]) else {}
@@ -2096,13 +2774,17 @@ def rollback(spreadsheet, backup_dir: Path, *, progress=None) -> RollbackOutcome
                            issues)
 
 
-def tab_requests(state: TabState, plan_grid: Sequence[Sequence[Cell]], width: int) -> list[dict]:
+def tab_requests(
+    state: TabState, plan_grid: Sequence[Sequence[Cell]], width: int, *, layout_fn=None
+) -> list[dict]:
     """Requests that replace this tab's publisher content, keep other formatting, and add a
-    frozen header and filter. Every request targets only this tab's sheet ID."""
+    frozen header and filter. Every request targets only this tab's sheet ID. ``layout_fn``
+    replaces ``tab_layout`` for another publisher schema."""
     sheet_id = state.sheet_id
     rows = len(plan_grid)
     fields = NOTE_CELL_FIELDS if state.title in NOTE_TABS else CELL_FIELDS
-    layout = tab_layout(state.title, [cell.value for cell in plan_grid[0]] if plan_grid else [])
+    layout = (layout_fn or tab_layout)(
+        state.title, [cell.value for cell in plan_grid[0]] if plan_grid else [])
     grid_properties: dict = {"frozenRowCount": 1}
     if layout is not None:
         grid_properties |= {"frozenColumnCount": layout.frozen_columns, "hideGridlines": True}
@@ -2156,6 +2838,8 @@ def tab_requests(state: TabState, plan_grid: Sequence[Sequence[Cell]], width: in
     ]
     if layout is not None:
         requests += layout_requests(sheet_id, rows, layout)
+    # Status fills go last: the layout resets backgrounds and then bands every second row.
+    requests += fill_requests(sheet_id, plan_grid)
     return requests
 
 
@@ -2167,7 +2851,9 @@ def tab_requests(state: TabState, plan_grid: Sequence[Sequence[Cell]], width: in
 # the owner's white header text unreadable. Layout requests never touch values, links, bold,
 # italics or notes, and conditional-format rules are left as they are.
 def _rgb(code: str) -> dict:
-    return {name: round(int(code[i:i + 2], 16) / 255, 6)
+    # Exact n/255: Sheets keeps 8 bits and truncates, so a value rounded down to 6 decimals
+    # (0.835294 for 213) is stored one level low and fails the fill readback.
+    return {name: int(code[i:i + 2], 16) / 255
             for name, i in (("red", 1), ("green", 3), ("blue", 5))}
 
 
@@ -2176,6 +2862,10 @@ WHITE, INK, MUTED = _rgb("#FFFFFF"), _rgb("#24334B"), _rgb("#64748B")
 FILLS = {"shopee": _rgb("#FFF2DF"), "retailer": _rgb("#E8EEF8"), "in_stock": _rgb("#E8F3ED")}
 BAND_BACKGROUND = _rgb("#F5F7FB")
 HEADER_FILLS = {"navy": NAVY, "navy_alt": NAVY_ALT, "orange": ORANGE}
+# Comparison-status fills (pilot-sheets-7): light tints that keep the dark ink text readable and
+# stay apart from the house palette (navy and orange headers, Shopee and retailer tints).
+STATUS_FILLS = {"match": _rgb("#D5EFDB"), "alt1": _rgb("#FFF2A8"), "alt2": _rgb("#FFCF99"),
+                "recheck": _rgb("#DADDE3")}
 PADDING = {"top": 6, "right": 8, "bottom": 6, "left": 8}
 LAYOUT_FIELDS = ",".join(f"userEnteredFormat.{name}" for name in (
     "backgroundColor", "backgroundColorStyle", "horizontalAlignment", "verticalAlignment",
@@ -2234,6 +2924,14 @@ def _comparison_styles() -> dict[str, ColumnStyle]:
                 ColumnStyle(200), ColumnStyle(300))
     styles |= dict(zip(RETAILER_MINIMUM_HEADER, minimums, strict=True))
     styles |= {"Comparable retailers": ColumnStyle(112, "navy_alt", **_NUMBER)}
+    for code, _ in RETAILERS:
+        styles[f"{RETAILER_NAMES[code]} comparison tag"] = ColumnStyle(150, "navy_alt")
+    for name in ALTERNATIVE_COMPARISON_HEADER[len(RETAILERS):]:
+        number_column = "(PHP" in name or name.endswith("retailers (eligible alternatives)") or (
+            "shown (matching" in name)
+        styles[name] = ColumnStyle(
+            155 if number_column else 300 if "differences" in name or "unknown" in name
+            else 200, "navy_alt", **(_NUMBER if number_column else {}))
     for name, width in (("Comparison basis", 200), ("Shopee sales snapshot (extract date)", 155),
                         ("Reporting week (Asia/Singapore)", 210), ("Week status", 130),
                         ("Report cutoff (Asia/Singapore)", 200)):
@@ -2257,10 +2955,31 @@ def tab_layout(title: str, header: Sequence[str]) -> TabLayout | None:
             "CPU family": ColumnStyle(135), "RAM (GB)": ColumnStyle(72, **_NUMBER),
             "Storage (GB)": ColumnStyle(86, **_NUMBER),
             OVERVIEW_SHOPEE: ColumnStyle(150, "orange", "shopee", **_NUMBER),
+            OVERVIEW_LABELS: ColumnStyle(340),
         }
         price = ColumnStyle(120, fill="retailer", **_NUMBER)
         # Rank and Laptop stay visible.
         return TabLayout(tuple(styles.get(n, price) for n in header), 2, 64, 44)
+    if title == ALTERNATIVES_TAB:
+        wide = ColumnStyle(330)
+        styles = dict(_IDENTITY_STYLES) | {
+            "Target configuration": ColumnStyle(330), "Retailer": ColumnStyle(120),
+            "Actual product / model code": ColumnStyle(200), "Actual CPU series": ColumnStyle(120),
+            "Actual CPU (exact processor)": ColumnStyle(150), "Actual GPU": ColumnStyle(110),
+            "Price (PHP)": ColumnStyle(136, "navy", "retailer", **_NUMBER),
+            "Currency": ColumnStyle(80), "Stock": ColumnStyle(110),
+            "Product link": ColumnStyle(175, **_LINK),
+            "Difference count": ColumnStyle(90, **_NUMBER),
+            "Comparison tag": ColumnStyle(170), "Differences (target vs retailer)": wide,
+            "Unknown fields": wide, "Limitations": wide, "Warnings": wide,
+            "Price eligibility": ColumnStyle(220), "Observed (Asia/Singapore)": ColumnStyle(175),
+            "Observation ID": ColumnStyle(190, **_LINK), "Evidence references": ColumnStyle(420),
+            "Initiating target(s)": ColumnStyle(150),
+            "Exact target of this offer": ColumnStyle(130),
+            "Policy version": ColumnStyle(170),
+        }
+        # Rank and Target ID stay visible while scrolling across the specifications.
+        return TabLayout(tuple(styles.get(n, ColumnStyle(130)) for n in header), 2, 64, 52)
     return None
 
 
@@ -2363,6 +3082,40 @@ def guard_requests(requests: Sequence[Mapping], allowed_sheet_ids: set[int]) -> 
             raise DestinationError("A write request uses an unexpected operation.")
 
 
+def _fill_matches(actual: Mapping, fill: str) -> bool:
+    """The cell's read-back background is the planned status fill (to rounding)."""
+    colour = (actual.get("userEnteredFormat") or {}).get("backgroundColor") or {}
+    wanted = STATUS_FILLS[fill]
+    return all(abs(colour.get(channel, 0) - wanted[channel]) < 0.002
+               for channel in ("red", "green", "blue"))
+
+
+def fill_requests(sheet_id: int | None, plan_grid: Sequence[Sequence[Cell]]) -> list[dict]:
+    """``repeatCell`` requests that colour the status-filled cells, one per run of adjacent
+    cells of one fill in a row. They follow the layout requests, which reset backgrounds."""
+    requests = []
+    for r, row in enumerate(plan_grid):
+        c = 0
+        while c < len(row):
+            fill = row[c].fill
+            if not fill:
+                c += 1
+                continue
+            end = c
+            while end + 1 < len(row) and row[end + 1].fill == fill:
+                end += 1
+            colour = STATUS_FILLS[fill]
+            requests.append({"repeatCell": {
+                "range": {"sheetId": sheet_id, "startRowIndex": r, "endRowIndex": r + 1,
+                          "startColumnIndex": c, "endColumnIndex": end + 1},
+                "cell": {"userEnteredFormat": {"backgroundColor": colour,
+                                               "backgroundColorStyle": {"rgbColor": colour}}},
+                "fields": "userEnteredFormat.backgroundColor,"
+                          "userEnteredFormat.backgroundColorStyle"}})
+            c = end + 1
+    return requests
+
+
 def verify_tab(state: TabState, plan_grid: Sequence[Sequence[Cell]]) -> list[str]:
     """Compare a read-back tab with the planned cells: values, links, PHP formats, extras."""
     issues: list[str] = []
@@ -2378,6 +3131,8 @@ def verify_tab(state: TabState, plan_grid: Sequence[Sequence[Cell]]) -> list[str
             if notes and bool(actual.get("userEnteredFormat", {}).get("textFormat", {}).get(
                     "italic")) != planned.italic:
                 issues.append(f"{where} italic differs")
+            if planned.fill and not _fill_matches(actual, planned.fill):
+                issues.append(f"{where} fill differs")
             if planned.kind == "blank":
                 if value:
                     issues.append(f"{where} should be blank")
@@ -2407,12 +3162,14 @@ def verify_tab(state: TabState, plan_grid: Sequence[Sequence[Cell]]) -> list[str
     return issues
 
 
-def verify_layout(spreadsheet, plan: TabPlan) -> list[str]:
+def verify_layout(
+    spreadsheet, plan: TabPlan, *, layout_fn=None, allowed: Sequence[str] = PUBLISHER_TABS
+) -> list[str]:
     """Frozen panes and column widths of a house-layout tab, as read back."""
-    layout = tab_layout(plan.title, plan.header)
+    layout = (layout_fn or tab_layout)(plan.title, plan.header)
     if layout is None:
         return []
-    snapshot = snapshot_tab(spreadsheet, plan.title) or {}
+    snapshot = snapshot_tab(spreadsheet, plan.title, allowed) or {}
     grid = snapshot.get("properties", {}).get("gridProperties", {})
     issues = []
     if (grid.get("frozenRowCount", 0), grid.get("frozenColumnCount", 0)) != (
@@ -2494,6 +3251,7 @@ def publish(
             progress(message)
 
     step("inspecting destination tabs")
+    refuse_variation_workbook(spreadsheet)
     states = {title: read_tab(spreadsheet, title) for title in PUBLISHER_TABS}
     headers = {title: plan.tabs[title].header for title in DATA_TABS} | {
         RUN_LOG_TAB: RUN_LOG_HEADER

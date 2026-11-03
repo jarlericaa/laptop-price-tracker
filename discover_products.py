@@ -17,6 +17,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent / "src"))
 
 from laptop_tracker import evidence_approvals
+from laptop_tracker.alternatives import MAX_DIFFERENCES
 from laptop_tracker.catalog_index import CatalogIndex, DiscoveryError, leads, queries
 from laptop_tracker.category_fallback import (
     FALLBACK_REQUEST_COLUMNS,
@@ -57,6 +58,7 @@ from laptop_tracker.product_discovery import (
     CANDIDATE_COLUMNS,
     COLLECTABLE,
     COVERAGE_COLUMNS,
+    DIFFERENT_MODEL,
     FAMILY_NAME_LEAD,
     FAMILY_SPEC_CANDIDATE,
     HISTORICAL_VERIFIED_URL,
@@ -74,8 +76,9 @@ from laptop_tracker.product_discovery import (
     seed_candidate,
     strip_variant,
     supplied_candidate,
+    title_alternative_potential,
     url_shows_code,
-    variant_decision,
+    variant_evaluation,
 )
 from laptop_tracker.product_names import default_registry
 from laptop_tracker.retailer_search import (
@@ -295,6 +298,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                         help="Do not collect same-code pages whose title states another "
                              "configuration (default: collect them so the page's own "
                              "specifications decide, within the candidate limit).")
+    parser.add_argument("--max-alternative-variants-per-candidate", type=non_negative, default=1,
+                        help="Close-alternative variants (a RAM or storage option the target does "
+                             "not state) collected from one multi-variant page when no variant "
+                             "states the target RAM and storage (default 1; 0 disables). One per "
+                             "distinct RAM/storage configuration; colours are not extra "
+                             "alternatives, and the total stays within two differences.")
     parser.add_argument("--collect", action="store_true",
                         help="Collect and match the manifest with collect_and_match.py.")
     parser.add_argument("--store", type=Path,
@@ -943,8 +952,13 @@ def select_and_inspect(candidates, job, fetcher, transport, args, state, evidenc
     max_seeds = getattr(args, "max_seed_urls_per_target_retailer", 2)
     supplied_count = 0
     max_supplied = getattr(args, "max_supplied_urls_per_target_retailer", 2)
+    max_alternative_variants = getattr(args, "max_alternative_variants_per_candidate", 1)
     for candidate in candidates:
         title_differs = bool(configuration_difference(candidate))
+        potential = title_alternative_potential(candidate)
+        # A same-family page showing another model code is retained as a close-alternative
+        # candidate (one model difference); other families and brands are not.
+        close_alternative = candidate.category == DIFFERENT_MODEL and potential.model_difference
         seeded = candidate.category == HISTORICAL_VERIFIED_URL
         supplied = candidate.category == SUPPLIED_URL
         if candidate.category == ACCESSORY:
@@ -962,14 +976,24 @@ def select_and_inspect(candidates, job, fetcher, transport, args, state, evidenc
                 "The title names the family but not the target's brand; kept for review. "
                 "Not fetched.")
             continue
-        if candidate.category == FAMILY_SPEC_CANDIDATE and title_differs:
-            # A family listing whose title states another configuration is not fetched; it does
-            # not end the search either (2026-10-20).
+        if potential.relevant and potential.over_budget and not (seeded or supplied):
+            # More than two established differences exceed the close-alternative budget: not
+            # fetched, and the reason names the dimensions (2026-10-27).
+            candidate.decision = "SKIPPED_TOO_MANY_TITLE_DIFFERENCES"
+            candidate.decision_reason = (
+                f"The title states {potential.count} differences from the target "
+                f"({potential.describe()}; at most {MAX_DIFFERENCES} are allowed); not fetched."
+                + (f" {configuration_difference(candidate)}." if title_differs else ""))
+            continue
+        if candidate.category == FAMILY_SPEC_CANDIDATE and title_differs and (
+            not collect_differences
+        ):
             candidate.decision = "REVIEW_DIFFERENT_CONFIGURATION_BY_TITLE"
             candidate.decision_reason = ("Title clues state a different configuration: "
                                          + configuration_difference(candidate) + ".")
             continue
-        if candidate.category not in COLLECTABLE:
+        if candidate.category not in COLLECTABLE and not (close_alternative
+                                                          and collect_differences):
             candidate.decision = "NOT_SELECTED"
             candidate.decision_reason = f"Category {candidate.category} is never collected " \
                                         "automatically; listed for review."
@@ -993,16 +1017,22 @@ def select_and_inspect(candidates, job, fetcher, transport, args, state, evidenc
                     "--max-second-pass-candidates-per-target-retailer reached."
                     if job.second_pass else "--max-candidates-per-target-retailer reached.")
                 continue
-            if title_differs and not collect_differences:
+            if (title_differs or close_alternative) and not collect_differences:
                 candidate.decision = "REVIEW_DIFFERENT_CONFIGURATION_BY_TITLE"
                 candidate.decision_reason = "Title clues state a different configuration: " \
-                                            + configuration_difference(candidate) + "."
+                                            + (configuration_difference(candidate)
+                                               or potential.describe()) + "."
                 continue
             chosen += 1
-        collect = "COLLECT_CHECK_CONFIGURATION" if title_differs else "COLLECT"
-        why = (f"Title states another configuration ({configuration_difference(candidate)}); "
-               "collected so the page's own specifications decide."
-               if title_differs else "")
+        differs = title_differs or close_alternative
+        alternative_candidate = differs and (
+            candidate.category in {FAMILY_SPEC_CANDIDATE, DIFFERENT_MODEL})
+        collect = ("COLLECT_CLOSE_ALTERNATIVE_CANDIDATE" if alternative_candidate
+                   else "COLLECT_CHECK_CONFIGURATION" if differs else "COLLECT")
+        why = (f"Title states {potential.count} difference(s) from the target "
+               f"({potential.describe() or 'see clues'}); collected so the page's own "
+               "specifications decide whether it is a matching configuration or a close "
+               "alternative. A title never supplies a price." if differs else "")
         if method.kind == "woocommerce_html":  # No variant inspection: one page per product.
             candidate.decision = collect
             candidate.decision_reason = why or (
@@ -1031,7 +1061,7 @@ def select_and_inspect(candidates, job, fetcher, transport, args, state, evidenc
             # SSD"): collect that exact variant URL, so the adapter binds the selected variant
             # instead of refusing the bare page (2026-10-19, second review).
             variant = inspection.variants[0]
-            decision, reason = variant_decision(variant, job.target)
+            decision, reason = variant_evaluation(variant, job.target)[:2]
             candidate.decision = "COLLECT_VARIANT"
             candidate.decision_reason = (
                 f"Variant {variant.variant_id} (only variant; option '{variant.title}'): "
@@ -1051,12 +1081,15 @@ def select_and_inspect(candidates, job, fetcher, transport, args, state, evidenc
             candidate.decision_reason = inspection.message or "Variants could not be listed."
             continue
         decisions = []
+        evaluations = {}
         for variant in inspection.variants:
-            decision, reason = variant_decision(variant, job.target)
+            evaluation = variant_evaluation(variant, job.target)
+            decision, reason = evaluation.decision, evaluation.reason
             if decision == "COLLECT" and not method.multi_variant_collection:
                 decision, reason = "REVIEW", "This retailer's adapter collects single-variant " \
                                              "pages only."
             decisions.append((variant, decision, reason))
+            evaluations[variant.variant_id] = evaluation
             variants.append({
                 "target_id": job.target.target_id, "retailer_id": job.retailer_id,
                 "product_url": url, "variant_id": variant.variant_id,
@@ -1088,6 +1121,18 @@ def select_and_inspect(candidates, job, fetcher, transport, args, state, evidenc
         elif collect_variants:
             candidate.decision = "REVIEW_SEVERAL_MATCHING_VARIANTS"
             candidate.decision_reason = "More than one variant states the target RAM/storage."
+        elif alternatives := close_alternative_variants(
+            decisions, evaluations, potential, max_alternative_variants
+        ):
+            # No variant states the target RAM and storage: one variant per distinct RAM/storage
+            # configuration whose differences, with the title's, stay within the budget.
+            candidate.decision = "COLLECT_VARIANT_ALTERNATIVE"
+            candidate.decision_reason = " | ".join(
+                f"Variant {variant.variant_id}: close alternative, {', '.join(dims)} differ "
+                f"(option '{variant.title}'); the page's own specifications decide."
+                for variant, dims in alternatives)
+            manifest += [(candidate, variant.url, variant.variant_id)
+                         for variant, _ in alternatives]
         else:
             candidate.decision = "REVIEW_NO_MATCHING_VARIANT"
             candidate.decision_reason = (
@@ -1095,6 +1140,31 @@ def select_and_inspect(candidates, job, fetcher, transport, args, state, evidenc
                 "storage. All are kept in variants.csv with their differences."
             )
     return manifest, inspections, variants
+
+
+def close_alternative_variants(decisions, evaluations, potential, limit):
+    """``[(variant, differing dimensions)]``: variants a page lists whose own options differ from
+    the target in RAM and/or storage, chosen when the differences together with the title's stay
+    within the two-difference budget. One variant per distinct (RAM, storage) configuration
+    (colours are not extra alternatives), fewest differences first; ties are broken by the
+    configuration and the variant ID, never by price, position or default."""
+    if limit <= 0:
+        return []
+    options: dict[tuple[str, str], tuple[tuple, object, list[str]]] = {}
+    for variant, decision, _ in decisions:
+        if decision != "ALTERNATIVE":
+            continue
+        evaluation = evaluations[variant.variant_id]
+        dims = [name for name, state in (("ram", evaluation.ram), ("storage", evaluation.storage))
+                if state.startswith("DIFFERS")]
+        if not dims or len(set(dims) | set(potential.differences)) > MAX_DIFFERENCES:
+            continue
+        config = (evaluation.ram, evaluation.storage)
+        order = (len(dims), config, variant.variant_id)
+        if config not in options or order < options[config][0]:
+            options[config] = (order, variant, dims)
+    ranked = sorted(options.values(), key=lambda item: item[0])
+    return [(variant, dims) for _, variant, dims in ranked[:limit]]
 
 
 def load_seeds(args, targets, retailers) -> dict[tuple[str, str], list[tuple[str, str]]]:
@@ -1467,6 +1537,7 @@ def main(argv: list[str] | None = None, *, transport: Transport | None = None,
         "max_fallback_requests_per_retailer": args.max_fallback_requests_per_retailer,
         "max_second_pass_candidates_per_target_retailer":
             args.max_second_pass_candidates_per_target_retailer,
+        "max_alternative_variants_per_candidate": args.max_alternative_variants_per_candidate,
         "retry_attempts_per_request": FetchConfig().max_attempts,
         "min_seconds_between_requests_per_retailer": args.min_seconds_between_requests,
         "search_cache_folders": [str(path) for path in args.search_cache],

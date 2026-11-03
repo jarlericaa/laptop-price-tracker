@@ -39,6 +39,7 @@ from laptop_tracker.sheet_publication import (
     RUN_LOG_TAB,
     SHOPEE_HEADER,
     SHOPEE_NOT_IN_REPORT,
+    STATUS_FILLS,
     SUMMARY_HEADER,
     SUMMARY_TAB,
     WHITE,
@@ -259,7 +260,7 @@ def test_an_older_report_without_shopee_columns_stays_readable(plain_world) -> N
 
 
 def test_a_pilot_sheets_4_layout_is_migrated_and_stale_cells_cleared(shopee_world) -> None:
-    previous = [list(comparison_header(shopee=False)),
+    previous = [list(comparison_header(shopee=False, alternatives=False)),
                 *[["1", f"TGT-0000{i:02d}"] + ["stale"] * 40 for i in range(1, 12)]]
     run_log = [list(RUN_LOG_HEADER_PILOT_SHEETS_4), ["PUB-earlier", "SUCCESS"]]
     fake = FakeSpreadsheet({COMPARISON_TAB: previous, RUN_LOG_TAB: run_log})
@@ -429,7 +430,9 @@ def test_the_summary_is_created_beside_existing_publisher_tabs(shopee_world, cap
     # white otherwise, and the price columns keep their tint on banded rows too.
     assert sheet["layout"][(2, 0)]["backgroundColor"] == BAND_BACKGROUND
     assert sheet["layout"][(1, 0)]["backgroundColor"] == WHITE
-    assert sheet["layout"][(2, 3)]["backgroundColor"] == FILLS["retailer"]
+    assert sheet["layout"][(2, 6)]["backgroundColor"] == FILLS["retailer"]  # no price: the tint
+    # A priced cell carries its comparison-status fill (pilot-sheets-7): here a matching offer.
+    assert sheet["layout"][(2, 3)]["backgroundColor"] == STATUS_FILLS["match"]
     assert sheet["layout"][(0, 0)]["textFormat"]["foregroundColor"] == WHITE
     assert sheet["layout"][(0, 0)]["backgroundColor"] == NAVY
     assert set(latest_report(shopee_world)["tabs_written"]) == set(PUBLISHER_TABS)
@@ -447,9 +450,11 @@ def test_preview_lists_the_summary_and_writes_its_notes_plan(shopee_world, capsy
     with (folder / f"plan_{SUMMARY_TAB}_notes.csv").open(encoding="utf-8") as handle:
         notes = list(csv.DictReader(handle))
     assert len(notes) == 7 + 7 * 6
-    # The overview (pilot-sheets-6) notes its twelve headers and each row's target identity.
+    # The overview notes its thirteen headers, each row's target identity and (pilot-sheets-7)
+    # each priced or recheck cell (5 here); the alternatives tab notes four of its headers.
     assert json.loads((folder / "publication_report.json").read_text())[
-        "planned_cell_notes"] == {SUMMARY_TAB: 49, "PILOT_PRICE_OVERVIEW": 12 + 7}
+        "planned_cell_notes"] == {SUMMARY_TAB: 49, "PILOT_PRICE_OVERVIEW": 13 + 7 + 5,
+                                  "PILOT_PRICE_ALTERNATIVES": 4}
 
 
 def test_a_summary_tab_with_unrelated_content_is_refused(shopee_world, capsys) -> None:

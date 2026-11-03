@@ -13,6 +13,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent / "src"))
 
+from laptop_tracker.alternatives import MAX_DIFFERENCES, AlternativeEvaluator
+from laptop_tracker.alternatives import POLICY_VERSION as ALTERNATIVE_POLICY
 from laptop_tracker.listed_spec import ListedSpecMatcher
 from laptop_tracker.match_run import (
     ObservationFileError,
@@ -38,7 +40,9 @@ from laptop_tracker.pilot_coverage import (
     search_stage_outcomes,
 )
 from laptop_tracker.price_tracking import (
+    ALTERNATIVE_COLUMNS,
     COMPARISON_COLUMNS,
+    EVALUATION_COLUMNS,
     HISTORY_COLUMNS,
     MATCHING_RULES_VERSION,
     REPORTING_CURRENCY,
@@ -106,6 +110,9 @@ OUTPUT_FILES = {
     "ledger": "configuration_source_ledger.csv",
     "rechecks": "recheck_candidates.csv",
     "shopee": "shopee_price_selection.csv",
+    # Close alternatives (2026-10-27): qualifying associations and every evaluation (audit).
+    "alternatives": "weekly_price_alternatives.csv",
+    "evaluations": "alternative_evaluations.csv",
     "summary": "price_tracking_run_summary.json",
 }
 
@@ -200,6 +207,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             "for, and its recorded search outcomes explain blank cells with no related offer "
             "(NO_RELEVANT_CANDIDATE, SEARCH_FAILED, FETCH_FAILED, ...). A folder whose discovery "
             "started outside the report week is refused. Context only: never an assignment."
+        ),
+    )
+    parser.add_argument(
+        "--no-alternatives",
+        action="store_true",
+        help=(
+            "Report matching configurations only (the policy before 2026-10-27): no close "
+            "alternatives are evaluated, shown or counted."
         ),
     )
     parser.add_argument(
@@ -388,6 +403,8 @@ def main(argv: list[str] | None = None) -> int:
             discovery_rechecks=discovered_rechecks,
             listed_spec=ListedSpecMatcher(target_master.valid_rows),
             shopee=shopee,
+            alternatives=None if args.no_alternatives else AlternativeEvaluator(
+                [item.target for item in selected.configurations]),
         )
     except (
         ObservationConflictError,
@@ -415,6 +432,8 @@ def main(argv: list[str] | None = None) -> int:
     write_csv(outputs["shopee"], SHOPEE_SELECTION_COLUMNS, shopee_rows)
     shopee_counts = Counter(row["shopee_price_status"] for row in shopee_rows)
     write_csv(outputs["rechecks"], RECHECK_COLUMNS, result.rechecks)
+    write_csv(outputs["alternatives"], ALTERNATIVE_COLUMNS, result.alternatives)
+    write_csv(outputs["evaluations"], EVALUATION_COLUMNS, result.evaluations)
 
     status = week.status(as_of)
     inputs = {
@@ -463,6 +482,19 @@ def main(argv: list[str] | None = None) -> int:
             "comparable": "EXACT match to a selected target, or a listed-spec match to a "
             "selected broad-family target (2026-10-20), IN_STOCK or OUT_OF_STOCK, acceptable "
             "purchase terms, PHP, known price type. Stock status remains visible.",
+            "close_alternatives": {
+                "policy_version": ALTERNATIVE_POLICY,
+                "enabled": not args.no_alternatives,
+                "rule": "Intentional policy change of 2026-10-27: an offer with at most "
+                f"{MAX_DIFFERENCES} established differences across model, screen size, CPU, "
+                "installed RAM, installed storage and GPU (GPU shares the same budget) may "
+                "appear as a labelled alternative (ALT 1, ALT 2) for a target of the same brand "
+                "and recognized product family. Differences are kept apart from unknowns and "
+                "contradictory evidence (RECHECK). Exact identities, stored matches, matching "
+                "minimums, counts, TARGET_MASTER, SOURCE_MODEL_MAP and rankings are unchanged; "
+                "a cell shows an alternative only when no matching configuration is "
+                "comparable; alternative-only minimums use the full eligible alternative pool.",
+            },
             "listed_spec": "A broad-family target (catalog model is a family name) may be priced "
             "by an offer whose own evidence states the same brand and family and the same "
             "screen, CPU series, installed RAM and installed storage, with no contradicted "
@@ -633,6 +665,17 @@ def main(argv: list[str] | None = None) -> int:
         f"{counts['week_listed_spec_associations']} (ambiguous "
         f"{counts['week_listed_spec_ambiguous']})."
     )
+    if not args.no_alternatives:
+        print(
+            f"Close alternatives ({ALTERNATIVE_POLICY}): cells showing one "
+            f"{counts['selected_retailer_alternative_prices']} (ALT 1 "
+            f"{counts['cells_displaying_alt_1']}, ALT 2 {counts['cells_displaying_alt_2']}); "
+            f"configurations with an alternative price "
+            f"{counts['configurations_with_alternative_price']}; associations this week "
+            f"{counts['week_alternative_associations']} (eligible "
+            f"{counts['week_alternative_associations_eligible']}); rechecks "
+            f"{counts['week_alternative_evaluations_recheck']}."
+        )
     if not selected.catalog_matches_build:
         print(
             "Note: TARGET_MASTER differs from the catalog the selected list was built on; every "
