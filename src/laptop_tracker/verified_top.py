@@ -7,10 +7,11 @@ reference.
 
 Inputs: the full Phase 4 eligible source ranking (``eligible_model_ranking.csv``), the accepted
 source Top 100 (consistency check and reference flags), validated TARGET_MASTER,
-SOURCE_MODEL_MAP, and MATCH_REVIEW tables, and an optional local identity review register. IDs
-are exact text. GMV is summed with ``Decimal`` from the exact source text. Each source counts
-once. Nothing here infers specifications, promotes candidates, creates mappings, or writes
-Sheets.
+SOURCE_MODEL_MAP, and MATCH_REVIEW tables, and an optional local identity review register.
+TARGET_MASTER and SOURCE_MODEL_MAP decide what is ranked (owner decision 2026-10-26); MATCH_REVIEW
+only feeds the review-priority report. IDs are exact text. GMV is summed with ``Decimal`` from
+the exact source text. Each source counts once. Nothing here infers specifications, promotes
+candidates, creates mappings, or writes Sheets.
 """
 
 from __future__ import annotations
@@ -24,8 +25,7 @@ from decimal import Decimal, InvalidOperation
 from pathlib import Path
 
 from .catalog_conventions import cpu_model_families
-from .conventions import apple_chip_form, cpu_series_forms, is_model_code
-from .normalization import CORE_MATCH_COLUMNS, core_key, core_value_key, text_key
+from .normalization import CORE_MATCH_COLUMNS, core_key, text_key
 from .supporting_tables import SOURCE_MODEL_ID_PATTERN, TableResult
 from .target_master import (
     CONFIGURATION,
@@ -445,45 +445,18 @@ def _target_issue(row: Mapping[str, object]) -> tuple[str, str] | None:
     return None
 
 
-def _review_disagreements(review: Mapping[str, object], target: Mapping[str, object]) -> list[str]:
-    """Core fields where a COMPLETE review row disagrees with its target.
-
-    The 2026-10-08 conventions are applied: a target model that is a verified code agrees with a
-    review row recording that code, and a bare Apple chip or uncanonical CPU wording in an older
-    review row agrees with the target's canonical cpu_series.
-    """
-    differing = []
-    for name in CORE_MATCH_COLUMNS:
-        review_value, target_value = review.get(name), target.get(name)
-        try:
-            if core_value_key(name, review_value) == core_value_key(name, target_value):
-                continue
-        except ValueError:
-            differing.append(name)
-            continue
-        if name == "model" and is_model_code(str(target_value)):
-            if text_key(review.get("manufacturer_model_code")) == text_key(target_value):
-                continue
-        if name == "cpu_series":
-            text = str(review_value or "")
-            forms = cpu_series_forms(text)
-            if apple := apple_chip_form(text):
-                forms.add(apple)
-            if forms == {str(target_value)}:
-                continue
-        differing.append(name)
-    return differing
-
-
 def _contribution_issue(
     source: SourceRow,
     link: Mapping[str, object] | None,
     targets: Mapping[str, Mapping[str, object]],
     target_issues: Mapping[str, tuple[str, str] | None],
-    reviews: Sequence[Mapping[str, object]],
     register: Sequence[RegisterEntry],
 ) -> tuple[str, str]:
-    """(reason_code, detail) for an excluded source, or ("", "") when it contributes."""
+    """(reason_code, detail) for an excluded source, or ("", "") when it contributes.
+
+    TARGET_MASTER and SOURCE_MODEL_MAP decide (owner decision 2026-10-26): a mapped, eligible
+    source contributes to its ACTIVE CONFIGURATION target. MATCH_REVIEW no longer gates it.
+    """
     values = source.values
     if values["eligibility_status"] != "ELIGIBLE" or values["present_in_mtd"] != "True":
         return "SOURCE_NOT_ELIGIBLE", "Phase 4 requires ELIGIBLE and present_in_mtd."
@@ -498,34 +471,6 @@ def _contribution_issue(
     open_entries = [entry for entry in register if entry.source_model_id == source.model_id]
     if open_entries:
         return "KNOWN_UNRESOLVED_CONFLICT", " | ".join(entry.describe() for entry in open_entries)
-    complete = [review for review in reviews if review["status"] == "COMPLETE"]
-    open_reviews = sorted({str(review["status"]) for review in reviews} - {"COMPLETE", "REJECTED"})
-    if not complete:
-        return "NO_COMPLETE_REVIEW", "No COMPLETE MATCH_REVIEW row records this source's identity."
-    if open_reviews:
-        return (
-            "REVIEW_STATUS_UNRESOLVED",
-            f"MATCH_REVIEW also has {', '.join(open_reviews)} rows for this source.",
-        )
-    for review in complete:
-        if effective_tracking_mode(review.get("tracking_mode")) != CONFIGURATION:
-            return "REVIEW_MODE_MISMATCH", "The COMPLETE review row is not a CONFIGURATION."
-        if differing := _review_disagreements(review, target):
-            return (
-                "REVIEW_CORE_DIFFERS",
-                "COMPLETE review row differs from the target on " + ", ".join(differing) + ".",
-            )
-        review_code = str(review.get("manufacturer_model_code") or "").strip()
-        target_code = str(target.get("manufacturer_model_code") or "").strip()
-        if (
-            is_model_code(review_code)
-            and is_model_code(target_code)
-            and review_code.casefold() != target_code.casefold()
-        ):
-            return (
-                "REVIEW_CODE_DIFFERS",
-                f"Review row records {review_code}; the target records {target_code}.",
-            )
     return "", ""
 
 
@@ -585,9 +530,7 @@ def build_verified_ranking(
     excluded_mapped: Counter[str] = Counter()
     for source in snapshot.rows:
         link = links.get(source.model_id)
-        code, detail = _contribution_issue(
-            source, link, targets, target_issues, reviews.get(source.model_id, []), open_register
-        )
+        code, detail = _contribution_issue(source, link, targets, target_issues, open_register)
         target_id = str(link["target_id"]) if link is not None else ""
         if code:
             if target_id:
@@ -748,15 +691,7 @@ def _review_priority(
     rows = []
     for row in ledger:
         code = row["reason_code"]
-        if code not in {
-            "UNMAPPED",
-            "NO_COMPLETE_REVIEW",
-            "REVIEW_STATUS_UNRESOLVED",
-            "REVIEW_CORE_DIFFERS",
-            "REVIEW_CODE_DIFFERS",
-            "REVIEW_MODE_MISMATCH",
-            "KNOWN_UNRESOLVED_CONFLICT",
-        }:
+        if code not in {"UNMAPPED", "KNOWN_UNRESOLVED_CONFLICT"}:
             continue
         source_reviews = reviews.get(row["model_id"], [])
         statuses = sorted({str(r["status"]) for r in source_reviews})

@@ -278,19 +278,17 @@ def test_target_level_exclusions() -> None:
 
 
 @pytest.mark.parametrize(
-    ("reviews", "reason"),
+    "reviews",
     [
-        ([], "NO_COMPLETE_REVIEW"),
-        (
-            [review("101"), review_row(status="REVIEW_REQUIRED", source_model_id="101")],
-            "REVIEW_STATUS_UNRESOLVED",
-        ),
-        ([review("101", ram_capacity_gb="8")], "REVIEW_CORE_DIFFERS"),
-        ([review("101", manufacturer_model_code="EXB14-0002")], "REVIEW_CODE_DIFFERS"),
+        [],
+        [review("101"), review_row(status="REVIEW_REQUIRED", source_model_id="101")],
+        [review("101", ram_capacity_gb="8")],
+        [review("101", manufacturer_model_code="EXB14-0002")],
     ],
-    ids=["no-complete-review", "open-review-row", "core-differs", "code-differs"],
+    ids=["no-review-rows", "open-review-row", "core-differs", "code-differs"],
 )
-def test_source_identity_exclusions(reviews: list[list[str]], reason: str) -> None:
+def test_match_review_does_not_gate_mapped_sources(reviews: list[list[str]]) -> None:
+    # Owner decision 2026-10-26: TARGET_MASTER and SOURCE_MODEL_MAP decide the ranking.
     result, *_ = build(
         [source("101", "10", "0")],
         [target("TGT-000001", manufacturer_model_code="EXB14-0001")],
@@ -298,31 +296,9 @@ def test_source_identity_exclusions(reviews: list[list[str]], reason: str) -> No
         reviews=reviews,
     )
 
-    assert result.configurations == []
-    assert ledger_reason(result, "101") == reason
-    assert result.counts["shortfall"] == 100
-
-
-def test_convention_updates_do_not_count_as_review_disagreements() -> None:
-    # The target's model became its verified code and its CPU gained the Apple prefix; older
-    # review rows keep the family name and the bare chip, plus the same code.
-    result, *_ = build(
-        [source("101", "10", "0")],
-        [
-            target(
-                "TGT-000001",
-                brand="Apple",
-                model="EXB14-0001",
-                manufacturer_model_code="EXB14-0001",
-                cpu_series="Apple M5",
-                cpu_model="M5",
-            )
-        ],
-        [("101", "TGT-000001")],
-        reviews=[review("101", cpu_series="M5", manufacturer_model_code="EXB14-0001")],
-    )
-
     assert [c["target_id"] for c in result.configurations] == ["TGT-000001"]
+    assert ledger_reason(result, "101") == ""
+    assert result.counts["shortfall"] == 99
 
 
 def test_source_eligibility_requirements_are_preserved() -> None:
