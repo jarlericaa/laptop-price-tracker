@@ -2,6 +2,21 @@
 
 Updated: **2026-10-19**. This guide describes the commands that exist today.
 
+> **2026-10-27 grain change.** The live workbook now uses the **Shopee variation grain**
+> (`shopee-variation-sheets-1`): one row per eligible Shopee seller variation, `PILOT_PRICE_SUMMARY`
+> and `P1_TOP_100_CONFIGURATIONS` are retired, and publication goes through
+> `publish_variation_prices.py` (preview first). The configuration-based Steps 3-9 below remain the
+> description of the retailer layer (it now runs once per *context* of the selected variations) and
+> of the legacy grain; the current operating procedure, commands and rules are in
+> [SHOPEE_VARIATION_GRAIN_2026-10-27.md](SHOPEE_VARIATION_GRAIN_2026-10-27.md). `publish_prices.py`
+> refuses a workbook prepared for the new grain.
+>
+> **2026-11-03 selection change.** The list is now the **Top 100 eligible mapped Shopee variations**:
+> only variations with a verified mapping (`MAPPED_VERIFIED`) are selected, the filter runs before the
+> 100-row limit, and a shortfall below 100 is reported, never padded. `build_top_shopee_variations.py`
+> writes `mapping_exclusions.csv` (eligible variations left out, by mapping failure) instead of the
+> pending-review file. See [MAPPED_TOP_100_2026-11-03.md](MAPPED_TOP_100_2026-11-03.md).
+
 ## Quick navigation
 
 - [Google Sheets tabs](#1-what-the-google-sheets-tabs-mean)
@@ -224,6 +239,8 @@ cp data/output/eligible_model_ranking.csv \
 
 `--dry-run` still reads Google Sheets and writes local files. It means **no Google Sheets writes**. This historical script name produces the sales-ranking inputs used by later phases.
 
+**Duplicate conflicts (standing owner rule, 2026-11-03).** If the command stops on conflicting duplicates without a valid decision, run `python apply_latest_row_decisions.py --write` (keeps the record on the latest sheet row; backs up `config/duplicate_decisions.csv`) and repeat Step 1. Model-identity conflicts and keys with several conflict dates are not covered and need a human decision. See [DECISIONS.md](DECISIONS.md#standing-rule-for-conflicting-duplicates-keep-the-latest-sheet-row-owner-decision-2026-11-03).
+
 Unresolved duplicate/identity conflicts or stale source months can stop this command. Review diagnostics in `data/output/` and decision files before continuing. Do not turn off freshness checks to present old sales as current.
 
 ### Step 2 - Export and validate the live catalog/mappings
@@ -364,6 +381,8 @@ The collector backs up history before import. Observations accumulate across wee
 
 Finding a result does not guarantee a match. Since 2026-10-15 a page without a model row can still match when its title shows exactly one full model code and the other four fields come from the page's own specifications (`TITLE_MODEL_CORROBORATED`). Conflicting model rows or URLs, unexplained suffixes such as `OPI`, and ambiguous specifications stay in review.
 
+**Search titles that state another configuration (2026-10-27).** A candidate is no longer skipped merely because its search title states another configuration. Each title is assessed for established differences (screen, CPU, RAM, storage, GPU, and a different model code of the same brand and recognized family); one or two keep it for inspection (decision `COLLECT_CLOSE_ALTERNATIVE_CANDIDATE`, or `COLLECT_CHECK_CONFIGURATION` for code listings), more than two skip it (`SKIPPED_TOO_MANY_TITLE_DIFFERENCES`, reason names the dimensions), and a field the title does not state stays unknown. Candidates are ordered matching configuration, one-difference, two-difference, then incomplete titles (`alternative_tier`, `title_difference_count` in `candidates.csv`). Multi-variant pages whose variants differ from the target only in RAM/storage collect one variant per distinct configuration (`COLLECT_VARIANT_ALTERNATIVE`, `--max-alternative-variants-per-candidate`, default 1). The candidate limits, request ceilings, shared cooldowns, checkpoints and response reuse are unchanged, and a search title never supplies a price.
+
 **Known search gap:** Laptop Factory appeared to omit sold-out pages in the October 13 search pilot. Since 2026-10-19, add `--seed-store data/history/price_history.sqlite3` (or `--seed-urls <earlier collection>/match_results.csv`) to `pilot_args` so offer URLs that matched a scope configuration `EXACT` before are re-checked as `HISTORICAL_VERIFIED_URL` candidates; they are re-fetched and re-matched, never carried forward. A `--seed-urls` file must have a `match_status` column; only its `EXACT` rows seed. Searches continue past results that show only another RAM/storage configuration or an unresolved code (`search_jobs.csv` records the tiers run and why each job stopped). `--baseline-manifest` only measures discovery coverage; it does not automatically fetch missing old URLs. Earlier-week prices are never carried into a new week as current prices.
 
 **Known pages the search misses (supplied URLs, 2026-10-19).** List them in `config/supplied_candidate_urls.csv` (`supplied_id, retailer_id, url, search_target_id, supplied_by, supplied_on, notes`). Discovery reads that file automatically (`--supplied-urls <file>` to use another, `--no-supplied-urls` to skip it). Each URL is normalized (tracking parameters such as `srsltid`/`utm_*` and the fragment removed; the path and `?variant=` kept) and must be accepted unchanged by the retailer's adapter. It seeds the scoped configuration named in `search_target_id` (a search hint, never an assignment), otherwise every scoped configuration whose complete model code appears in its URL handle; anything else is reported `UNASSIGNED_NO_CODE_IN_URL` and not fetched. When the native search does not return the page, it is checked directly as a bounded fallback (`SUPPLIED_URL` candidate; at most `--max-supplied-urls-per-target-retailer`, within the product-fetch budget) and the job's `search_coverage` says `NATIVE_SEARCH_MISSED_SUPPLIED_URL`. A supplied URL is never a match, alias or approval: the page's own evidence and the matcher decide. `discovery/supplied_urls.csv` records what happened to each one.
@@ -421,6 +440,17 @@ Add `--search-context "$weekly_run/discovery/collection/match_results.csv"` to t
 
 **Listed-spec prices (2026-10-20).** A broad-family target (catalog model such as `IdeaPad` or `Aspire Lite`) is now priced by offers whose own page states the same brand, family, screen, CPU series, installed RAM and installed storage, with no contradicted recorded code or secondary specification. Such cells show match basis `LISTED_SPEC`, the warning `SPECIFIC_IDENTITY_UNRESOLVED` and the offer's own details (`<code>_Offer_Details`); their minimums are labelled "matching listed specs". They are not exact product matches: check `Offer_Details` and the review queue's `LISTED_SPEC_MATCH` rows, and expect retailers to carry different specific models under one family. An offer that fits several family targets equally prices none of them (`LISTED_SPEC_AMBIGUOUS` in review). Discovery now collects listings that state the brand and family; the catalog reconciliation is still worth doing, but is no longer required for a comparison.
 
+**Close alternatives (2026-10-27).** `track_prices.py` also compares each offer of the report week with the selected configurations of the same brand and recognized product family (`config/product_family_registry.csv`) and labels an offer with at most two established differences across model, screen size, CPU, installed RAM, installed storage and GPU as `ALT 1` or `ALT 2` (GPU shares the budget; each dimension counts once). A retailer cell shows a matching configuration first, otherwise the best `ALT 1`, otherwise the best `ALT 2` (lowest price within the level); its status is `SELECTED` (matching) or `ALTERNATIVE_SELECTED`, and `<code>_Comparison_Tag` says `MATCH`, `ALT n · RAM`, or `RECHECK`. `Lowest_Price`, `Lowest_In_Stock_Price`, `Comparable_Retailer_Count` and the series stay matching-only; the alternative-only minimums (`Lowest_Alternative_Price*`, `Lowest_Alternative_In_Stock_Price*`) are taken over every eligible alternative of every retailer, including offers the main display does not show. New files: `weekly_price_alternatives.csv` (one row per target-retailer-offer association, with the differences, unknown fields, limitations, evidence and eligibility) and `alternative_evaluations.csv` (every evaluation, for audit). Contradictions inside a retailer's own evidence, a missing core value or a blocking conflict outside the six dimensions are rechecks, not alternatives. No stored match, target assignment or matching minimum changes; `--no-alternatives` reproduces the matching-only report. Check a run with:
+
+```bash
+python audit_alternatives.py --report-dir "$weekly_run/reports" \
+  --store data/history/price_history.sqlite3 \
+  --target-master "$weekly_run/inputs/target_master_validated.csv" \
+  --output-dir "$weekly_run/alternative_audit"
+```
+
+The audit re-extracts every alternative's saved page independently of the evaluator and fails on any mismatch of values, differences, tag, price, stock, observation time or week. See [CLOSE_ALTERNATIVES_2026-10-27.md](CLOSE_ALTERNATIVES_2026-10-27.md).
+
 **Offers that disagree (2026-10-19, independent review).** When the offers priced for one configuration state different resolutions, panel types or GPUs, each of those cells carries the warning `OFFERS_DISAGREE_<FIELD>` (shown in Sheets as "retailers state different ... (see review)") and the review queue lists each retailer's statement. Prices, counts and minima do not change; check the pages and the catalog record.
 
 Check week, cutoff, sales label, selections, lowest prices and review. The **lowest observed** price (`Lowest_Price`) can be sold out; the **lowest in-stock** price (`Lowest_In_Stock_Price`, 2026-10-15) uses only in-stock eligible offers and is blank when there is none. Each retailer cell now has its stock, observation time, match basis, warnings and a reason for any blank. Review contains historical observations too, so its count is not the number of fresh failures.
@@ -473,6 +503,8 @@ python publish_prices.py --preview \
 Since publisher `pilot-sheets-5` (2026-10-20) the comparison shows, after the storage column, the configuration's Shopee snapshot price: the lowest eligible mapped-listing price of the 2026-09-28 sales extract, dated, with its product-page link (it does not select the variation), variation and `model_id`, and status. It is historical, never a current price, and never part of the "Lowest retailer price" or "Lowest in-stock retailer price" minimums. `PILOT_PRICE_SUMMARY` repeats the same prices in seven columns.
 
 Since publisher `pilot-sheets-3` (2026-10-19), `PILOT_PRICE_COMPARISON` has two extra columns per retailer after its observed time: `<Retailer> recheck link (unconfirmed)` (clickable exact URL) and `<Retailer> recheck note` (short reason, plus "+N more in PILOT_PRICE_REVIEW"). They are filled only where that retailer's price is blank. `PILOT_PRICE_REVIEW` lists every recheck page as a "Recheck candidate (unconfirmed)" row with its link, stage, stock/time when known and "not priced". The publisher refuses a recheck row beside a comparable price. The earlier comparison header is still recognised as the publisher's own, so the first write replaces it.
+
+**Close alternatives in the preview (2026-10-27, `pilot-sheets-7`).** The preview also plans `PILOT_PRICE_ALTERNATIVES` (a new tab, created on the first write), colours the retailer cells of `PILOT_PRICE_OVERVIEW` and `PILOT_PRICE_SUMMARY` by comparison tag (green MATCH, yellow ALT 1, orange ALT 2, gray RECHECK) with a text-label column and a legend, adds notes (basis, actual configuration, differences, unknowns, stock, link) and appends the new comparison columns at the right. Check `plan_PILOT_PRICE_ALTERNATIVES.csv`, the `Close alternatives` line of the preview output and that the earlier comparison header was recognised as this publisher's. Nothing is written until Step 9.
 
 ### Step 9 - Publish the reviewed reports
 

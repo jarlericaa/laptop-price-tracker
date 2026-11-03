@@ -364,3 +364,123 @@ run and period).
 - **Plan files.** Preview and write folders hold `plan_PILOT_PRICE_SUMMARY.csv` (values) and
   `plan_PILOT_PRICE_SUMMARY_notes.csv` (cell, column, row label, value, italic flag and note).
   The publication report counts `planned_cell_notes`.
+
+## Close alternatives (2026-10-27)
+
+Policy and rules: [CLOSE_ALTERNATIVES_2026-10-27.md](CLOSE_ALTERNATIVES_2026-10-27.md). Every column
+below is **appended at the right** of its file; earlier columns, their order and their meaning
+(matching only) are unchanged. Report folders written before this change stay readable: the
+publisher fills the added columns with blanks.
+
+**Cell status.** `<code>_Price_Status` (and `price_status` in the selections file) is
+`SELECTED` for a matching configuration (exact product or listed-spec, unchanged) and the new
+`ALTERNATIVE_SELECTED` when no matching configuration is comparable and a close alternative is
+shown. `<code>_Price`, `_Offer_URL`, `_Stock`, `_Observed_At`, `_Match_Basis` (`ALTERNATIVE`),
+`_Warnings` (limitations such as `CPU_EXACT_PROCESSOR_UNKNOWN`, `GPU_UNKNOWN`,
+`SPECIFIC_MODEL_UNKNOWN`) and `_Reason` (`CLOSE_ALTERNATIVE: ALT 1 · RAM; RAM: target 16GB →
+retailer 8GB.`) describe the displayed offer. Prices stay exact decimal text.
+
+**`weekly_price_comparison.csv` additions.**
+
+| Column | Meaning |
+|---|---|
+| `<code>_Comparison_Tag` | `MATCH`, `ALT 1 · RAM`, `ALT 2 · CPU, GPU`, `RECHECK` (no price, unresolved pages to recheck) or blank. Dimension order is fixed: Model, Screen, CPU, RAM, Storage, GPU. |
+| `<code>_Alternative_Level` / `_Differences` / `_Unknowns` / `_Observation_ID` | Difference count, the sentence `RAM: target 16GB → retailer 8GB; storage: target 512GB → retailer 256GB.`, unknown fields and limited bases, and the observation of the alternative shown in the cell. |
+| `<code>_Alternative_Offers` | Eligible alternative offers of the retailer in all (shown or not). |
+| `Alternative_Retailer_Count` | Retailers with at least one eligible alternative; each retailer once. |
+| `Comparison_Retailer_Count` | Retailers whose cell shows a price, matching or alternative; each retailer once. `Comparable_Retailer_Count` is still matching-only. |
+| `Lowest_Alternative_Price` (+ `_Retailers`, `_Offer_URL`, `_Observed_At`, `_Stock`, `_Notes`, `_Tag`, `_Difference_Count`, `_Differences`, `_Unknowns`, `_Observation_IDs`, `_Label`) | Alternative-only minimum over the **full** eligible alternative pool of every retailer (offers hidden by the main display and alternatives of retailers that also have a matching offer included; ties keep every tied retailer). |
+| `Lowest_Alternative_In_Stock_Price` (same suffixes without `_Stock`) | The same over offers recorded `IN_STOCK`; an out-of-stock offer never wins it. |
+
+`Lowest_Price`, `Lowest_In_Stock_Price` and their basis/label columns are matching-only and
+unchanged.
+
+**`weekly_price_selections.csv` additions.** `selection_kind` (`MATCH`, `ALT_1`, `ALT_2`),
+`alternative_tag`, `alternative_level`, `alternative_differences`, `alternative_observation_id`,
+`alternative_pool_size`, `alternative_lowest_price` / `_observation_id`,
+`alternative_lowest_in_stock_price` / `_observation_id`. The earlier price and offer columns are the
+displayed offer's; `in_stock_*` and `latest_exact_*` stay matching-only.
+
+**`price_history.csv` additions** (report week only; blank for earlier weeks):
+`alternative_target_ids`, `alternative_tags` (`TGT-000001:ALT 1 · RAM`),
+`alternative_recheck_target_ids`, `alternative_comparability` (`COMPARABLE` / `NOT_COMPARABLE`, the
+same price rules as a match) and `alternative_comparability_reasons`. `match_status`/`target_id`
+keep the stored identity.
+
+**`weekly_price_alternatives.csv`** (new): one row per target-retailer-offer association that
+qualifies as an alternative. It carries the target's configuration, the retailer's actual
+model/screen/CPU/exact processor/RAM/storage/GPU, price, currency, stock, link, observation time
+and identifiers, `price_eligibility` and exclusion reasons, `alternative_tag`, `difference_count`,
+`differing_dimensions`, `differences`, the per-dimension states, `unknown_fields`,
+`limitations`, `warnings`, `comparison_basis`, family and family basis,
+`displayed_in_comparison`, `retailer_has_matching_offer`, `exact_target_id`,
+`listed_spec_target_ids`, `initiating_target_ids`, `evidence_references`,
+`comparison_detail_json` (target value, retailer value, both normalized values, basis, evidence and
+explanation per dimension) and `policy_version` (`close-alternatives/2026-10-27`).
+
+**`alternative_evaluations.csv`** (new): every offer-target evaluation of the report week with
+`status` (`ALTERNATIVE`, `RECHECK`, `NO_DIFFERENCE`, `EXCLUDED_TOO_MANY_DIFFERENCES`,
+`EXCLUDED_BRAND_OR_FAMILY`), the reasons (`REQUIRED_RAM_NOT_ESTABLISHED`,
+`EVIDENCE_CONFLICT_SCREEN`, `MATERIAL_CONFLICT_DISPLAY_TYPE`, `3_DIFFERENCES`, `FAMILY_DIFFERS`, ...),
+differing, conflicting and unknown dimensions, and the exact and initiating targets, for audit.
+
+**`price_review_queue.csv`.** An unassigned offer that qualifies as an alternative for a selected
+target has `review_reason` `CLOSE_ALTERNATIVE ALT 1 · RAM for TGT-000001 (RAM: …)`; all other
+review reasons are unchanged.
+
+**`price_tracking_run_summary.json`.** `policy.close_alternatives` records the policy version and
+rule; `counts` add `selected_retailer_alternative_prices`, `cells_displaying_alt_1/2`,
+`configurations_with_alternative_price`, `week_alternative_associations`,
+`alternative_prices_<code>` and `week_alternative_evaluations_<status>`.
+`track_prices.py --no-alternatives` omits all of it.
+
+### Publisher `pilot-sheets-7` (close alternatives, 2026-10-27; preview only so far)
+
+- **`PILOT_PRICE_COMPARISON`** keeps its 56 earlier columns (text, order, first row, conditional-format
+  letters) and gains 26 at the right: five `<Retailer> comparison tag` columns, `Alternative
+  retailers`, `Retailers shown (matching or alternative)` and the alternative-only minimum groups
+  ("Lowest alternative price (PHP)" with retailer(s), difference count, differences, unknown fields,
+  observation ID, link, observed time, stock; and the in-stock group). The status cell says
+  "Alternative price — ALT 1 · RAM: RAM: target 16GB → retailer 8GB. Not a matching configuration; …";
+  matching cells keep their exact-product or listed-spec text. Prices stay numeric (PHP); Shopee
+  snapshot columns and dates are unchanged.
+- **`PILOT_PRICE_OVERVIEW`** keeps its 12 columns and adds `Comparison labels (text)` at the right.
+  Retailer cells are filled: light green MATCH, light yellow ALT 1, light orange ALT 2, light gray
+  RECHECK without a comparison price; the legend is in the header notes, and every priced or recheck
+  cell has a note (tag, basis, actual configuration, differences, unknowns, stock, observed time,
+  link, detailed record). ALT price cells link to the offer. `PILOT_PRICE_SUMMARY` uses the same
+  fills with alternative-aware notes. Fills never replace the text: the tag is in the label column,
+  the notes and the comparison tab.
+- **`PILOT_PRICE_ALTERNATIVES`** (new, 36 columns): one row per target–retailer-offer association,
+  ordered by rank, retailer, difference count and price — target configuration, the retailer's actual
+  model, screen, CPU series and exact processor, RAM, storage and GPU, numeric price, currency, stock,
+  link, difference count, tag, differences in words, six per-dimension states, unknown fields,
+  limitations, warnings, price eligibility, shown-in-main and matching-offer flags, observation time,
+  observation ID, evidence references, initiating and exact target, policy version. Alternatives of a
+  retailer that also has a matching offer are included.
+- **`PILOT_PRICE_REVIEW`**: category "Close alternative (confirmed)" for `CLOSE_ALTERNATIVE` rows;
+  genuine review, recheck and exclusion rows and all timestamps are unchanged.
+- **Validation**: an `ALTERNATIVE_SELECTED` cell must equal its selections row, be backed by a
+  comparable, displayed row of `weekly_price_alternatives.csv` and an observation of the report week
+  at or before the cutoff; alternative minimums and counts are recomputed from the full eligible pool.
+  Old report folders without the new files still load and plan. The earlier comparison, overview
+  (and owner-built overview) and run-log headers are still recognised as this publisher's.
+- **Run log** gains three columns at the right (alternative prices shown, association rows, rows
+  published).
+
+## Shopee variation reports (`shopee-variation-sheets-1`, 2026-10-27)
+
+Since 2026-11-03 every variation row is an eligible, verified-mapped variation (the Top 100
+eligible mapped Shopee variations, `MAPPED_TOP_100_2026-11-03.md`), so `NO_CONTEXT` associations and
+`CONFIGURATION_REVIEW_PENDING` rows no longer occur in new runs; the report builder refuses a list
+with an unmapped row.
+
+Variation-grain reports (`build_variation_reports.py`) sit beside the unchanged target-grain
+(context) reports above. Files: `weekly_variation_comparison.csv` (one row per Shopee variation:
+identifiers, own Shopee price/status/date, mapping and comparison status, GMV, then the context's
+reviewed retailer cells and both minima), `weekly_variation_selections.csv` (row x retailer with
+`association_id`, `association_kind` = `CONTEXT_MATCH` / `CONTEXT_ALTERNATIVE` / `NO_OFFER` /
+`NO_CONTEXT`), `weekly_variation_alternatives.csv`, `weekly_variation_rechecks.csv`,
+`weekly_variation_history_associations.csv`, `variation_coverage.json`, `variation_run_summary.json`.
+Every row has `row_grain = SHOPEE_VARIATION` and `schema_version`; the earlier files keep the
+`TARGET_CONFIGURATION` grain. Full contract and publisher: `SHOPEE_VARIATION_GRAIN_2026-10-27.md`.

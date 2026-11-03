@@ -440,3 +440,95 @@ Work folder: `data/output/shopee_summary_2026-10-20/`.
 - **Validation.** Tests went from 1729 to 1795; Ruff passes.
 - **Not done.** No retailer request, no Sheets write, no catalog, mapping, history or approval
   change, and no commit.
+
+## Close-alternative comparisons (2026-10-27)
+
+- **Policy change implemented** (owner decision, [CLOSE_ALTERNATIVES_2026-10-27.md](CLOSE_ALTERNATIVES_2026-10-27.md)):
+  up to two established differences across model, screen, CPU, installed RAM, installed storage and
+  GPU become a labelled `ALT 1` / `ALT 2`; contradictions are rechecks; matching results, minimums,
+  counts, identities, TARGET_MASTER, SOURCE_MODEL_MAP and rankings are unchanged.
+- **Code:** `alternatives.py`, `product_families.py` (+ `config/product_family_registry.csv`),
+  `price_tracking.py` (alternative views, main-display rule, alternative minimums, two new report
+  files), `sheet_publication.py` (`pilot-sheets-7`: fills, labels, notes, `PILOT_PRICE_ALTERNATIVES`),
+  `product_discovery.py` / `discover_products.py` (title-difference gate, tiers, alternative variants),
+  `cell_diagnostics.py` (`ALTERNATIVE_PUBLISHED`), `audit_alternatives.py`,
+  `compare_alternative_replay.py`.
+- **Replay of the 2026-10-26 run** (disposable store copies, nothing imported, production store
+  SHA-256 unchanged): matching cells and minimums identical for all 86 targets; 13 retailer cells now
+  show an alternative (ALT 1 five, ALT 2 eight), 32 associations, 130 rechecks, 42 exclusions for more
+  than two differences; independent audit of the 32 alternatives: 32 PASS. Discovery reassessment of
+  4,881 saved candidates: 521 newly eligible for inspection, 148 skipped over budget.
+- **Publication preview** (in-process fake spreadsheet, no network): 86 comparison rows, 86 overview
+  rows, 32 alternatives rows, 296 review rows; a dry-run write to the fake read back with 0 issues.
+  Nothing was written to Google Sheets.
+- **Validation:** full suite 2,075 passed and 14 failed; the 14 failures are the pre-existing ones
+  (`test_listed_spec` 9, `test_variant_axes` 3, `test_verification_safety` 2). Ruff is clean on every
+  file added or changed for this work; 14 earlier findings in other files remain.
+- **Not done:** no live discovery, no Sheets write, no catalog, mapping or history change, no commit.
+
+## Standing duplicate rule and 2026-11-03 run start
+
+- Full weekly run started 2026-11-03 (folder `data/output/weekly_runs/20261103T022837Z`): stopped in
+  Phase 1 because 5 duplicate keys had invalidated decisions (raw values restated since 10-27).
+- Owner made "keep the latest sheet row" a standing rule; the 5 keys were resolved with it (backup
+  `data/backups/duplicate_decisions.20261103T023711Z.pre_latest_row.csv`). Added
+  `apply_latest_row_decisions.py`, `src/laptop_tracker/duplicate_policy.py`,
+  `tests/test_duplicate_policy.py` (5 tests pass; ruff clean). See DECISIONS.md.
+
+## Variation-grain weekly run published (2026-11-03)
+
+- Run folder `data/output/weekly_runs/20261103T023824Z`, driver `/tmp/run_variation_week.sh`
+  (stops at the publish preview). Top 100 Shopee variations: 100 rows, 187 eligible, 23 contexts,
+  35 rows with a trusted context, 65 `CONFIGURATION_REVIEW_PENDING` (early in the month; MTD pool small).
+- Discovery: 2 rounds, 341 requests, 115 jobs, 2 isolated 429s (OCT, DataBlitz) that recovered after
+  the 60 s retry-after; no pause. Alternatives audit 32 of 32 PASS.
+- Coverage: 5 of 23 contexts with a matching price (10 matching cells: DBZ 3, LF 4, PCX 3). On the
+  16 contexts shared with the 10-25 archive 8 of its 11 matching cells are reproduced; the other 3
+  follow the current rules (PCC MacBook Neo: no listed variant states the target RAM/storage;
+  OCT TGT-5: now ALT 2). 2 new matching cells on a context the archive lacked.
+- First `--write-sheets` finished `READBACK_FAILED` (98 fill issues, all the MATCH green's red
+  channel): `_rgb` rounded `#D5EFDB` to 0.835294 (212.99997/255), Sheets truncates to 8 bits and
+  stored 212, one level below the plan, outside the 0.002 verifier tolerance. Values, links,
+  formats and notes were all correct. Fixed `_rgb` to exact n/255 (`tests/test_sheet_colours.py`).
+  The same `--write-sheets` command was rerun as the publication report instructs:
+  `Publication SUCCESS`, 0 readback issues; run log has one row for the publication. The first
+  attempt's backups (pre-publication tabs) are in `publications/20261103T030732623140Z_write`.
+- Full suite: 2,156 passed, 14 failed (the unchanged baseline: `test_listed_spec` 9,
+  `test_variant_axes` 3, `test_verification_safety` 2).
+
+## Top 100 eligible mapped Shopee variations (owner decision, 2026-11-03; offline, not published)
+
+- Owner decision: the Top 100 contains only eligible Shopee variations with a verified mapping; the
+  filter runs before the 100-row limit (supersedes the 2026-10-27 "mapping is enrichment" rule).
+  Details: `docs/MAPPED_TOP_100_2026-11-03.md`, `docs/DECISIONS.md`.
+- Implemented in `variation_ranking.py` (qualification, `eligible_rank`/`rank`/`selection_status`/
+  `exclusion_reason`, `mapping_exclusions.csv`, independent audit with the register),
+  `build_top_shopee_variations.py`, `audit_top_shopee_variations.py`, `variation_reports.py` and
+  `variation_publication.py` / `publish_variation_prices.py` (policy guards, scope report, labels).
+  Tests: `tests/test_variation_ranking.py`, `test_variation_reports.py`, `test_variation_publication.py`
+  updated; new `tests/test_mapped_top_cli.py`.
+- Catalog refreshed read-only 2026-11-03: 241 targets, 476 mappings, all valid; the 14 new mappings and
+  9 new targets (TGT-000287..295) all pass the validator and are selected.
+- Offline result (sales snapshot `20261103T103838+0800`): 187 eligible, 53 verified (excluded 134:
+  UNMAPPED 125, LISTING_ONLY 5, CPU_MODEL_CONFLICT 4), 53 selected (shortfall 47), 40 contexts,
+  4 rows from eligible rank beyond 100. Offline build, audit, reports and publisher preview pass;
+  nothing was written to Sheets, no live discovery, nothing committed. Output folder
+  `data/output/mapped_only_2026-11-03`.
+
+## Selected-variation precedence and the 53-row investigation (2026-11-03; offline, not published)
+
+- Investigated the 187-row pool: correct under the established MTD-presence rule (292 MTD-active models
+  three days into the month; 1,571 eligible overall; earlier pools 1,251-1,387 were mid-month). No
+  premature limit, incomplete input, identifier problem or review gate. Under today's catalog the 10-27
+  pool would give 100 selected. Shortfall explained: 62 mapped in the pool, minus 5 listing-only and 4
+  cpu-model conflicts = 53; 125 unmapped.
+- New: `variation_specs.py` (selected variation's own stated specs; real disagreement with the target is
+  named and excluded as `VARIATION_TARGET_SPEC_CONFLICT`; one disagreement found, already excluded for a
+  target defect), `catalog_provenance.py` and `catalog_retrieval.json` (retrieval time, spreadsheet ID,
+  fingerprints; current vs cached), `selection_audit.py` / `audit_variation_selection.py`, new ranking
+  columns `variation_spec_evidence` / `variation_spec_conflicts` and file `variation_spec_conflicts.csv`,
+  `run_variation_week.sh` in the repo (selection-audit stage, discovery replay cache).
+- Tests: `tests/test_variation_specs.py` (new), `test_variation_ranking.py`, `test_mapped_top_cli.py`
+  extended. Full suite 2,181 passed, 14 failed (the unchanged baseline). Offline rebuild, audits and
+  publisher preview pass in `data/output/mapped_selection_2026-11-03b`. Nothing written to Sheets, no live
+  discovery, nothing committed.

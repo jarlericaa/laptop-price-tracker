@@ -157,7 +157,7 @@ Validation runs on local CSV exports or on read-only sheet reads; nothing writes
 1. `read_raw_values()` uses the configured spreadsheet ID and raw tab name, then calls `get_all_values()`; it does not call any write API.
 2. `normalize_raw_values()` checks the required headers, pads short rows, converts cells to strings, assigns source row numbers, and creates the internal model/shop/item keys.
 3. `validate_rows()` rejects rows with invalid dates, IDs, required names, prices, or GMV. Invalid rows are reported in `validation_errors.csv` and do not enter aggregation.
-4. `collapse_duplicates()` groups by `(period_month, shop_id, item_id, model_id)`. Identical rows retain one copy. Conflicts require a fingerprint-matched decision from `config/duplicate_decisions.csv`; the redacted review template is local-only.
+4. `collapse_duplicates()` groups by `(period_month, shop_id, item_id, model_id)`. Identical rows retain one copy. Conflicts require a content-matched decision from `config/duplicate_decisions.csv` (per-record `content-v1` fingerprints, no row numbers; invalidated when any reviewed record changes or a record is added or removed); the redacted review template and `duplicate_resolution_log.csv` (current sheet row of each record) are local-only.
 5. The pipeline detects the latest valid month and its preceding calendar month, then checks that the latest month is current in Manila time unless freshness checking is disabled.
 6. Model identity conflicts are excluded. The remaining rows are classified using `eligibility_rules.csv` and `eligibility_decisions.csv`.
 7. `aggregate_models()` calculates M-1 and MTD GMV by model, sums them for ranking GMV, selects one MTD price only when exactly one distinct value exists, and marks eligibility disagreements as `REVIEW`.
@@ -218,3 +218,35 @@ flowchart LR
 ```
 
 The framework is called by one command, `collect_and_match.py`, for explicitly listed product pages; no scheduled job or Sheets code calls it. Its observations are stored with `observation_store.persist_scrape_results()` (Phase 9).
+
+## Shopee variation grain (2026-10-27)
+
+- `variation_ranking.py`: source-grain ranking (`source_key`); since 2026-11-03 only `MAPPED_VERIFIED`
+  variations are selected, the filter running before the 100-row limit
+  ([MAPPED_TOP_100_2026-11-03.md](MAPPED_TOP_100_2026-11-03.md)); trusted contexts built after the
+  selection, the context list/ledger in the formats the retailer layer already reads, and an
+  independent audit. `build_top_shopee_variations.py` / `audit_top_shopee_variations.py`.
+- `variation_specs.py`: the selected variation's own stated specifications and real
+  disagreement with its mapped target; `catalog_provenance.py`: the catalog retrieval record;
+  `selection_audit.py` / `audit_variation_selection.py`: the selection audit
+  ([MAPPED_TOP_100_2026-11-03.md](MAPPED_TOP_100_2026-11-03.md)).
+- `variation_reports.py`: joins each row to its context's reviewed report (own Shopee price, row
+  associations, separate row/context/observation coverage). `build_variation_reports.py`.
+- `variation_publication.py` + `config/shopee_variation_sheet_contract.json`: the
+  `shopee-variation-sheets-1` publisher (`publish_variation_prices.py`), reusing the Sheets
+  primitives of `sheet_publication.py` (now parameterised by tab allowlist and layout). The retailer
+  layer and `price_tracking.py` stay context (target) keyed. `pipeline.py` also writes the local
+  sidecar `source_shop_names.csv`. Details: [SHOPEE_VARIATION_GRAIN_2026-10-27.md](SHOPEE_VARIATION_GRAIN_2026-10-27.md).
+
+## Close alternatives (2026-10-27)
+
+- `src/laptop_tracker/alternatives.py`: six-dimension, two-difference comparison of one offer with
+  one target (`AlternativeEvaluator`, `AlternativeEvaluation`), explanations and tags.
+- `src/laptop_tracker/product_families.py` and `config/product_family_registry.csv`: the controlled
+  brand/product-family recognition that limits candidates.
+- `price_tracking.py`: alternative views (like the listed-spec views), the main-display rule,
+  alternative-only minimums, `weekly_price_alternatives.csv` and `alternative_evaluations.csv`.
+- `sheet_publication.py` (`pilot-sheets-7`): comparison-status colours, text labels, notes and the
+  `PILOT_PRICE_ALTERNATIVES` tab.
+- `product_discovery.py` / `discover_products.py`: title-difference assessment and candidate tiers.
+- `audit_alternatives.py`, `compare_alternative_replay.py`: offline audit and before/after tools.

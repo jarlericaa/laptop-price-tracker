@@ -610,3 +610,23 @@ one broad-family target; `ListedSpecMatcher.associate` applies it across the cat
 ambiguity rule. `matching.configuration_outcome(..., title=...)` returns `LISTED_SPEC_MATCH` or the
 specific reason for a family target, and is shared by the weekly report, coverage, rechecks and
 discovery. The exact matcher (`ExactMatcher`) is unchanged.
+
+## Close alternatives (2026-10-27)
+
+Decision record: [DECISIONS.md](DECISIONS.md#close-alternative-retailer-comparisons-owner-policy-2026-10-27);
+specification: [CLOSE_ALTERNATIVES_2026-10-27.md](CLOSE_ALTERNATIVES_2026-10-27.md).
+
+The matcher, its rules version, its matching context and every stored result are unchanged:
+`ExactMatcher` still assigns a target only for the complete five-field key, and
+`alternatives.py` is outside `price_tracking.RULE_MODULES`. The alternatives layer is a separate,
+explanatory comparison of an offer's own evidence with a target: up to two established differences
+across model, screen size, CPU, installed RAM, installed storage and GPU make a labelled
+alternative (`ALT 1`, `ALT 2`); contradictions inside the retailer's evidence are rechecks; a
+missing core value is never agreement; zero differences never create a match. It reads
+`StoredMatch.offer_attributes` (what the matcher compared) and the same extraction's evidence,
+and writes only report rows.
+
+A broad-family target keeps the listed-spec treatment: its model is compared at family level and
+the specific model stays explicitly unknown. `configuration_outcome` (the coverage and recheck
+wording, "same model, different configuration") is unchanged; a confirmed alternative is reported
+beside it, not instead of it.

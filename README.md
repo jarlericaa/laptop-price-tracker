@@ -261,17 +261,31 @@ version used. See [docs/TARGET_MASTER_SCHEMA.md](docs/TARGET_MASTER_SCHEMA.md#to
 Exact duplicate rows for a `period_month`/`shop_id`/`item_id`/`model_id` key are kept once.
 Rows sharing a key but differing in any field are quarantined and reported in
 `conflicting_duplicates.csv`; publication is blocked until a valid decision is recorded. Each
-run writes a local, redacted `data/output/duplicate_review.csv` (keys, source row numbers,
-differing field names, and a `conflict_fingerprint`; no GMV, prices, or names). To record a
-decision, copy the row into `config/duplicate_decisions.csv` and fill in `decision`,
-`reviewer`, `reviewed_at`, and `reason`:
+run writes a local, redacted `data/output/duplicate_review.csv` (source identifiers, the
+conflict date, differing field names and one content fingerprint per conflicting record; no GMV,
+prices, names or sheet row numbers) and `data/output/duplicate_resolution_log.csv` (the sheet row
+each record occupies in this run). To record a decision, copy the row into
+`config/duplicate_decisions.csv` and fill in `decision`, `reviewer`, `reviewed_at`, and `reason`:
 
 - `EXCLUDE_KEY` keeps the key out of aggregation.
-- `KEEP_SOURCE_ROW` retains only the row named in `keep_source_row_number`.
+- `KEEP_RECORD` retains only the record whose fingerprint is in `selected_record_fingerprint`
+  (one of the listed `record_fingerprints`; use the resolution log to find it in the sheet).
 
-A decision applies only while its fingerprint matches the current source rows; if the `raw`
-data changes, the key is quarantined again for re-review. Model identity conflicts cannot be
-overridden this way.
+A decision is identified by content, not by sheet rows (fingerprint format `content-v1`, a hash of
+each record's exact raw cell text), so re-sorting `raw` does not invalidate it. It applies only
+while the key's conflicting records are exactly the reviewed ones: if a reviewed record's values
+change, or a record is added or removed, the decision is invalidated even when the selected
+record still exists, and the key is quarantined again for re-review. Model identity conflicts
+cannot be overridden this way. `migrate_duplicate_decisions.py` converts the retired row-number
+layout (preview by default; `--write` backs up first) and migrates only decisions whose reviewed
+records and winner can be established.
+
+**Standing owner rule (2026-11-03): keep the latest sheet row.** A conflict on one date with
+differing values and no valid decision is resolved by keeping the record on the highest current
+sheet row: `python apply_latest_row_decisions.py` (preview) or `--write` (backs up the decisions
+file first). It never handles model-identity conflicts or keys with several conflict dates; those
+stay quarantined. See the
+[decision](docs/DECISIONS.md#standing-rule-for-conflicting-duplicates-keep-the-latest-sheet-row-owner-decision-2026-11-03).
 
 Generated local CSV and JSON outputs live under `data/output/` and are intentionally ignored
 by Git. If intentionally processing an older snapshot, set `SKIP_FRESHNESS_CHECK=true`.
@@ -299,6 +313,9 @@ The latest live dry run took 57.49 seconds and did not write to any Google Sheet
 - [Sheet migration for tracking modes](docs/SHEET_MIGRATION_TRACKING_MODES.md)
 - [Sheet migration for model/CPU conventions](docs/SHEET_MIGRATION_MODEL_CPU_CONVENTIONS.md)
 - [Price tracking output schema](docs/PRICE_TRACKING_OUTPUT_SCHEMA.md)
+- [Close-alternative comparisons (2026-10-27)](docs/CLOSE_ALTERNATIVES_2026-10-27.md)
+- [Top 100 eligible mapped Shopee variations: selection rule, exclusions and commands (2026-11-03)](docs/MAPPED_TOP_100_2026-11-03.md)
+- [Shopee variation grain: contract, prices, contexts and publisher (2026-10-27)](docs/SHOPEE_VARIATION_GRAIN_2026-10-27.md)
 - [Phase 10 pilot runbook](docs/PHASE_10_PILOT.md)
 
 ## Local verification
@@ -306,7 +323,7 @@ The latest live dry run took 57.49 seconds and did not write to any Google Sheet
 ```bash
 python -m pytest -q
 python -m ruff check .
-python -m compileall src run_phase1.py smoke_test.py check_target_master.py check_target_tables.py seed_match_review.py match_offers.py audit_top_100_coverage.py propose_catalog_conventions.py build_verified_top_100.py audit_verified_top_100.py track_prices.py collect_and_match.py publish_prices.py replay_extraction.py discover_candidates.py discover_products.py discover_catalog_leads.py diagnose_blank_cells.py measure_discovery.py
+python -m compileall src audit_alternatives.py compare_alternative_replay.py run_phase1.py smoke_test.py check_target_master.py check_target_tables.py seed_match_review.py match_offers.py audit_top_100_coverage.py propose_catalog_conventions.py build_verified_top_100.py audit_verified_top_100.py track_prices.py collect_and_match.py publish_prices.py replay_extraction.py discover_candidates.py discover_products.py discover_catalog_leads.py diagnose_blank_cells.py measure_discovery.py
 python smoke_test.py
 python run_phase1.py --dry-run
 ```
@@ -326,3 +343,7 @@ member) prices and bundle wording without evidence of the terms are excluded wit
 `bundle-flag/2026-10-15` keeps the earlier rule (every checked bundle comparable). Unknown bundle
 status, preorder/unknown availability, missing prices and unresolved matches remain excluded.
 Details: `docs/PRICE_TRACKING_OUTPUT_SCHEMA.md`.
+
+### Close alternatives (2026-10-27)
+
+Intentional policy change: a retailer offer with up to two total established differences across model, screen size, CPU, installed RAM, installed storage and GPU (GPU shares the budget) is shown as a labelled `ALT 1` / `ALT 2` alternative for a target of the same brand and recognized product family. Matching prices, matching minimums, counts, stored matches and product identities are unchanged (`track_prices.py --no-alternatives` reproduces the matching-only report); alternatives have their own minimums, files (`weekly_price_alternatives.csv`) and the `PILOT_PRICE_ALTERNATIVES` tab. Contradictory evidence, missing core values and blocking conflicts are rechecks, never alternatives. Details: `docs/CLOSE_ALTERNATIVES_2026-10-27.md`.

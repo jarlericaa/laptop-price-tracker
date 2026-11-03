@@ -106,7 +106,7 @@ The composite duplicate key is `(period_month, shop_id, item_id, model_id)`. Row
 
 - If all compared values match, one row is retained and marked as an exact duplicate.
 - If values differ, the key is quarantined. A redacted `duplicate_review.csv` template is saved locally with key fields, differing fields, source row numbers, and a content fingerprint; it omits names, GMV, and price values.
-- The local `config/duplicate_decisions.csv` accepts `EXCLUDE_KEY` or `KEEP_SOURCE_ROW`. A decision must include the exact current fingerprint, reviewer, review date, and reason. `KEEP_SOURCE_ROW` must identify one source row. Stale fingerprints, invalid rows, or ambiguous decisions do not resolve a conflict.
+- The local `config/duplicate_decisions.csv` accepts `EXCLUDE_KEY` or `KEEP_RECORD` (since 2026-10-27; the row-number `KEEP_SOURCE_ROW` layout is retired). A decision carries the source identifiers, the conflict date, the content fingerprint (`content-v1`) of every reviewed record, reviewer, review date, and reason; `KEEP_RECORD` names the selected record's fingerprint. Sheet row numbers are never part of a decision; they are resolved and logged each run. A changed, added or removed conflicting record, an unsupported fingerprint version, or an ambiguous decision does not resolve a conflict.
 - A model ID associated with multiple `(shop_id, item_id)` identities is also excluded from publication and reported as a model-identity conflict.
 - Unresolved duplicate or model-identity records are written to local diagnostics and block publication. The normal pipeline does not silently choose a row.
 

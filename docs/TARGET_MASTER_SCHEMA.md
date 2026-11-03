@@ -355,13 +355,15 @@ A source contributes when all of these hold:
    `present_in_mtd` `True`.
 2. Its `model_id` has a validated `SOURCE_MODEL_MAP` row. IDs are exact text, so `0042` and `42`
    are different.
-3. It has at least one `COMPLETE` `MATCH_REVIEW` row and no open (`NEW`, `INCOMPLETE`,
-   `REVIEW_REQUIRED`) row.
-4. Every `COMPLETE` row agrees with the target on the five core fields under the 2026-10-08
-   conventions. A target code agrees with a review row recording that code; `M5` agrees with
-   `Apple M5`.
-5. Its recorded manufacturer code does not differ from the target's.
-6. It has no `OPEN` entry in the identity review register.
+3. It has no `OPEN` entry in the identity review register.
+
+**Owner decision 2026-10-26:** `TARGET_MASTER` and `SOURCE_MODEL_MAP` decide the list. A mapped
+source no longer needs a `COMPLETE` `MATCH_REVIEW` row, and `MATCH_REVIEW` status, core fields
+and manufacturer code are no longer compared with the target; targets are treated as reviewed
+when they are in `TARGET_MASTER`. `MATCH_REVIEW` still feeds the review-priority report only. The
+five exclusion reasons that depended on it (`NO_COMPLETE_REVIEW`, `REVIEW_STATUS_UNRESOLVED`,
+`REVIEW_CORE_DIFFERS`, `REVIEW_CODE_DIFFERS`, `REVIEW_MODE_MISMATCH`) no longer occur. Earlier
+runs (up to 2026-10-22) applied them.
 
 Missing secondary specifications never block selection.
 
@@ -386,11 +388,6 @@ then are the first 100 selected.
 | `TARGET_CORE_INCOMPLETE` | The mapped target's core identity is incomplete. |
 | `TARGET_CPU_MODEL_CONFLICT` | The target's `cpu_model` names another CPU family than its `cpu_series`. |
 | `KNOWN_UNRESOLVED_CONFLICT` | An `OPEN` register entry exists for the source or the target. |
-| `NO_COMPLETE_REVIEW` | The source has no `COMPLETE` review row. |
-| `REVIEW_STATUS_UNRESOLVED` | The source also has open review rows. |
-| `REVIEW_CORE_DIFFERS` | The review row and the target differ on a core field. |
-| `REVIEW_CODE_DIFFERS` | The review row and the target record different manufacturer codes. |
-| `REVIEW_MODE_MISMATCH` | The review row's tracking mode is not `CONFIGURATION`. |
 
 **Identity review register.** `config/identity_review_register.csv` is local and Git-ignored;
 its header is `config/identity_review_register_template.csv`. It holds known conflicts that

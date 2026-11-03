@@ -571,3 +571,146 @@ Items marked **PENDING OWNER DECISION** are proposals with an opt-in switch or a
   family target with the same listed specifications (TGT-000013, "HP Laptop 14"). The publisher
   now reports such offers (`offers_pricing_several_targets`); whether the two targets are
   duplicates is a catalog decision.
+
+## Close-alternative retailer comparisons (owner policy, 2026-10-27)
+
+**Intentional comparison-policy change: up to two total established differences across the five
+core dimensions plus GPU, with clearly labeled alternative comparisons and preserved product
+identities.** Full specification: [CLOSE_ALTERNATIVES_2026-10-27.md](CLOSE_ALTERNATIVES_2026-10-27.md).
+
+- **Policy.** An offer that is not a matching configuration may appear as `ALT 1` or `ALT 2` when
+  at most two of model, screen size, CPU, installed RAM, installed storage and GPU differ from
+  the target. GPU shares the budget; each dimension counts once (several changed CPU attributes
+  are one CPU difference, several changed GPU attributes one GPU difference). Three differences
+  (RAM + storage + GPU) are excluded.
+- **Differences are not uncertainty.** Each dimension is `AGREES`, `DIFFERS`, `UNKNOWN` or
+  `CONFLICTING_EVIDENCE`. A contradiction inside the retailer's own evidence (title vs selected
+  specification, two screen sizes, conflicting model identifiers, several unbound GPUs) is a
+  `RECHECK`, never a difference. A missing core value is never agreement; an unknown GPU stays
+  unknown; a missing exact processor is a visible limited `SERIES_ONLY` basis. Zero differences
+  never create an exact match.
+- **Scope.** Same brand and a recognized product family only (`config/product_family_registry.csv`,
+  new controlled list, seeded from the catalog and the product-name registry; owner review
+  requested). MacBook Air and MacBook Pro are different families. Materials conflicts outside the
+  six dimensions (resolution, panel, refresh rate, RAM/drive type, part number) keep the
+  existing blocking policy; warning-class fields stay warnings.
+- **Identity preserved.** No assignment, Shopee remap, target merge or stored-match rewrite; the
+  alternative association is kept beside the exact assignment and the discovery target. The
+  alternatives module is outside the matching rule fingerprint, so the matching context is
+  unchanged. TARGET_MASTER, SOURCE_MODEL_MAP, sales aggregation and the Top 100 are untouched.
+- **Display.** Matching offer first, otherwise the best `ALT 1`, otherwise `ALT 2`, lowest price
+  within the level. Matching minimums and counts are unchanged; alternative-only minimums
+  (observed and in-stock) are taken over the full eligible alternative pool.
+- **Discovery.** A search title stating one or two established differences is retained and
+  inspected (prioritized after matching configurations); more than two is skipped with a reason;
+  missing title fields stay unknown. A title never supplies a price.
+- **Sheets.** Publisher `pilot-sheets-7` (preview only until approved): status colours with a
+  text label column and legend, notes, new columns at the right, `PILOT_PRICE_ALTERNATIVES` tab.
+- **PENDING OWNER REVIEW:** the family registry's names and `includes` relations; whether a
+  broad-family target (`Aspire`, `IdeaPad`) should accept every line of its family as an
+  alternative source (currently yes, as the listed-spec policy accepts any offer naming the
+  family).
+
+## Top 100 Shopee variations: variation grain (owner decision, 2026-10-27)
+
+- **Grain.** The working list, reports and Sheets move from one row per configuration to one row per
+  eligible Shopee seller variation (`source_key`; `target_id` is never a row key). Schema
+  `shopee-variation-sheets-1`, ranking grain `SHOPEE_VARIATION`.
+- **Ranking.** First 100 eligible variations by each variation's own `ranking_gmv_usd` (Phase 1
+  metric: M-1 + MTD), ties on MTD then `model_id`. *Superseded in part on 2026-11-03 (next
+  section): unmapped or untrusted variations no longer enter the list.* True shortfalls are
+  reported, never padded.
+- **Prices.** Each row shows its own variation's snapshot price as of the cutoff (stale and
+  after-cutoff statuses explicit); no cheapest-seller, average, parent or configuration-level
+  fallback.
+- **Contexts.** Distinct trusted targets of the selected rows; discovery, collection, matching and
+  history imports run once per context and are shared by every row; row-to-observation
+  associations are separate records; coverage counts rows, contexts and unique observations apart.
+- **Sheets.** `PILOT_PRICE_SUMMARY` and `P1_TOP_100_CONFIGURATIONS` retired (never recreated);
+  `ARCHIVE_*_20261027` preserve the earlier configuration reports. Headers from the owner's JSON
+  contract; earlier history/review records retained with the explicit legacy grain.
+- **Open item (not implemented):** an evidence-backed comparison context for an unmapped row from
+  independently extracted source evidence. There is no safe source-evidence extractor to reuse, so
+  such rows wait for the catalog mapping. Details: `docs/SHOPEE_VARIATION_GRAIN_2026-10-27.md`.
+
+## Top 100 eligible mapped Shopee variations (owner decision, 2026-11-03)
+
+- **Decision.** The Top 100 contains only eligible Shopee variations with a verified mapping
+  (`MAPPED_VERIFIED`). This supersedes the 2026-10-27 rule that a mapping is enrichment and that
+  unmapped rows stay ranked as `CONFIGURATION_REVIEW_PENDING`.
+- **Order of operations.** Resolve and validate each variation's mapping from the current catalog
+  inputs, keep `MAPPED_VERIFIED` ones, rank that pool by the Phase 1 metric and tie-break, then
+  take the first 100. The filter runs before the limit, so lower-ranked verified variations fill
+  the places of excluded ones; the earlier list is not merely thinned. A qualifying mapping
+  resolves uniquely to an ACTIVE, complete, non-`LISTING_ONLY` configuration target accepted by
+  the existing validator, with no open identity conflict.
+- **Not gates.** `MATCH_REVIEW` completion, retailer coverage and retailer fetch success. Nothing
+  is padded: with fewer than 100 verified variations the list holds the actual count and states
+  the shortfall and reason.
+- **Unchanged.** Variation-level rows (repeated target IDs allowed), Phase 1 eligibility, duplicate
+  decisions, price rules, request reuse, rate limits, close alternatives, and the Sheets schema
+  `shopee-variation-sheets-1`. The full eligible ranking stays available for audit, with
+  `mapping_exclusions.csv` grouping the excluded variations by mapping failure.
+- **Effect (offline, 2026-11-03 catalog).** 187 eligible, 53 verified, 53 selected (shortfall 47),
+  40 contexts. Details: [MAPPED_TOP_100_2026-11-03.md](MAPPED_TOP_100_2026-11-03.md).
+
+### Selected-variation precedence and the 53-row investigation (2026-11-03)
+
+- The 187-row eligible pool and the 53 qualifying rows are correct under the established
+  policies: the pool is the eligible models present in MTD, and 2026-11-03 is the third day of
+  the month (292 MTD-active models against about 2,300 in late October). Whether M-1 sales alone
+  may qualify early in a month is an owner decision and is **not** implemented.
+- A mapped variation is compared with its target using only what the selected variation states
+  (variation name first; a parent applies only when it states one value and the variation is
+  silent; multi-option parents, ranges and unlabeled pairs stay unknown; CPU at series level).
+  A real disagreement excludes the row as `VARIATION_TARGET_SPEC_CONFLICT` and names the exact
+  fields and evidence; this exclusion rule is a decision awaiting owner confirmation.
+  `MATCH_REVIEW` is shown as evidence only. Details: MAPPED_TOP_100_2026-11-03.md.
+
+## Content-based duplicate decisions (owner authorization, 2026-10-27)
+
+- **Problem.** A decision was keyed on sheet row numbers and a fingerprint that included them, so
+  every re-sort of `raw` invalidated all 21 approvals (10-22, 10-26, 10-27).
+- **Decision.** A decision stores the source identifiers, the conflict date, a `content-v1`
+  fingerprint of every reviewed record (hash of the exact raw cell text, so precision, leading
+  zeros and long identifiers are preserved) and, for `KEEP_RECORD`, the selected record's
+  fingerprint. Row numbers are not part of identity; each run resolves the current rows and
+  writes `duplicate_resolution_log.csv`.
+- **Invalidation.** The decision applies only if the key's current records are exactly the
+  reviewed ones (same fingerprints and date). An edited record, a new conflicting record, a
+  removed record or a different fingerprint version sends the key back to review, even when the
+  selected record still exists.
+- **Migration.** `migrate_duplicate_decisions.py` (preview default, `--write` backs up) converts a
+  row-number file only where the reviewed records and the selected winner are established: the
+  current records placed on the old row numbers must reproduce the stored legacy fingerprint.
+  Reviewer and review date are preserved. On 2026-10-27 all 21 migrated; each selected record
+  matched the winner verified earlier that day. Backups are in `data/backups/`.
+
+
+## Standing rule for conflicting duplicates: keep the latest sheet row (owner decision, 2026-11-03)
+
+- **Decision.** The owner rule first stated 2026-10-22 ("keep the latest sheet row") is now
+  **standing**: every conflicting-duplicate key (same `period_month`/`shop_id`/`item_id`/`model_id`,
+  one conflict date, differing values) that has no valid decision is resolved with `KEEP_RECORD`
+  on the record at the highest current sheet row, without asking again. Authorized by tj.noval on
+  2026-11-03 ("always apply the keep the latest sheet row to all similar problems").
+- **Trigger.** The 2026-11-03 run stopped in Phase 1: 5 keys (4 sibling variations of shop
+  780290062 item 16594923689 and one of shop 54415693 item 56256837054) carried a decision from
+  10-26/10-27 that was invalidated because the raw values of both records were restated. All 5
+  were resolved by this rule; their earlier decisions were already "keep latest".
+- **Mechanism.** `apply_latest_row_decisions.py` (preview default, `--write` backs up
+  `config/duplicate_decisions.csv` to `data/backups/`) reads the local `duplicate_review.csv` and
+  `duplicate_resolution_log.csv` of the run that stopped, picks the record on the highest
+  `current_source_row_number` of each undecided key, and replaces any invalidated decision for the
+  same key. Decisions carry reviewer `tj.noval (standing owner rule: keep the latest sheet row)`
+  and the run date. Logic: `src/laptop_tracker/duplicate_policy.py`; tests:
+  `tests/test_duplicate_policy.py`. The weekly driver applies it automatically once, then retries
+  the sales refresh.
+- **Boundaries (not covered; stay quarantined for human review).** Model-identity conflicts (one
+  model ID under several shop/item sources: never overridable); keys whose records span several
+  conflict dates; keys whose records cannot be placed on distinct sheet rows. The rule changes
+  which of two conflicting records counts toward GMV, so every application is auditable: the
+  proposal and anything not covered are written to `data/output/latest_row_decisions/`, each
+  decision is a row in `config/duplicate_decisions.csv` (reviewer and date), and the previous file
+  is kept in `data/backups/`. The rule does not relax freshness checks or any other Phase 1
+  validation.

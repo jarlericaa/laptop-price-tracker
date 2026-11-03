@@ -123,7 +123,7 @@ All values are fields of `FetchConfig` and can be overridden. They are conservat
 
 Timeouts and connection errors are retryable. HTTP statuses are retryable only when listed. Parse and validation failures are never retried, because refetching the same page would not fix them.
 
-`Transport` (one GET per call) and `Clock` (`now`, `monotonic`, `sleep`) are protocols. `UrllibTransport` and `SystemClock` are the defaults; tests inject fakes. `UrllibTransport` has no cookie jar. It keeps only the `Content-Type`, `Retry-After`, and `Location` response headers, drops `Set-Cookie`, and refuses non-HTTP(S) URLs.
+`Transport` (one GET per call) and `Clock` (`now`, `monotonic`, `sleep`) are protocols. `UrllibTransport` and `SystemClock` are the defaults; tests inject fakes. `UrllibTransport` has no cookie jar. It keeps only the `Content-Type`, `Retry-After`, and `Location` response headers plus a short allow-list of non-sensitive diagnostic headers (`Server`, `Via`, `CF-Ray`, `X-Request-ID`, `RateLimit*` and similar), drops `Set-Cookie`, and refuses non-HTTP(S) URLs. For an HTTP 429 only, the diagnostic headers and the first 300 characters of the body are written to the `response_evidence` column of `rate_limit_events.csv` (2026-10-27), so the sender of a throttle can be identified from the run's own log; no extra request is made to find out.
 
 ### Redirects
 
