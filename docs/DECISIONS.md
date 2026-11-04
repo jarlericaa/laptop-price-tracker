@@ -563,9 +563,12 @@ Items marked **PENDING OWNER DECISION** are proposals with an opt-in switch or a
   frozen key columns, hidden gridlines). Before this, the summary layout reset backgrounds and
   would have left the owner's white header text unreadable. Conditional-format rules are not
   touched; the comparison column positions they depend on are pinned by a test.
-- **PENDING OWNER DECISION: exact processor number.** `cpu_model` stays a WARNING (approved
-  2026-10-15). `matching.STRICT_CPU_MODEL` is an opt-in matcher override that would send such
-  matches to review; it is not wired into any weekly command.
+- **Exact processor number (superseded in code, 2026-10-22).** `cpu_model` was a WARNING
+  (approved 2026-10-15). `matching.STRICT_CPU_MODEL` is now the default: a verified processor
+  number disagreement blocks automatic comparison and a missing or family-only value stays
+  unknown; `matching.LEGACY_CPU_MODEL_WARNING` is the explicit override that restores the warning.
+  The owner's approval of the change is not recorded in this file; confirm it. `tests/test_exact_cpu.py`
+  pins the rule.
 - **PENDING OWNER DECISION: one offer pricing several targets.** The listed-spec policy allows
   an offer that exactly matches a code target (e.g. TGT-000233, HP 14-ep0445TU) to also price a
   family target with the same listed specifications (TGT-000013, "HP Laptop 14"). The publisher

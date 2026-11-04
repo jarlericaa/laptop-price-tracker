@@ -1,5 +1,5 @@
-"""Safe verification regressions for the 2026-10-21 audit traps, the proposed CPU-model gate,
-offers shared by several targets, and the per-cell diagnostics (2026-10-22)."""
+"""Safe verification regressions for the 2026-10-21 audit traps, the exact-CPU gate (the default
+since 2026-10-22), offers shared by several targets, and the per-cell diagnostics."""
 
 from __future__ import annotations
 
@@ -20,7 +20,12 @@ from laptop_tracker.cell_diagnostics import (
     stage_counts,
     url_kind,
 )
-from laptop_tracker.matching import STRICT_CPU_MODEL, ExactMatcher, MatchStatus
+from laptop_tracker.matching import (
+    LEGACY_CPU_MODEL_WARNING,
+    STRICT_CPU_MODEL,
+    ExactMatcher,
+    MatchStatus,
+)
 from laptop_tracker.price_tracking import RETAILERS
 from laptop_tracker.product_discovery import SearchTarget, VariantInfo, variant_decision
 from laptop_tracker.sheet_publication import shared_offers
@@ -29,15 +34,8 @@ pytestmark = pytest.mark.usefixtures("no_network")
 ATTRIBUTES = {k: v for k, v in VIVO.items() if k not in {"target_id", "status"}}
 
 
-# The proposed exact-CPU gate (owner decision pending; default behaviour unchanged)
-
-
-def test_a_processor_number_contradiction_is_only_a_warning_under_the_approved_policy() -> None:
-    target = VIVO | {"cpu_model": "Core 5 210H"}
-    result = ExactMatcher([target]).match(pcx("x"), ATTRIBUTES | {"cpu_model": "Core 5 220H"})
-    # The contradiction is exposed: EXACT, with the warning and a CONFLICT evidence row.
-    assert result.status is MatchStatus.EXACT
-    assert "SECONDARY_WARNING_CPU_MODEL" in result.warnings
+# The exact-CPU gate: a verified processor-number disagreement blocks automatic comparison by
+# default; test_exact_cpu.py covers the default and the explicit legacy warning override.
 
 
 def test_the_opt_in_strict_gate_sends_the_same_offer_to_review() -> None:
@@ -52,13 +50,15 @@ def test_the_opt_in_strict_gate_sends_the_same_offer_to_review() -> None:
     assert unstated.status is MatchStatus.EXACT
 
 
-def test_strict_gate_separates_targets_that_differ_only_by_processor_number() -> None:
+def test_the_default_gate_separates_targets_that_differ_only_by_processor_number() -> None:
     one = VIVO | {"cpu_model": "Core 5 210H"}
     two = VIVO | {"target_id": "TGT-000032", "cpu_model": "Core 5 220H"}
     offer = ATTRIBUTES | {"cpu_model": "Core 5 220H"}
-    assert ExactMatcher([one, two]).match(pcx("x"), offer).status is MatchStatus.AMBIGUOUS
-    narrowed = ExactMatcher([one, two], severity_overrides=STRICT_CPU_MODEL).match(pcx("x"), offer)
+    narrowed = ExactMatcher([one, two]).match(pcx("x"), offer)
     assert (narrowed.status, narrowed.target_id) == (MatchStatus.EXACT, "TGT-000032")
+    # Only the explicit legacy override leaves both targets standing.
+    legacy = ExactMatcher([one, two], severity_overrides=LEGACY_CPU_MODEL_WARNING)
+    assert legacy.match(pcx("x"), offer).status is MatchStatus.AMBIGUOUS
 
 
 def test_invalid_severity_overrides_are_refused() -> None:

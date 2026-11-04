@@ -50,7 +50,10 @@ CAPACITY_NOT_LISTED = "CAPACITY_NOT_LISTED_BY_PAGE_STATEMENT"
 RAM_STATEMENTS_DISAGREE = "RAM_STATEMENTS_DISAGREE"
 RAM_STATEMENT_NOT_UNIFORM = "RAM_STATEMENT_NOT_UNIFORM"
 
-_CAPACITY = re.compile(r"(?<![0-9.])([0-9]{1,4})\s*(GB|TB)\b(?!/s|ps)", re.I)
+# A unit glued to a storage word ("512gbSSD") is still a capacity; "GBps" and "GB/s" are not.
+_CAPACITY = re.compile(
+    r"(?<![0-9.])([0-9]{1,4})\s*(GB|TB)(?:\b(?!/s|ps)|(?=ssd|sdd|hdd|nvme|emmc))", re.I
+)
 _STORAGE_NAME = re.compile(
     r"^\s*(?:internal\s+|total\s+|storage\s+)?(?:storage|ssd|hdd|hard\s*(?:disk|drive)|drive|disk|"
     r"capacity)\b", re.I)

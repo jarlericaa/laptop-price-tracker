@@ -9,6 +9,8 @@ covers every variant. Page: ``scraping_fixtures/pcc_neo/pcc_neo_variants.html`` 
 
 from __future__ import annotations
 
+import re
+
 import pytest
 from pcc_neo_pages import HOST, PRODUCT_URL, saved_page
 
@@ -63,8 +65,10 @@ def test_capacity_with_no_page_statement_of_its_role_stays_in_review() -> None:
     text = saved_page()
     for statement in ("Storage:", "Storage: "):
         text = text.replace(f"<span>{statement}</span>", "<span>Notes:</span>")
-    text = text.replace("Storage:  256GB &amp;amp; 512gbSSD. ", "").replace(
-        "Storage:  256GB &amp; 512gbSSD. ", "")
+    # The fixture carries the statement in several copies (page text, a spec table and embedded
+    # JSON), escaped once, twice or as \u0026amp;; every copy has to go.
+    text = re.sub(r"256GB (?:&amp;amp;|&amp;|\\u0026amp;) 512gbSSD\.?", "", text)
+    assert "512gbSSD" not in text
     result = decisions(text, neo_target("512"))
     assert {d for d, _ in result.values()} == {"REVIEW"}
     assert "role" in result[SILVER_512][1].casefold()
@@ -94,10 +98,20 @@ def test_product_url_host_is_the_pc_central_store() -> None:
 
 @pytest.mark.parametrize("ram_statement", ["Memory: 8GB or 16GB Unified Memory."])
 def test_ram_listed_as_alternatives_is_not_one_shared_value(ram_statement: str) -> None:
-    text = saved_page().replace("<span> 8GB Unified Memory.</span>",
-                                f"<span> {ram_statement.split(': ', 1)[1]}</span>")
+    # The page states "Memory:<nbsp>8GB<nbsp>Unified<nbsp>Memory" in its description copies.
+    memory = r"(Memory:[\s\xa0]*)8GB[\s\xa0]+Unified[\s\xa0]+Memory"
+    text = re.sub(memory, rf"\g<1>{ram_statement.split(': ', 1)[1].rstrip('.')}", saved_page())
+    assert "8GB or 16GB" in text
     inspection = inspect_product_page(PCC, PRODUCT_URL, text)
     readings = {v.variant_id: v.reading for v in inspection.variants}
     assert readings[SILVER_512].ram == ""
     assert readings[SILVER_512].ram_scope == "NOT_ESTABLISHED"
     assert readings[SILVER_512].storage == "512"
+
+
+def test_a_capacity_glued_to_a_storage_word_is_read_but_a_data_rate_is_not() -> None:
+    from laptop_tracker.variant_axes import capacities
+
+    assert capacities("Storage: 256GB & 512gbSSD") == [256, 512]
+    assert capacities("1TBnvme") == [1000]
+    assert capacities("10GBps and 5GB/s ports") == []

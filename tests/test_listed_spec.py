@@ -67,7 +67,7 @@ pytestmark = pytest.mark.usefixtures("no_network")
 FAMILY = dict(target_id="TGT-000001", status="ACTIVE", brand="Lenovo", model="IdeaPad",
               screen_size_in="15.3", cpu_series="Ryzen 7", ram_capacity_gb="16",
               storage_capacity_gb="512", manufacturer_model_code="", gpu_model="",
-              display_type="", resolution="", cpu_model="Ryzen 7 170")
+              display_type="", resolution="", cpu_model="Ryzen 7 7735HS")
 OFFER = {"brand": "Lenovo", "model": "83K700HXPH", "screen_size_in": "15.3",
          "cpu_series": "Ryzen 7", "ram_capacity_gb": "16", "storage_capacity_gb": "512"}
 TITLE = "Lenovo IdeaPad Slim 3 15ARP10 (83K700HXPH) AMD Ryzen 7 7735HS Laptop"
@@ -85,8 +85,9 @@ def test_a_valid_broad_family_offer_is_a_listed_spec_match_never_an_exact_one() 
     assert result.outcome == QUALIFIES
     # The retailer's own code and processor are kept as stated, never replaced by "IdeaPad".
     assert "model 83K700HXPH" in result.offer_details and "7735HS" in result.offer_details
-    # The recorded processor number differs: visible, not blocking.
-    assert result.warnings == ("CPU_NUMBER_DIFFERS_FROM_TARGET_RECORD",)
+    # The recorded processor is the one the title states: nothing to warn about. (A recorded
+    # number that the page contradicts is a SECONDARY_CONFLICT; see test_exact_cpu.py.)
+    assert result.warnings == ()
     outcome, detail = configuration_outcome("UNMATCHED", "", ("NO_CORE_MATCH",), OFFER,
                                             "TGT-000001", FAMILY, title=TITLE)
     assert outcome == "LISTED_SPEC_MATCH" and detail.startswith("Listed-spec match —")
@@ -192,7 +193,7 @@ PLAIN = dict(series="", manufacturer_model_code="", resolution="", display_type=
 def catalog(*, family_gpu: str = ""):
     """TGT-000001 a Lenovo IdeaPad family target; TGT-000002 an unrelated code target."""
     family = target("TGT-000001", "IdeaPad", "15.3", "Ryzen 7", "16", "512", brand="Lenovo",
-                    gpu_model=family_gpu, cpu_model="Ryzen 7 170", **PLAIN)
+                    gpu_model=family_gpu, cpu_model="Ryzen 7 7735HS", **PLAIN)
     return [family, target("TGT-000002", "EB15-0002", "15.6", "Core 7", "16", "1000")]
 
 
@@ -239,7 +240,7 @@ def test_a_listed_spec_price_is_comparable_and_labelled(tmp_path) -> None:
     assert cell["LF_Price"] == "1000.00" and cell["LF_Price_Status"] == "SELECTED"
     assert cell["LF_Match_Basis"] == "LISTED_SPEC"
     assert cell["LF_Warnings"].startswith("SPECIFIC_IDENTITY_UNRESOLVED")
-    assert "CPU_NUMBER_DIFFERS_FROM_TARGET_RECORD" in cell["LF_Warnings"]  # 7735HS vs 170
+    assert "CPU_NUMBER_DIFFERS_FROM_TARGET_RECORD" not in cell["LF_Warnings"]
     assert "83K700HXPH" in cell["LF_Offer_Details"]  # the title, quoted: no model extracted
     assert (cell["Comparison_Basis"], cell["Lowest_Price_Basis"], cell["Lowest_Price_Label"]) == (
         "LISTED_SPEC", "LISTED_SPEC", "Lowest price matching listed specs")
