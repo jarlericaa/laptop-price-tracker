@@ -151,3 +151,29 @@ served from saved evidence, and is blank when the run records neither.
 Tests: `tests/test_catalog_corrections.py`, `tests/test_publication_diagnostics.py` (synthetic
 data; brand mismatch, sibling fan-in, contradiction, internal conflict, never auto-applied, inputs
 never mutated, unknown outcome vocabulary, writes only into the output folder).
+
+## 3. Before/after report (2026-11-04)
+
+`build_before_after_report.py` compares two run folders from their own artifacts (read only; no
+retailer, Sheet or history store). Library: `src/laptop_tracker/before_after.py`.
+
+```
+python build_before_after_report.py \
+  --before-dir data/output/weekly_runs/20261103T023824Z \
+  --after-dir  data/output/weekly_runs/<new run>          # writes <after>/before_after/
+python build_before_after_report.py --before-dir ... --after-dir ... --dry-run   # print only
+```
+
+Reads `shopee_variations/shopee_variation_run_summary.json`, `variation_reports/variation_coverage.json`,
+`discovery/discovery_summary.json` and `discovery/search_jobs.csv` of each folder (a missing file is
+listed, not guessed) and writes `before_after_report.json/.md` (under `data/output/` only). Sections:
+eligible, qualifying and selected variations per month and their union; exclusions by reason; selected
+variations, distinct contexts and the shortfall; **matching coverage and alternative coverage as two
+separate sections**; discovery jobs by terminal outcome; the six owner-named misses (PC Central
+X1504VA and AG14-71M, PC Express MacBook Neo 256/512, DataBlitz MacBook Air M5 16/512 and 16/1TB)
+with their outcome before and after; jobs ending `PAGE_FETCHED_IDENTITY_UNRESOLVED`; requests avoided
+by reuse. A figure a run never wrote is `NOT_RECORDED`, never zero (the run before the union rule has
+no month counts; a run before the 2026-11-03 vocabulary has `discovery_outcome` only, whose
+`QUERY_PLAN_EXHAUSTED` maps to no class). "Recovered" means class `0_SUITABLE_OFFER` only: a confirmed
+offer excluded by stock or terms, an unresolved page and a deferred fetch are reported under their own
+status. Tests: `tests/test_before_after.py`.
