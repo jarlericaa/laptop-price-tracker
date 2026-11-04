@@ -166,14 +166,17 @@ product page. `discovery_summary.json` `request_reuse` reports `searches_reused_
 | REC-pcc-0002 | PC Central | TGT-000095 Acer AG14-71M-58JD, Core Ultra 5 115U, 16GB/512GB | Search hit in runs 20261022 and 20261103, catalog lead | Page saved 2026-11-03T06:35Z: 16GB, 512GB, in stock, 50,999; same `REVIEW_REQUIRED` reasons |
 | REC-pcx-0001 | PC Express | TGT-000003 MacBook Neo A18 Pro 8GB/256GB | Product sitemap entry (title "256GB (MHFA4PP/A) ... (Silver)", lastmod 2026-11-03) | No page saved; RAM, stock and price unknown. Search missed it (cap reached; capacities query empty) |
 | REC-pcx-0002 | PC Express | TGT-000002 MacBook Neo A18 Pro 8GB/512GB | Product sitemap entry (title "512GB (MHFC4PP/A) ... (Silver)") | As above |
+| REC-datablitz-0001 | DataBlitz | TGT-000001 MacBook Air M5 16GB/512GB | Audit lead L001 (`tests/scraping_fixtures/discovery_benchmark/leads_v1.csv`) and a page fetched 2026-10-25 (`docs/benchmarks/variant-page-comparison-2026-10-25.csv`), added 2026-11-04 | That fetch ended `REVIEW_REQUIRED` (`TITLE_SPEC_CONFLICT_SCREEN_SIZE_IN`; `MISSING_MODEL`). The title/specification screen pair is the one the reviewed MacBook Air M5 entry resolves when the page states 13.6 (the page itself was not saved, so this is not verified here). Audit price (72,990) and "sold out" are unverified claims: no current offer, price or stock |
 
-**DataBlitz MacBook Air M5 16GB/512GB (TGT-000001) and 16GB/1TB (TGT-000006): no URL exists in any
-saved observation.** The only DataBlitz M5 Air page ever seen is 24GB+1TB (TGT-000045's, out of
-stock, single variant). The leads file therefore has no DataBlitz row; inventing a URL would be
-wrong. Recovery for these two is by search (`Apple MacBook Air M5`, new `2_PRODUCT_NAME_CPU`
-tier, 13-inch targets) and by hand through `web_search_plan.csv`
-(`site:ecommerce.datablitz.com.ph "Apple MacBook Air M5"`); a URL found goes into the leads file. The
-storefront route cannot help (DataBlitz renders its search page in the browser).
+**DataBlitz MacBook Air M5 16GB/1TB (TGT-000006): no product URL exists in any saved evidence.** The
+only audit lead for it (L006) is a collection page, and the two DataBlitz M5 Air 24GB/1TB pages
+(silver `mdh94pp-a`, midnight `mdhg4pp-a`) are other targets (24GB). The first version of this
+document said no DataBlitz M5 Air URL existed at all; the 2026-10-25 benchmark files, which hold the
+TGT-000001 lead above, were missed. Inventing a URL for TGT-000006 would be wrong. Recovery is by
+search (`Apple MacBook Air M5`, the `2_PRODUCT_NAME_CPU` tier, 13-inch targets) and by hand through
+`web_search_plan.csv` (`site:ecommerce.datablitz.com.ph "Apple MacBook Air M5"`); a URL found goes
+into the leads file. The storefront route cannot help (DataBlitz renders its search page in the
+browser).
 
 Command (do not run until approved; live requests, writes observations to the history store after
 backing it up, as the weekly collection does). The owner-named pairs are 6 targets x 3 retailers = 18
@@ -218,10 +221,14 @@ include the new compact spelling tier.
 
 ## 10. Limitations and owner decisions
 
-- **PC Central identity.** After the crash fix the two PC Central pages are collected but stay in
-  review: extraction reports `MULTI_VARIANT_SHARED_DESCRIPTION` and no model for a single-variant
-  page with named options. That is an extraction question (not changed here), and it decides whether
-  these two leads can ever price.
+- **PC Central identity (resolved in extraction, not yet live).** After the crash fix the two PC
+  Central pages were collected but stayed in review: extraction reported
+  `MULTI_VARIANT_SHARED_DESCRIPTION` and no model for a single-variant page with named options.
+  `adapters/pcc.py` (pcc-7) now proves the sole variant, and the saved X1504VA and AG14-71M pages
+  extract model, screen, CPU, RAM and storage
+  ([EXTRACTION_FIXES_2026-11-03.md](EXTRACTION_FIXES_2026-11-03.md)). The offline replay figures in
+  section 8 (`PAGE_FETCHED_IDENTITY_UNRESOLVED`) predate that fix; a live recovery run is still
+  needed to show a priced or alternative outcome for them.
 - **Estimates.** The 177-job breakdown reclassifies saved facts offline; relevance is approximated
   from saved categories. No recall or price improvement is claimed: no live run was made.
 - **Defaults changed:** `--max-identifier-variant-queries` 3 (was 2); predictive searches send the

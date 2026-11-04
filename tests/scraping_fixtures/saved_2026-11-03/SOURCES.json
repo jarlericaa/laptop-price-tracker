@@ -1,0 +1,69 @@
+{
+  "note": "Reconstructed on 2026-11-04: the original file was never committed (*.json was gitignored). url is the page's own canonical URL (PC Central pages keep the first variant the saved page lists, which the tests rely on); retrieved_at is the retrieval date of the 2026-11-03 weekly runs, with the exact time only where docs/DISCOVERY_IMPROVEMENTS_2026-11-03.md records it (retrieved_at_precision). sha256_fixture is the hash of the trimmed fixture in this folder; the original evidence hashes are not recoverable here (sha256_original null).",
+  "pages": {
+    "datablitz_hp_15_fc0933au.html": {
+      "retailer_id": "datablitz",
+      "url": "https://ecommerce.datablitz.com.ph/products/hp-15-fc0933au-laptop-natural-silver-15-6-fhd-1920x1080-ips-ryzen-3-7320u-8gb-ram-512gb-ssd-amd-radeon-graphics-windows-11-home-ms-office-home-2019-ms-365-basic-hp-everyday-16-laptop-briefcase",
+      "retrieved_at": "2026-11-03T00:00:00Z",
+      "retrieved_at_precision": "date",
+      "sha256_fixture": "3114f4d38793aad59e89bec5ce114acc0dcfff82700f338995728d6768b97be1",
+      "sha256_original": null
+    },
+    "datablitz_macbook_air_13_m5.html": {
+      "retailer_id": "datablitz",
+      "url": "https://ecommerce.datablitz.com.ph/products/apple-macbook-air-13-24gb-1tb-m5-chip-with-10-core-cpu-10-core-gpu-silver-mdh94pp-a",
+      "retrieved_at": "2026-11-03T00:00:00Z",
+      "retrieved_at_precision": "date",
+      "sha256_fixture": "40b713b15f411ff8df792285ac64400cb22e5b9322186eb121e0fd60c0580fdf",
+      "sha256_original": null
+    },
+    "laptop_factory_hp_15_fc0933au.html": {
+      "retailer_id": "laptop_factory",
+      "url": "https://laptopfactory.com.ph/product/hp-laptop-15-fc0933au/",
+      "retrieved_at": "2026-11-03T00:00:00Z",
+      "retrieved_at_precision": "date",
+      "sha256_fixture": "4c6e66f78f60817aa451b1ccf68b6ab9fde0e5af5a99e76cc56236f3e78549f7",
+      "sha256_original": null
+    },
+    "oct_acer_nitro_v_anv15_52_572t.html": {
+      "retailer_id": "oct",
+      "url": "https://www.octagon.com.ph/products/acer-nitro-v-anv15-52-572t-core-i5-13420h-16gb-ddr4-512gb-ssd-15-6-fhd-ips-165hz-win-11-rtx5050-8gb",
+      "retrieved_at": "2026-11-03T00:00:00Z",
+      "retrieved_at_precision": "date",
+      "sha256_fixture": "7a2c01630cc698599415b77fa5f2d7144551e8fa19019048907ad34659766418",
+      "sha256_original": null
+    },
+    "pcc_acer_aspire_go_14_ag14_71m_58jd.html": {
+      "retailer_id": "pcc",
+      "url": "https://pccentralcomputerstore.com/products/acer-aspire-go-14-ai-ag14-71m-58jd-steel-gray-14in-wuxga-ips-core-ultra-5-16gb-ram-512gb-ssd-intel-graphics-win11-home?variant=50641693868199",
+      "retrieved_at": "2026-11-03T06:35:00Z",
+      "retrieved_at_precision": "minute",
+      "sha256_fixture": "8fc84c0ebfbb3c1aad74e4005fd96ebe57864a3cf01feb9dc33a41722ed2bc55",
+      "sha256_original": null
+    },
+    "pcc_acer_nitro_v_anv15_52_585u.html": {
+      "retailer_id": "pcc",
+      "url": "https://pccentralcomputerstore.com/products/acer-nitro-v-15-anv15-52-585u-15-6in-fhd-ips-165hz-intel-core-5-210h-16gb-ddr4-512gb-ssd-geforce-rtx-5050-8gb-win11-home-pc-central?variant=48504754897063",
+      "retrieved_at": "2026-11-03T00:00:00Z",
+      "retrieved_at_precision": "date",
+      "sha256_fixture": "c698bbf2742d9527a2540a9f171d125196c84600ee5353bd99f0b52ff1e0c4df",
+      "sha256_original": null
+    },
+    "pcc_asus_vivobook_15_x1504va_bq4301wsm.html": {
+      "retailer_id": "pcc",
+      "url": "https://pccentralcomputerstore.com/products/asus-vivobook-15-x1504va-bq4301wsm-intel-core-3-100u-8gb-ddr5-ram-512gb-ssd-uhd-graphics-pc-central?variant=51411673481383",
+      "retrieved_at": "2026-11-03T06:36:00Z",
+      "retrieved_at_precision": "minute",
+      "sha256_fixture": "5b4bb9cea6fc98f8d5b3e30e16c1aa472e7ac9dbabeec4958df273c4806c9265",
+      "sha256_original": null
+    },
+    "pcx_hp_15_fc0933au.html": {
+      "retailer_id": "pcx",
+      "url": "https://pcx.com.ph/products/hp-15-fc0933au-dm8l7pa-amd-ryzen-3-laptop-natural-silver",
+      "retrieved_at": "2026-11-03T00:00:00Z",
+      "retrieved_at_precision": "date",
+      "sha256_fixture": "cf18f41a8073174a9bd737fcca02c3f690250852cf3647147f122987e43cf266",
+      "sha256_original": null
+    }
+  }
+}

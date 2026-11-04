@@ -61,15 +61,19 @@ def main() -> int:
     if proposed.empty:
         print("No decisions to write.")
         return 0 if skipped.empty else 1
-    backup_dir = Path(args.backup_dir)
-    backup_dir.mkdir(parents=True, exist_ok=True)
-    stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
-    backup = backup_dir / f"duplicate_decisions.{stamp}.pre_latest_row.csv"
-    shutil.copy2(decisions_path, backup)
+    backup_note = "no earlier decisions file, nothing to back up"
+    if decisions_path.is_file():
+        backup_dir = Path(args.backup_dir)
+        backup_dir.mkdir(parents=True, exist_ok=True)
+        stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
+        backup = backup_dir / f"duplicate_decisions.{stamp}.pre_latest_row.csv"
+        shutil.copy2(decisions_path, backup)
+        backup_note = f"backed up to {backup}"
+    decisions_path.parent.mkdir(parents=True, exist_ok=True)
     merged.reindex(columns=DUPLICATE_DECISION_COLUMNS).to_csv(
         decisions_path, index=False, lineterminator="\n"
     )
-    print(f"Backed up to {backup}; decisions file now has {len(merged)} row(s).")
+    print(f"{backup_note.capitalize()}; decisions file now has {len(merged)} row(s).")
     return 0 if skipped.empty else 1
 
 

@@ -446,6 +446,7 @@ RECOVERY = {
     "REC-pcc-0002": ("pcc", "TGT-000095"),
     "REC-pcx-0001": ("pcx", "TGT-000003"),
     "REC-pcx-0002": ("pcx", "TGT-000002"),
+    "REC-datablitz-0001": ("datablitz", "TGT-000001"),
 }
 
 
@@ -481,6 +482,7 @@ def test_recovery_leads_resolve_to_their_targets_through_the_hint() -> None:
         ("TGT-000095", "pcc"): ["REC-pcc-0002"],
         ("TGT-000003", "pcx"): ["REC-pcx-0001"],
         ("TGT-000002", "pcx"): ["REC-pcx-0002"],
+        ("TGT-000001", "datablitz"): ["REC-datablitz-0001"],
     }
     assert {r["assignment_basis"] for r in report} == {"SEARCH_TARGET_HINT"}
 

@@ -7,6 +7,8 @@ __pycache__/
 .env.*
 !.env.example
 *.json
+!config/shopee_variation_sheet_contract.json
+!tests/scraping_fixtures/**/*.json
 *.pem
 *.p12
 *.key

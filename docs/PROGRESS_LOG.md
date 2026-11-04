@@ -532,3 +532,19 @@ Work folder: `data/output/shopee_summary_2026-10-20/`.
   extended. Full suite 2,181 passed, 14 failed (the unchanged baseline). Offline rebuild, audits and
   publisher preview pass in `data/output/mapped_selection_2026-11-03b`. Nothing written to Sheets, no live
   discovery, nothing committed.
+
+## Test baseline cleared, extraction doc, before/after report, DataBlitz lead (2026-11-04; offline)
+
+- The 14 failures called the "unchanged baseline" are gone. 11 were stale tests (the exact-CPU gate
+  has been the matcher default since 2026-10-22: `test_listed_spec` 9, `test_verification_safety` 2);
+  3 came from a real extraction bug plus fixture edits that no longer matched the saved PC Central Neo
+  page: `variant_axes._CAPACITY` now reads a capacity glued to a storage word ("512gbSSD").
+  Full suite: 2,373 passed, 5 skipped; `test_variation_publication.py` cannot be collected because
+  `config/shopee_variation_sheet_contract.json` (owner-supplied, never committed) is absent here.
+- `.gitignore` now un-ignores that contract and `tests/scraping_fixtures/**/*.json`;
+  `saved_2026-11-03/SOURCES.json` was rebuilt (URLs, retrieval dates; original hashes unrecoverable).
+- New: `docs/EXTRACTION_FIXES_2026-11-03.md`; `build_before_after_report.py` +
+  `src/laptop_tracker/before_after.py` + `tests/test_before_after.py`; DataBlitz lead
+  `REC-datablitz-0001` (TGT-000001) from the 2026-10-25 benchmark evidence.
+- Not done (owner decisions): the four new P1 tab names in `sheets_writer.ALLOWED_OUTPUT_TABS`;
+  a live retailer-restricted web search route; a URL for DataBlitz MacBook Air M5 16GB/1TB.
