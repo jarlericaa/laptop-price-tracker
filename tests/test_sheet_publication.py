@@ -98,7 +98,10 @@ class FakeSpreadsheet:
         next_id = max((s["id"] for s in self.sheets.values()), default=999) + 1
         sheet = {"title": title, "id": next_id, "rows": rows, "cols": cols,
                  "grid": {}, "frozen": 0, "frozen_columns": 0, "filter": None, "widths": {},
-                 "heights": {}, "layout": {}, "gridlines_hidden": False}
+                 "heights": {}, "layout": {}, "gridlines_hidden": False,
+                 # column groups ({range, depth, collapsed}), conditional-format rules, merged
+                 # ranges and hidden columns (a collapsed group hides its columns)
+                 "groups": [], "cf": [], "merges": [], "hidden": set()}
         self.sheets[title] = sheet
         return sheet
 
@@ -163,7 +166,10 @@ class FakeSpreadsheet:
                         if "userEnteredValue" in value:
                             cell["userEnteredValue"] = dict(value["userEnteredValue"])
                         fmt = value.get("userEnteredFormat", {})
-                        cell["userEnteredFormat"] = copy.deepcopy(fmt)
+                        # A format is replaced only when the field mask names one (a partial
+                        # update, such as a guide row's text, leaves the owner's format alone).
+                        if "userEnteredFormat" in fields:
+                            cell["userEnteredFormat"] = copy.deepcopy(fmt)
                         link = fmt.get("textFormat", {}).get("link", {}).get("uri")
                         if link:
                             cell["hyperlink"] = link
@@ -186,11 +192,54 @@ class FakeSpreadsheet:
                         layout.setdefault((r, c), {}).update(copy.deepcopy(fmt))
             elif kind == "updateDimensionProperties":
                 rng = payload["range"]
-                sizes = by_id[rng["sheetId"]]["widths" if rng["dimension"] == "COLUMNS"
-                                              else "heights"]
+                sheet = by_id[rng["sheetId"]]
+                sizes = sheet["widths" if rng["dimension"] == "COLUMNS" else "heights"]
                 assert rng["dimension"] in {"COLUMNS", "ROWS"}
                 for c in range(rng["startIndex"], rng["endIndex"]):
-                    sizes[c] = payload["properties"]["pixelSize"]
+                    if "pixelSize" in payload["properties"]:
+                        sizes[c] = payload["properties"]["pixelSize"]
+                    if "hiddenByUser" in payload["properties"]:
+                        (sheet["hidden"].add if payload["properties"]["hiddenByUser"]
+                         else sheet["hidden"].discard)(c)
+            elif kind in {"addDimensionGroup", "deleteDimensionGroup"}:
+                rng = payload["range"]
+                sheet = by_id[rng["sheetId"]]
+                span = (rng["startIndex"], rng["endIndex"])
+                same = [g for g in sheet["groups"]
+                        if (g["range"]["startIndex"], g["range"]["endIndex"]) == span]
+                if kind == "addDimensionGroup":
+                    inside = [g for g in sheet["groups"]
+                              if g["range"]["startIndex"] <= span[0]
+                              and g["range"]["endIndex"] >= span[1]]
+                    sheet["groups"].append({"range": dict(rng), "depth": len(inside) + 1,
+                                            "collapsed": False})
+                else:
+                    if not same:
+                        raise AssertionError("no such column group to delete")
+                    sheet["groups"].remove(max(same, key=lambda g: g["depth"]))
+            elif kind == "updateDimensionGroup":
+                group = payload["dimensionGroup"]
+                sheet = by_id[group["range"]["sheetId"]]
+                span = (group["range"]["startIndex"], group["range"]["endIndex"])
+                found = next(g for g in sheet["groups"]
+                             if (g["range"]["startIndex"], g["range"]["endIndex"]) == span
+                             and g["depth"] == group["depth"])
+                found["collapsed"] = group["collapsed"]
+                for c in range(*span):
+                    (sheet["hidden"].add if group["collapsed"] else sheet["hidden"].discard)(c)
+            elif kind == "deleteConditionalFormatRule":
+                del by_id[payload["sheetId"]]["cf"][payload["index"]]
+            elif kind == "addConditionalFormatRule":
+                by_id[payload["rule"]["ranges"][0]["sheetId"]]["cf"].insert(
+                    payload["index"], copy.deepcopy(payload["rule"]))
+            elif kind in {"mergeCells", "unmergeCells"}:
+                rng = payload["range"]
+                merges = by_id[rng["sheetId"]]["merges"]
+                if kind == "mergeCells":
+                    merges.append(dict(rng))
+                else:
+                    merges[:] = [m for m in merges if "startRowIndex" in rng
+                                 and m["startRowIndex"] != rng["startRowIndex"]]
             else:
                 raise AssertionError(f"unexpected request {kind}")
         if self.after_batch:
@@ -232,10 +281,15 @@ class FakeSpreadsheet:
                                            "hideGridlines": sheet["gridlines_hidden"]},
                     },
                     **({"basicFilter": {"range": sheet["filter"]}} if sheet["filter"] else {}),
+                    "columnGroups": copy.deepcopy(sheet["groups"]),
+                    "conditionalFormats": copy.deepcopy(sheet["cf"]),
+                    "merges": copy.deepcopy(sheet["merges"]),
                     "data": [{
                         "rowData": rows,
-                        "columnMetadata": [{"pixelSize": sheet["widths"].get(c, 100)}
-                                           for c in range(columns)],
+                        "columnMetadata": [
+                            {"pixelSize": sheet["widths"].get(c, 100),
+                             **({"hiddenByUser": True} if c in sheet["hidden"] else {})}
+                            for c in range(columns)],
                         "rowMetadata": [{"pixelSize": sheet["heights"].get(r, 21)}
                                         for r in range(height)],
                     }],

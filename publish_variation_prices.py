@@ -16,6 +16,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent / "src"))
 
+from laptop_tracker.sheet_guide import GUIDE_TAB, plan_guide
 from laptop_tracker.sheet_publication import (
     RETIRED_TABS,
     DestinationError,
@@ -25,6 +26,7 @@ from laptop_tracker.sheet_publication import (
     write_plan_notes_csv,
 )
 from laptop_tracker.variation_publication import (
+    COMPARISON_TAB,
     CONTRACT_PATH,
     DATA_TABS,
     HISTORY_TAB,
@@ -33,8 +35,11 @@ from laptop_tracker.variation_publication import (
     REVIEW_TAB,
     RUN_LOG_TAB,
     apply_live_retention,
+    apply_navigation,
     build_variation_plan,
     check_destinations,
+    comparison_groups,
+    guide_entries_for,
     load_contract,
     load_variation_report,
     publish_variation,
@@ -56,11 +61,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             "PILOT_PRICE_OVERVIEW, PILOT_PRICE_ALTERNATIVES, PILOT_PRICE_HISTORY, "
             "PILOT_PRICE_REVIEW and PILOT_PRICE_RUN_LOG. --preview (the default stopping point) "
             "validates and inspects the destination read-only; --write-sheets saves a full local "
-            "snapshot of each tab, replaces its content, verifies every cell by readback; "
-            "--rollback restores the data tabs from such a snapshot. Never fetches retailer "
-            "pages, reruns matching, imports observations, reads raw, creates or writes any other "
-            "tab (retired tabs are never recreated), or accepts legacy configuration-grain "
-            "reports."
+            "snapshot of each tab, replaces its content, verifies every cell by readback and "
+            "refreshes the text of the owner's TRACKER_GUIDE rows it owns (label-keyed cell "
+            "updates, never a replacement); --rollback restores the data tabs and the guide from "
+            "such a snapshot. Never fetches retailer pages, reruns matching, imports "
+            "observations, reads raw, creates or writes any other tab (retired tabs are never "
+            "recreated), or accepts legacy configuration-grain reports."
         )
     )
     mode = parser.add_mutually_exclusive_group(required=True)
@@ -155,6 +161,7 @@ def main(
     local_report: dict = {
         "mode": mode.upper(),
         "publisher_version": PUBLISHER_VERSION,
+        "layout_version": contract.layout_version,
         "schema_version": contract.schema_version,
         "ranking_grain": contract.ranking_grain,
         "publication_id": plan.publication_id,
@@ -247,10 +254,12 @@ def main(
 
     problems, live = check_destinations(states, plan)
     # Earlier history/review records outside this publication's scope stay as they are.
-    plan = apply_live_retention(plan, states)
+    plan = apply_navigation(apply_live_retention(plan, states), states)
     for title in (HISTORY_TAB, REVIEW_TAB):
         write_plan_csv(run_dir / f"plan_{title}.csv", plan.tabs[title])
     local_report["retained_earlier_records"] = plan.retained
+    local_report["internal_links"] = plan.linked
+    local_report["column_groups"] = {COMPARISON_TAB: [label for label, _ in comparison_groups()]}
     local_report["planned_rows"] = {t: len(tab.rows) for t, tab in plan.tabs.items()} | {
         RUN_LOG_TAB: "previous publications + 1"
     }
@@ -263,8 +272,10 @@ def main(
     for title in PUBLISHER_TABS:
         state = states[title]
         before = f"exists, {state.used_rows} used rows" if state.exists else "MISSING"
+        planned = plan.tabs.get(title)
+        banner = f"{planned.header_row} banner rows + " if planned and planned.header_row else ""
         rows = (
-            f"1 header + {len(plan.tabs[title].rows)} rows"
+            f"{banner}1 header + {len(plan.tabs[title].rows)} rows"
             if title in plan.tabs
             else "1 header + earlier publications + this publication"
         )
@@ -279,6 +290,25 @@ def main(
         for problem in problems:
             print(f"Destination refused: {problem}.", file=sys.stderr)
         return finish(1)
+
+    # The TRACKER_GUIDE text that goes with this layout: planned from one read-only look.
+    guide_plan = plan_guide(spreadsheet, guide_entries_for(plan, published_at))
+    local_report["tracker_guide_plan"] = {
+        "updated": guide_plan.updated,
+        "appended": guide_plan.appended,
+        "unchanged": guide_plan.unchanged,
+        "skipped": guide_plan.skipped,
+    }
+    print(
+        f"  {GUIDE_TAB}: "
+        + (
+            f"skipped ({guide_plan.skipped})"
+            if guide_plan.skipped
+            else f"{len(guide_plan.updated)} row text(s) would change, "
+            f"{len(guide_plan.appended)} row(s) appended, {len(guide_plan.unchanged)} unchanged"
+        )
+        + "; only column B text and new rows, never a replacement."
+    )
 
     if not args.write_sheets:
         local_report.setdefault("status", "PREVIEW_ONLY")
@@ -304,6 +334,7 @@ def main(
         "tabs_written": outcome.tabs_written,
         "readback_issues": outcome.readback_issues,
         "error": outcome.error,
+        "tracker_guide": outcome.guide,
         "tab_links": {
             t: f"https://docs.google.com/spreadsheets/d/{spreadsheet_id}/edit#gid={gid}"
             for t, gid in outcome.tab_ids.items()
@@ -319,6 +350,7 @@ def main(
     )
     for title in DATA_TABS:
         print(f"  {title}: {len(plan.tabs[title].rows)} rows planned.")
+    print(f"  {GUIDE_TAB}: {outcome.guide or 'not reached'}.")
     if outcome.error:
         print(f"  Error: {outcome.error}", file=sys.stderr)
     for issue in outcome.readback_issues[:10]:
@@ -346,8 +378,8 @@ def run_rollback(args, started_at: datetime, spreadsheet_factory) -> int:
             spreadsheet,
             source,
             progress=lambda s: print(f"  ... {s}", flush=True),
-            tabs=DATA_TABS,
-            allowed=PUBLISHER_TABS,
+            tabs=(*DATA_TABS, GUIDE_TAB),
+            allowed=(*PUBLISHER_TABS, GUIDE_TAB),
         )
     except DestinationError as exc:
         report |= {"status": "DESTINATION_REFUSED", "error": str(exc)}

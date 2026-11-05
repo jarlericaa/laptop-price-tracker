@@ -156,6 +156,13 @@ from the same inputs and fails on any difference, then writes `grain_audit.json/
 `variation_run_summary.json`. Every row carries `comparison_row_id`, `source_key`, the three IDs,
 `row_grain` and `schema_version`.
 
+> **Update 2026-11-05.** The publisher is now `variation-sheets-2` with sheet layout
+> `variation-compact-1`: `PILOT_PRICE_COMPARISON` has a compact visible block and collapsed column
+> groups (the contract header is 140 columns; the 80-column header below is kept as an earlier layout),
+> the comparison and overview carry banner rows, and the publisher refreshes the owner's
+> `TRACKER_GUIDE` text. The report schema (`shopee-variation-sheets-1`), ranking and every number are
+> unchanged. See [SHEETS_DASHBOARD_2026-11-05.md](SHEETS_DASHBOARD_2026-11-05.md).
+
 ## Publisher (`publish_variation_prices.py`, `variation-sheets-1`)
 
 - **Header contract:** `config/shopee_variation_sheet_contract.json` (the owner-supplied exact

@@ -316,6 +316,7 @@ The latest live dry run took 57.49 seconds and did not write to any Google Sheet
 - [Close-alternative comparisons (2026-10-27)](docs/CLOSE_ALTERNATIVES_2026-10-27.md)
 - [Top 100 eligible mapped Shopee variations: selection rule, exclusions and commands (2026-11-03)](docs/MAPPED_TOP_100_2026-11-03.md)
 - [Shopee variation grain: contract, prices, contexts and publisher (2026-10-27)](docs/SHOPEE_VARIATION_GRAIN_2026-10-27.md)
+- [Compact Sheets dashboard: layout, result labels, column groups, TRACKER_GUIDE (2026-11-05)](docs/SHEETS_DASHBOARD_2026-11-05.md)
 - [Phase 10 pilot runbook](docs/PHASE_10_PILOT.md)
 
 ## Local verification

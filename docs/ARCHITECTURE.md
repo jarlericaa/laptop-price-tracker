@@ -237,6 +237,12 @@ The framework is called by one command, `collect_and_match.py`, for explicitly l
   primitives of `sheet_publication.py` (now parameterised by tab allowlist and layout). The retailer
   layer and `price_tracking.py` stay context (target) keyed. `pipeline.py` also writes the local
   sidecar `source_shop_names.csv`. Details: [SHOPEE_VARIATION_GRAIN_2026-10-27.md](SHOPEE_VARIATION_GRAIN_2026-10-27.md).
+- Compact dashboard (2026-11-05, presentation only): `result_labels.py` (pure: short, truthful result
+  labels, snapshot freshness and compact specs from structured report fields), `sheet_guide.py`
+  (label-keyed `TRACKER_GUIDE` refresh), and the layout, banner rows, column groups, navigation links and
+  `source_agreement_issues` check in `variation_publication.py`; `sheet_publication.py` gained preface
+  rows, column groups, conditional-format clearing and restore. Details:
+  [SHEETS_DASHBOARD_2026-11-05.md](SHEETS_DASHBOARD_2026-11-05.md).
 
 ## Close alternatives (2026-10-27)
 

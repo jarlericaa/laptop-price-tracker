@@ -548,3 +548,27 @@ Work folder: `data/output/shopee_summary_2026-10-20/`.
   `REC-datablitz-0001` (TGT-000001) from the 2026-10-25 benchmark evidence.
 - Not done (owner decisions): the four new P1 tab names in `sheets_writer.ALLOWED_OUTPUT_TABS`;
   a live retailer-restricted web search route; a URL for DataBlitz MacBook Air M5 16GB/1TB.
+
+## Compact Sheets dashboard (2026-11-05; offline, not published)
+
+- Implemented the owner's dashboard redesign in the normal publisher (`variation-sheets-2`, layout
+  `variation-compact-1`): compact 22-column comparison with collapsed groups (140 columns), banner
+  rows, short truthful result labels (`result_labels.py`), full explanations in result-cell notes and
+  detail groups, numeric linked prices, snapshot date and `STALE` cues, labelled overview prices,
+  internal navigation links, removal of the stale owner conditional formats on the two moved tabs,
+  and a label-keyed `TRACKER_GUIDE` refresh (`sheet_guide.py`). Details:
+  [SHEETS_DASHBOARD_2026-11-05.md](SHEETS_DASHBOARD_2026-11-05.md).
+- Tests: `tests/test_result_labels.py` (21) and `tests/test_dashboard_layout.py` (29) new; the in-memory
+  Sheets fake now models groups, rules, merges and hidden columns; `test_variation_publication.py` updated
+  for the banner rows. Full suite 2,455 passed, 0 failed.
+- Offline verification on the saved run `20261105T032441Z`: plans of the previous publisher (git `HEAD`)
+  and the new one compared; top, alternatives, history and review tabs identical cell for cell; all 8,000
+  earlier comparison cells and 2,600 overview cells agree; the comparison found two real defects in the
+  first version (minimum-retailer notes dropped), fixed with regression tests. Publisher preview against the
+  live workbook (read-only scope) passes: earlier layout recognised, 331 links, guide 11 rows changed and 3
+  appended. Request payload for the comparison tab about 2.4 MB.
+- Also: reads refused with HTTP 429 during the readback are retried (the false `PARTIAL_FAILURE` of the
+  2026-11-05 publication).
+- Not done: no write to the live workbook, no retailer request, no commit. Visual rendering in Sheets is
+  unverified; look at the first live publication. Publish with the existing
+  `publish_variation_prices.py --write-sheets` step.

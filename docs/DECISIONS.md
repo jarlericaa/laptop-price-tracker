@@ -739,3 +739,32 @@ identities.** Full specification: [CLOSE_ALTERNATIVES_2026-10-27.md](CLOSE_ALTER
   decision is a row in `config/duplicate_decisions.csv` (reviewer and date), and the previous file
   is kept in `data/backups/`. The rule does not relax freshness checks or any other Phase 1
   validation.
+
+## Compact Sheets dashboard (owner request, 2026-11-05)
+
+- **Decision.** The next normal publication writes a compact, readable layout. It is a presentation
+  and publishing change only; ranking, mappings, discovery, matching, alternative selection, price
+  eligibility, stock rules, minima and history are unchanged, and one row per Shopee variation (with
+  its own GMV, price and snapshot date) stays.
+- **Layout.** `PILOT_PRICE_COMPARISON`: a 22-column visible block (rank, laptop, seller, variation,
+  target specs, Shopee snapshot price and date, a Price / Result pair per retailer, the two in-stock
+  minima, row coverage) and every other field in collapsed, labelled column groups (140 columns in
+  all, nothing dropped); banner rows with the week, cutoff and legend once per sheet; no merged cells in
+  the table. `PILOT_PRICE_OVERVIEW` stays a 26-column price matrix with the same labels, fills and notes.
+- **Labels.** Short labels (`MATCH · Listed specs`, `ALT 2 · CPU, Storage · Limited`,
+  `RECHECK · Variant ambiguous`, `NO RELEVANT · Search limited`, ...) are derived from structured fields
+  by `result_labels.py`; full statuses and explanations stay in cell notes and detail columns.
+  `NO RESULTS` never means "not sold"; an incomplete or capped search says so; unknown fields are not
+  agreements; excluded or unresolved results never carry a price.
+- **Snapshot price.** Shopee is "Snapshot price", with its source date, the kind of date (sales extract
+  or monthly record) and `STALE` under the existing rule. Report rebuilds never refresh a date.
+- **Existing live layout (owner-built conditional formats).** The 21 rules on each of the comparison
+  and overview tabs are keyed to the old column positions, so they are removed from those two tabs and
+  replaced by cell fills verified on readback. Other tabs' rules are untouched; rollback restores them.
+- **TRACKER_GUIDE.** Refreshed by label-keyed column B text updates and three appended rows, never
+  replaced; the obsolete "awaiting the first variation-level publication" wording is replaced.
+- **Versions.** Publisher `variation-sheets-2`, layout `variation-compact-1`, report schema
+  `shopee-variation-sheets-1` unchanged. The 80-column header is kept in the contract as an earlier
+  layout. Details: [SHEETS_DASHBOARD_2026-11-05.md](SHEETS_DASHBOARD_2026-11-05.md).
+- **Not done.** No live Sheets write (the live workbook was only read, with the read-only scope), no
+  retailer request, no commit. How the page renders in Sheets has not been seen.

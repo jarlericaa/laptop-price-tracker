@@ -136,6 +136,22 @@ NUMBER_FORMATS = {
     "integer": {"type": "NUMBER", "pattern": "0"},
     "decimal": {"type": "NUMBER", "pattern": "0.0"},
 }
+PHP_LABEL_PREFIX = "php|"
+
+
+def labelled_php(label: str) -> str:
+    """The number-format key of a PHP price that displays a short text label after the amount
+    (``₱19,990.00 · MATCH``). The cell stays numeric; only its display carries the label, so
+    sorting, filtering and sums still see the price. Blank cells have no amount to label."""
+    cleaned = label.replace('"', "").replace("\n", " · ")
+    key = f"{PHP_LABEL_PREFIX}{cleaned}"
+    NUMBER_FORMATS.setdefault(
+        key, {"type": "CURRENCY", "pattern": f'"₱"#,##0.00" · {cleaned}"'})
+    return key
+
+
+def is_php(number_format: str) -> bool:
+    return number_format == "php" or number_format.startswith(PHP_LABEL_PREFIX)
 CELL_FIELDS = (
     "userEnteredValue,userEnteredFormat.numberFormat,"
     "userEnteredFormat.textFormat.link,userEnteredFormat.textFormat.bold"
@@ -144,7 +160,7 @@ CELL_FIELDS = (
 NOTE_CELL_FIELDS = CELL_FIELDS + ",userEnteredFormat.textFormat.italic,note"
 READ_FIELDS = (
     "sheets(properties(sheetId,title,gridProperties(rowCount,columnCount,frozenRowCount,"
-    "frozenColumnCount)),"
+    "frozenColumnCount)),columnGroups,conditionalFormats,"
     "data(startRow,startColumn,rowData(values(userEnteredValue,hyperlink,note,"
     "userEnteredFormat(numberFormat,backgroundColor,textFormat(link,bold,italic))))))"
 )
@@ -251,10 +267,19 @@ class TabPlan:
     rows: tuple[tuple[Cell, ...], ...]
     # Header-cell notes, aligned with ``header`` (empty: no notes).
     header_notes: tuple[str, ...] = ()
+    # Banner rows above the header (reporting week, legend), each as wide as the header. They
+    # are not part of the sortable table: the filter starts at the header row.
+    preface: tuple[tuple[Cell, ...], ...] = ()
+
+    @property
+    def header_row(self) -> int:
+        """Zero-based sheet row of the header (0 unless banner rows precede it)."""
+        return len(self.preface)
 
     def grid(self) -> list[list[Cell]]:
         notes = self.header_notes or ("",) * len(self.header)
-        return [[text(name, bold=True, note=note) for name, note in zip(self.header, notes,
+        return [*(list(r) for r in self.preface),
+                [text(name, bold=True, note=note) for name, note in zip(self.header, notes,
                                                                        strict=True)],
                 *(list(r) for r in self.rows)]
 
@@ -2460,8 +2485,10 @@ def write_plan_notes_csv(path: Path, plan: TabPlan) -> int:
         for r, row in enumerate(plan.grid()):
             for c, cell in enumerate(row):
                 if cell.note or cell.italic:
-                    writer.writerow([f"{_column_letter(c)}{r + 1}", plan.header[c],
-                                     row[0].value if r else "(header)", cell.value,
+                    label = ("(banner)" if r < plan.header_row else "(header)"
+                             if r == plan.header_row else row[0].value)
+                    writer.writerow([f"{_column_letter(c)}{r + 1}", plan.header[c], label,
+                                     cell.value,
                                      "TRUE" if cell.italic else "", cell.note])
                     count += 1
     return count
@@ -2499,16 +2526,19 @@ class TabState:
     row_count: int = 0
     column_count: int = 0
     grid: tuple[tuple[dict, ...], ...] = ()
+    # Column groups and conditional-format rules as the API returned them (empty when none).
+    column_groups: tuple[dict, ...] = ()
+    conditional_formats: tuple[dict, ...] = ()
 
     @property
     def used_rows(self) -> int:
         notes = self.title in NOTE_TABS
         return sum(1 for row in self.grid if any(_has_content(c, notes=notes) for c in row))
 
-    def header(self) -> list[str]:
-        if not self.grid:
+    def header(self, row: int = 0) -> list[str]:
+        if row >= len(self.grid):
             return []
-        return [_cell_text(cell) for cell in self.grid[0]]
+        return [_cell_text(cell) for cell in self.grid[row]]
 
 
 def _has_content(cell: Mapping, *, notes: bool = False) -> bool:
@@ -2547,6 +2577,8 @@ def read_tab(spreadsheet, title: str, allowed: Sequence[str] = PUBLISHER_TABS) -
         grid_props.get("rowCount", 0),
         grid_props.get("columnCount", 0),
         tuple(rows),
+        tuple(sheet.get("columnGroups", [])),
+        tuple(sheet.get("conditionalFormats", [])),
     )
 
 
@@ -2603,7 +2635,8 @@ def destination_problems(
 # (for information) conditional formats and merges. Taken before any write and used by rollback.
 SNAPSHOT_FIELDS = (
     "sheets(properties(sheetId,title,gridProperties),basicFilter,conditionalFormats,merges,"
-    "data(startRow,startColumn,rowMetadata(pixelSize),columnMetadata(pixelSize),"
+    "columnGroups,"
+    "data(startRow,startColumn,rowMetadata(pixelSize),columnMetadata(pixelSize,hiddenByUser),"
     "rowData(values(userEnteredValue,formattedValue,hyperlink,note,userEnteredFormat))))"
 )
 RESTORE_CELL_FIELDS = "userEnteredValue,userEnteredFormat,note"
@@ -2634,11 +2667,59 @@ def _dimension_requests(sheet_id: int, dimension: str, sizes: Sequence[Mapping])
         for index, size in enumerate(sizes) if size.get("pixelSize")]
 
 
-def restore_requests(snapshot: Mapping, sheet_id: int) -> list[dict]:
+def _group_range(sheet_id: int, group: Mapping) -> dict:
+    rng = group["range"]
+    return {"sheetId": sheet_id, "dimension": rng.get("dimension", "COLUMNS"),
+            "startIndex": rng["startIndex"], "endIndex": rng["endIndex"]}
+
+
+def clear_group_requests(sheet_id: int, groups: Sequence[Mapping]) -> list[dict]:
+    """Requests that remove every column group, deepest first, and show every column again
+    (a collapsed group hides its columns). Idempotent: a tab without groups needs only the
+    unhide."""
+    requests: list[dict] = [{"updateDimensionProperties": {
+        "range": {"sheetId": sheet_id, "dimension": "COLUMNS", "startIndex": 0,
+                  "endIndex": max([g["range"]["endIndex"] for g in groups], default=0) or 1},
+        "properties": {"hiddenByUser": False}, "fields": "hiddenByUser"}}] if groups else []
+    for group in sorted(groups, key=lambda g: -g.get("depth", 1)):
+        requests.append({"deleteDimensionGroup": {"range": _group_range(sheet_id, group)}})
+    return requests
+
+
+def add_group_requests(sheet_id: int, groups: Sequence[Mapping]) -> list[dict]:
+    """Requests that create column groups (``depth`` order) and set each one's collapsed state."""
+    requests: list[dict] = []
+    for group in sorted(groups, key=lambda g: g.get("depth", 1)):
+        rng = _group_range(sheet_id, group)
+        requests.append({"addDimensionGroup": {"range": rng}})
+        if group.get("collapsed"):
+            requests.append({"updateDimensionGroup": {
+                "dimensionGroup": {"range": rng, "depth": group.get("depth", 1),
+                                   "collapsed": True},
+                "fields": "collapsed"}})
+    return requests
+
+
+def clear_conditional_format_requests(sheet_id: int, count: int) -> list[dict]:
+    """Delete every conditional-format rule of a tab (highest index first, so indexes hold)."""
+    return [{"deleteConditionalFormatRule": {"sheetId": sheet_id, "index": index}}
+            for index in reversed(range(count))]
+
+
+def restore_requests(snapshot: Mapping, sheet_id: int,
+                     current: TabState | None = None) -> list[dict]:
     """Requests that put a tab back exactly as snapshotted: cells (including formulas, notes
-    and formats), frozen panes, gridlines, sizes and the basic filter."""
-    requests: list[dict] = [{"updateCells": {"range": {"sheetId": sheet_id},
-                                             "fields": RESTORE_CELL_FIELDS}}]
+    and formats), frozen panes, gridlines, sizes, hidden columns, column groups, conditional
+    formats and the basic filter. ``current`` is the tab as it is now: the groups and rules a
+    publication added are removed before the snapshotted ones are put back."""
+    requests: list[dict] = []
+    if current is not None:
+        requests += clear_group_requests(sheet_id, current.column_groups)
+        requests += clear_conditional_format_requests(sheet_id, len(current.conditional_formats))
+    requests.append({"updateCells": {"range": {"sheetId": sheet_id},
+                                     "fields": RESTORE_CELL_FIELDS}})
+    if current is not None or snapshot.get("merges"):
+        requests.append({"unmergeCells": {"range": {"sheetId": sheet_id}}})
     rows = snapshot_rows(snapshot)
     if rows:
         requests.append({"updateCells": {
@@ -2647,6 +2728,11 @@ def restore_requests(snapshot: Mapping, sheet_id: int) -> list[dict]:
                                   if k in {"userEnteredValue", "userEnteredFormat", "note"}}
                                  for cell in row]} for row in rows],
             "fields": RESTORE_CELL_FIELDS}})
+    # Merged ranges as snapshotted (the guide tab has them; data tabs have none), put back after
+    # the cells so no value is written into a merged range.
+    requests += [{"mergeCells": {"range": dict(merge, sheetId=sheet_id),
+                                 "mergeType": "MERGE_ALL"}}
+                 for merge in snapshot.get("merges", [])]
     grid = snapshot.get("properties", {}).get("gridProperties", {})
     restored = {"frozenRowCount": grid.get("frozenRowCount", 0),
                 "frozenColumnCount": grid.get("frozenColumnCount", 0),
@@ -2657,6 +2743,16 @@ def restore_requests(snapshot: Mapping, sheet_id: int) -> list[dict]:
     data = (snapshot.get("data") or [{}])[0]
     requests += _dimension_requests(sheet_id, "COLUMNS", data.get("columnMetadata", []))
     requests += _dimension_requests(sheet_id, "ROWS", data.get("rowMetadata", []))
+    requests += [{"updateDimensionProperties": {
+        "range": {"sheetId": sheet_id, "dimension": "COLUMNS", "startIndex": index,
+                  "endIndex": index + 1},
+        "properties": {"hiddenByUser": True}, "fields": "hiddenByUser"}}
+        for index, meta in enumerate(data.get("columnMetadata", [])) if meta.get("hiddenByUser")]
+    # Groups of the snapshot (a backup taken before 2026-11-05 has none); collapsing re-hides.
+    requests += add_group_requests(sheet_id, snapshot.get("columnGroups", []))
+    requests += [{"addConditionalFormatRule": {
+        "rule": {**rule, "ranges": [dict(r, sheetId=sheet_id) for r in rule.get("ranges", [])]},
+        "index": index}} for index, rule in enumerate(snapshot.get("conditionalFormats", []))]
     if snapshot.get("basicFilter"):
         requests.append({"setBasicFilter": {"filter": {
             "range": dict(snapshot["basicFilter"]["range"], sheetId=sheet_id)}}})
@@ -2757,7 +2853,7 @@ def rollback(
         snapshot = backup.get("snapshot") or {
             "properties": {"gridProperties": {"frozenRowCount": 1}},
             "data": [{"rowData": [{"values": row} for row in backup.get("rows", [])]}]}
-        requests = restore_requests(snapshot, state.sheet_id)
+        requests = restore_requests(snapshot, state.sheet_id, state)
         guard_requests(requests, {state.sheet_id})
         if progress is not None:
             progress(f"restoring {title}")
@@ -2775,20 +2871,31 @@ def rollback(
 
 
 def tab_requests(
-    state: TabState, plan_grid: Sequence[Sequence[Cell]], width: int, *, layout_fn=None
+    state: TabState, plan_grid: Sequence[Sequence[Cell]], width: int, *, layout_fn=None,
+    header_row: int = 0, notes: bool | None = None,
 ) -> list[dict]:
     """Requests that replace this tab's publisher content, keep other formatting, and add a
     frozen header and filter. Every request targets only this tab's sheet ID. ``layout_fn``
-    replaces ``tab_layout`` for another publisher schema."""
+    replaces ``tab_layout`` for another publisher schema. ``header_row`` is the zero-based grid
+    row of the header when banner rows precede it. ``notes`` says whether the publisher owns the
+    tab's cell notes (cleared and rewritten); by default the tab's membership in ``NOTE_TABS``."""
     sheet_id = state.sheet_id
     rows = len(plan_grid)
-    fields = NOTE_CELL_FIELDS if state.title in NOTE_TABS else CELL_FIELDS
+    owns_notes = state.title in NOTE_TABS if notes is None else notes
+    fields = NOTE_CELL_FIELDS if owns_notes else CELL_FIELDS
     layout = (layout_fn or tab_layout)(
-        state.title, [cell.value for cell in plan_grid[0]] if plan_grid else [])
-    grid_properties: dict = {"frozenRowCount": 1}
+        state.title, [cell.value for cell in plan_grid[header_row]] if plan_grid else [])
+    header_row = layout.header_row if layout is not None else 0
+    grid_properties: dict = {"frozenRowCount": header_row + 1}
     if layout is not None:
         grid_properties |= {"frozenColumnCount": layout.frozen_columns, "hideGridlines": True}
     requests: list[dict] = []
+    if layout is not None and layout.manage_columns:
+        # An earlier layout's groups and conditional-format rules are keyed to its own column
+        # positions. They are removed before anything is written and only this layout's groups
+        # are added afterwards, so a repeated publication leaves exactly one set.
+        requests += clear_group_requests(sheet_id, state.column_groups)
+        requests += clear_conditional_format_requests(sheet_id, len(state.conditional_formats))
     if rows > state.row_count or width > state.column_count:
         requests.append(
             {
@@ -2827,7 +2934,7 @@ def tab_requests(
                 "filter": {
                     "range": {
                         "sheetId": sheet_id,
-                        "startRowIndex": 0,
+                        "startRowIndex": header_row,
                         "endRowIndex": rows,
                         "startColumnIndex": 0,
                         "endColumnIndex": width,
@@ -2840,6 +2947,8 @@ def tab_requests(
         requests += layout_requests(sheet_id, rows, layout)
     # Status fills go last: the layout resets backgrounds and then bands every second row.
     requests += fill_requests(sheet_id, plan_grid)
+    if layout is not None and layout.manage_columns:
+        requests += add_group_requests(sheet_id, layout.planned_groups())
     return requests
 
 
@@ -2865,7 +2974,10 @@ HEADER_FILLS = {"navy": NAVY, "navy_alt": NAVY_ALT, "orange": ORANGE}
 # Comparison-status fills (pilot-sheets-7): light tints that keep the dark ink text readable and
 # stay apart from the house palette (navy and orange headers, Shopee and retailer tints).
 STATUS_FILLS = {"match": _rgb("#D5EFDB"), "alt1": _rgb("#FFF2A8"), "alt2": _rgb("#FFCF99"),
-                "recheck": _rgb("#DADDE3")}
+                "recheck": _rgb("#DADDE3"),
+                # Variation dashboard (2026-11-05): review/conflict is a distinct violet; results
+                # without a price are a quiet neutral; a stale Shopee snapshot is a soft amber.
+                "review": _rgb("#E4DAF4"), "missing": _rgb("#EEF1F5"), "stale": _rgb("#FFE3B8")}
 PADDING = {"top": 6, "right": 8, "bottom": 6, "left": 8}
 LAYOUT_FIELDS = ",".join(f"userEnteredFormat.{name}" for name in (
     "backgroundColor", "backgroundColorStyle", "horizontalAlignment", "verticalAlignment",
@@ -2891,6 +3003,21 @@ class TabLayout:
     frozen_columns: int
     header_height: int
     row_height: int
+    # Banner rows above the header (pixel heights); the header row follows them.
+    preface_heights: tuple[int, ...] = ()
+    # Collapsed column groups as ``(first, end)`` column indexes (end exclusive), depth 1.
+    groups: tuple[tuple[int, int], ...] = ()
+    # The publisher owns this tab's column positions: rules and groups left by an earlier layout
+    # would point at the wrong columns, so it removes them all and writes only its own.
+    manage_columns: bool = False
+
+    @property
+    def header_row(self) -> int:
+        return len(self.preface_heights)
+
+    def planned_groups(self) -> list[dict]:
+        return [{"range": {"dimension": "COLUMNS", "startIndex": first, "endIndex": end},
+                 "depth": 1, "collapsed": True} for first, end in self.groups]
 
 
 _NUMBER = {"align": "RIGHT", "mono": True}
@@ -3023,24 +3150,31 @@ def layout_requests(sheet_id: int | None, rows: int, layout: TabLayout) -> list[
                 runs.append((index, index + 1, value))
         return runs
 
+    top = layout.header_row  # banner rows come first, then the header, then the data
     requests = [style({"sheetId": sheet_id}, {})]
+    if top:
+        # Banner text overflows into the empty cells beside it; chips are filled by the plan.
+        requests.append(style(area(0, top, 0, width), _format(
+            background=WHITE, text_color=INK, wrap="OVERFLOW_CELL")))
     for left, right, header in groups(lambda c: c.header):
-        requests.append(style(area(0, 1, left, right), _format(
+        requests.append(style(area(top, top + 1, left, right), _format(
             background=HEADER_FILLS[header], border=True,
             text_color=NAVY if header == "orange" else WHITE)))
-    if rows > 1:
+    if rows > top + 1:
         for left, right, (fill, wrap, align, mono, muted) in groups(
                 lambda c: (c.fill, c.wrap, c.align, c.mono, c.muted)):
-            requests.append(style(area(1, rows, left, right), _format(
+            requests.append(style(area(top + 1, rows, left, right), _format(
                 background=FILLS.get(fill, WHITE), text_color=MUTED if muted else INK,
                 mono=mono, align=align, wrap=wrap)))
-        # Muted banding on every second data row, then the price tints over it again.
+        # Muted banding on every second data row, then the price tints over it again. The
+        # result fills (``fill_requests``) are written after everything here, so banding never
+        # overrides a meaningful colour.
         background = "userEnteredFormat.backgroundColor,userEnteredFormat.backgroundColorStyle"
         requests += [style(area(row, row + 1, 0, width), {
             "backgroundColor": BAND_BACKGROUND,
             "backgroundColorStyle": {"rgbColor": BAND_BACKGROUND}}, background)
-            for row in range(2, rows, 2)]
-        requests += [style(area(1, rows, left, right), {
+            for row in range(top + 2, rows, 2)]
+        requests += [style(area(top + 1, rows, left, right), {
             "backgroundColor": FILLS[fill], "backgroundColorStyle": {"rgbColor": FILLS[fill]}},
             background) for left, right, fill in groups(lambda c: c.fill) if fill]
     for left, right, pixels in groups(lambda c: c.width):
@@ -3048,11 +3182,13 @@ def layout_requests(sheet_id: int | None, rows: int, layout: TabLayout) -> list[
             "range": {"sheetId": sheet_id, "dimension": "COLUMNS", "startIndex": left,
                       "endIndex": right},
             "properties": {"pixelSize": pixels}, "fields": "pixelSize"}})
-    for top, bottom, pixels in ((0, 1, layout.header_height), (1, rows, layout.row_height)):
-        if bottom > top:
+    heights = [(index, index + 1, pixels) for index, pixels in enumerate(layout.preface_heights)]
+    heights += [(top, top + 1, layout.header_height), (top + 1, rows, layout.row_height)]
+    for first, end, pixels in heights:
+        if end > first:
             requests.append({"updateDimensionProperties": {
-                "range": {"sheetId": sheet_id, "dimension": "ROWS", "startIndex": top,
-                          "endIndex": bottom},
+                "range": {"sheetId": sheet_id, "dimension": "ROWS", "startIndex": first,
+                          "endIndex": end},
                 "properties": {"pixelSize": pixels}, "fields": "pixelSize"}})
     return requests
 
@@ -3078,7 +3214,10 @@ def guard_requests(requests: Sequence[Mapping], allowed_sheet_ids: set[int]) -> 
         if not ids or any(sheet_id not in allowed_sheet_ids for sheet_id in ids):
             raise DestinationError("A write request targets a sheet outside the publisher tabs.")
         if set(request) - {"updateCells", "updateSheetProperties", "setBasicFilter",
-                           "clearBasicFilter", "repeatCell", "updateDimensionProperties"}:
+                           "clearBasicFilter", "repeatCell", "updateDimensionProperties",
+                           "addDimensionGroup", "deleteDimensionGroup", "updateDimensionGroup",
+                           "addConditionalFormatRule", "deleteConditionalFormatRule",
+                           "mergeCells", "unmergeCells"}:
             raise DestinationError("A write request uses an unexpected operation.")
 
 
@@ -3116,10 +3255,13 @@ def fill_requests(sheet_id: int | None, plan_grid: Sequence[Sequence[Cell]]) -> 
     return requests
 
 
-def verify_tab(state: TabState, plan_grid: Sequence[Sequence[Cell]]) -> list[str]:
-    """Compare a read-back tab with the planned cells: values, links, PHP formats, extras."""
+def verify_tab(
+    state: TabState, plan_grid: Sequence[Sequence[Cell]], *, notes: bool | None = None
+) -> list[str]:
+    """Compare a read-back tab with the planned cells: values, links, PHP formats, extras.
+    ``notes`` overrides whether notes and italics are compared (default: ``NOTE_TABS``)."""
     issues: list[str] = []
-    notes = state.title in NOTE_TABS
+    notes = state.title in NOTE_TABS if notes is None else notes
     for r, planned_row in enumerate(plan_grid):
         actual_row = state.grid[r] if r < len(state.grid) else ()
         for c, planned in enumerate(planned_row):
@@ -3143,15 +3285,20 @@ def verify_tab(state: TabState, plan_grid: Sequence[Sequence[Cell]]) -> list[str
                 planned.value
             ):
                 issues.append(f"{where} number differs or is missing")
-            elif planned.number_format == "php" and (
-                actual.get("userEnteredFormat", {}).get("numberFormat", {}).get("type")
-                != "CURRENCY"
-            ):
-                issues.append(f"{where} lost its PHP format")
+            elif is_php(planned.number_format):
+                shown = actual.get("userEnteredFormat", {}).get("numberFormat", {})
+                if shown.get("type") != "CURRENCY":
+                    issues.append(f"{where} lost its PHP format")
+                elif planned.number_format != "php" and shown.get("pattern") != (
+                        NUMBER_FORMATS[planned.number_format]["pattern"]):
+                    issues.append(f"{where} price label format differs")
             link = actual.get("hyperlink") or actual.get("userEnteredFormat", {}).get(
                 "textFormat", {}
             ).get("link", {}).get("uri", "")
-            if (link or "") != planned.link:
+            # Sheets can answer an internal link (``#gid=..&range=..``) with its full address.
+            same = (link or "") == planned.link or (
+                planned.link.startswith("#gid=") and (link or "").endswith(planned.link))
+            if not same:
                 issues.append(f"{where} link differs")
         for c in range(len(planned_row), len(actual_row)):
             if _has_content(actual_row[c], notes=notes):
@@ -3173,8 +3320,21 @@ def verify_layout(
     grid = snapshot.get("properties", {}).get("gridProperties", {})
     issues = []
     if (grid.get("frozenRowCount", 0), grid.get("frozenColumnCount", 0)) != (
-            1, layout.frozen_columns):
+            layout.header_row + 1, layout.frozen_columns):
         issues.append(f"{plan.title} frozen rows/columns differ from the layout")
+    if layout.manage_columns:
+        found = sorted(
+            (g["range"]["startIndex"], g["range"]["endIndex"], g.get("depth", 1),
+             bool(g.get("collapsed")))
+            for g in snapshot.get("columnGroups", []))
+        planned = sorted((g["range"]["startIndex"], g["range"]["endIndex"], 1, True)
+                         for g in layout.planned_groups())
+        if found != planned:
+            issues.append(f"{plan.title} column groups differ from the layout "
+                          f"({len(found)} found, {len(planned)} planned)")
+        if snapshot.get("conditionalFormats"):
+            issues.append(f"{plan.title} still has {len(snapshot['conditionalFormats'])} "
+                          "conditional-format rule(s) from an earlier layout")
     widths = (snapshot.get("data") or [{}])[0].get("columnMetadata", [])
     for index, column in enumerate(layout.columns):
         if index < len(widths) and widths[index].get("pixelSize") not in (None, column.width):

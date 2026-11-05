@@ -484,3 +484,8 @@ reviewed retailer cells and both minima), `weekly_variation_selections.csv` (row
 `weekly_variation_history_associations.csv`, `variation_coverage.json`, `variation_run_summary.json`.
 Every row has `row_grain = SHOPEE_VARIATION` and `schema_version`; the earlier files keep the
 `TARGET_CONFIGURATION` grain. Full contract and publisher: `SHOPEE_VARIATION_GRAIN_2026-10-27.md`.
+
+The 2026-11-05 compact dashboard changes only how the Sheets publisher *displays* these files (a
+140-column comparison header with collapsed groups, short result labels derived at publication time).
+It adds no column or code to any report file; the machine statuses, tags and reasons are unchanged and
+are shown in full in cell notes and detail columns. See `SHEETS_DASHBOARD_2026-11-05.md`.

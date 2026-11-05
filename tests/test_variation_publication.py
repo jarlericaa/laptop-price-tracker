@@ -35,6 +35,7 @@ from laptop_tracker.variation_publication import (
     CONTRACT_PATH,
     DATA_TABS,
     HISTORY_TAB,
+    LAYOUT_VERSION,
     LEGACY_HISTORY_HEADER,
     LEGACY_REVIEW_HEADER,
     OVERVIEW_TAB,
@@ -43,6 +44,7 @@ from laptop_tracker.variation_publication import (
     RUN_LOG_TAB,
     TOP_TAB,
     build_variation_plan,
+    comparison_header,
     legacy_run_log_header,
     load_contract,
     load_variation_report,
@@ -207,10 +209,28 @@ def latest_report(world) -> dict:
     return json.loads((folder / "publication_report.json").read_text())
 
 
+# Banner rows (reporting week and cutoff, colour legend) precede the header of these two tabs.
+HEADER_ROW = {COMPARISON_TAB: 2, OVERVIEW_TAB: 2}
+
+
+def header_row(title: str) -> int:
+    return HEADER_ROW.get(title, 0)
+
+
+def header_of(fake, title: str) -> list[str]:
+    return fake.values(title)[header_row(title)]
+
+
+def data_cell(fake, title: str, n: int, name: str) -> dict:
+    """The ``n``-th data row's (1-based) cell in the column called ``name``."""
+    return fake.cell(title, header_row(title) + n, header_of(fake, title).index(name))
+
+
 def column(fake, title: str, name: str) -> list[str]:
     values = fake.values(title)
-    index = values[0].index(name)
-    return [row[index] if index < len(row) else "" for row in values[1:]]
+    top = header_row(title)
+    index = values[top].index(name)
+    return [row[index] if index < len(row) else "" for row in values[top + 1 :]]
 
 
 # Contract
@@ -229,7 +249,14 @@ def test_the_contract_headers_are_the_exact_owner_supplied_headers(world) -> Non
     )
     assert plan.tabs[REVIEW_TAB].header == (*LEGACY_REVIEW_HEADER, *CONTRACT.appended[REVIEW_TAB])
     assert plan.run_log_header[-10:] == CONTRACT.appended[RUN_LOG_TAB]
-    assert len(CONTRACT.headers[COMPARISON_TAB]) == 80
+    # The compact comparison (layout variation-compact-1): the publisher's one definition, the
+    # contract file and the plan agree, and the 80-column header of variation-sheets-1 is kept as
+    # an earlier layout so a live tab still carrying it is recognised as this publisher's own.
+    assert CONTRACT.headers[COMPARISON_TAB] == comparison_header()
+    assert CONTRACT.layout_version == LAYOUT_VERSION == "variation-compact-1"
+    (earlier,) = CONTRACT.earlier_headers[COMPARISON_TAB]
+    assert len(earlier) == 80
+    assert set(earlier) - set(comparison_header()) == {"Shopee price (PHP, snapshot)"}
     assert CONTRACT.headers[TOP_TAB][:3] == ("rank", "comparison_row_id", "source_key")
     assert json.loads(CONTRACT_PATH.read_text())["retired_tabs"] == list(RETIRED_TABS)
     assert not set(PUBLISHER_TABS) & set(RETIRED_TABS)
@@ -398,9 +425,7 @@ def test_published_rows_are_one_per_variation_with_exact_ids_numbers_and_grain(w
     ranking_gmv = column(fake, COMPARISON_TAB, "Ranking GMV (USD)")
     assert len(set(ranking_gmv)) >= 3
     # Prices are numeric cells (never text), tags and notes are separate.
-    header = fake.values(COMPARISON_TAB)[0]
-    price_column = header.index("Shopee price (PHP, snapshot)")
-    cell = fake.cell(COMPARISON_TAB, 1, price_column)
+    cell = data_cell(fake, COMPARISON_TAB, 1, "Shopee snapshot price (PHP)")
     assert "numberValue" in cell["userEnteredValue"]
     assert cell["userEnteredFormat"]["numberFormat"]["type"] == "CURRENCY"
     # The two unmapped eligible variations are not published: only verified mappings are listed.
@@ -419,30 +444,35 @@ def test_overview_cells_carry_notes_text_labels_and_status_fills(world) -> None:
     code, fake, _ = run(world)
     assert code == 0
 
-    header = fake.values(OVERVIEW_TAB)[0]
-    lf = header.index("Laptop Factory (PHP)")
+    top = header_row(OVERVIEW_TAB)
+    lf = header_of(fake, OVERVIEW_TAB).index("Laptop Factory (PHP)")
     priced = [
-        r
-        for r in range(1, 13)
-        if fake.cell(OVERVIEW_TAB, r, lf).get("userEnteredValue")
-        and "numberValue" in fake.cell(OVERVIEW_TAB, r, lf)["userEnteredValue"]
+        n
+        for n in range(1, 13)
+        if "numberValue" in (data_cell(fake, OVERVIEW_TAB, n, "Laptop Factory (PHP)").get(
+            "userEnteredValue") or {})
     ]
-    assert priced, "the synthetic report prices at least one DataBlitz cell"
-    r = priced[0]
-    note = fake.cell(OVERVIEW_TAB, r, lf)["note"]
-    assert "MATCH" in note and "Stock:" in note and "Offer:" in note and "association" in note
-    colour = fake.sheets[OVERVIEW_TAB]["layout"][(r, lf)]["backgroundColor"]
+    assert priced, "the synthetic report prices at least one Laptop Factory cell"
+    n = priced[0]
+    cell = data_cell(fake, OVERVIEW_TAB, n, "Laptop Factory (PHP)")
+    note = cell["note"]
+    assert "MATCH" in note and "Stock:" in note and "Selected offer:" in note
+    assert "association" in note
+    colour = fake.sheets[OVERVIEW_TAB]["layout"][(top + n, lf)]["backgroundColor"]
     assert all(abs(colour[k] - STATUS_FILLS["match"][k]) < 0.002 for k in ("red", "green", "blue"))
-    status = column(fake, COMPARISON_TAB, "Laptop Factory status")[r - 1]
-    assert status.startswith("MATCH — ")  # the colour has accompanying text
-    # House layout: frozen identifiers, widths, navy header rule, Roboto.
-    assert fake.sheets[OVERVIEW_TAB]["frozen"] == 1
+    # The colour has accompanying text: the price stays numeric and its display carries the
+    # label, and the comparison's result cell says the same.
+    assert cell["userEnteredFormat"]["numberFormat"]["pattern"].endswith('· MATCH"')
+    assert column(fake, COMPARISON_TAB, "Laptop Factory result")[n - 1].startswith("MATCH")
+    # House layout: banner rows then the frozen header, frozen identifiers, widths, Roboto.
+    assert fake.sheets[OVERVIEW_TAB]["frozen"] == 3
     assert fake.sheets[OVERVIEW_TAB]["frozen_columns"] == 4
-    assert fake.sheets[COMPARISON_TAB]["frozen_columns"] == 4
+    assert fake.sheets[COMPARISON_TAB]["frozen"] == 3
+    assert fake.sheets[COMPARISON_TAB]["frozen_columns"] == 3
     assert fake.sheets[TOP_TAB]["frozen_columns"] == 2
-    assert fake.sheets[COMPARISON_TAB]["filter"] is not None
+    assert fake.sheets[COMPARISON_TAB]["filter"]["startRowIndex"] == 2  # banner rows excluded
     assert fake.sheets[COMPARISON_TAB]["widths"]
-    header_format = fake.sheets[COMPARISON_TAB]["layout"][(0, 0)]
+    header_format = fake.sheets[COMPARISON_TAB]["layout"][(2, 0)]
     assert header_format["textFormat"]["fontFamily"] == "Roboto"
 
 
@@ -501,7 +531,7 @@ def test_run_log_records_schema_grain_and_the_new_metrics_and_keeps_earlier_rows
     assert new["Distinct configuration contexts"] == "10.0"
     assert new["Mapped selected variations"] == "12.0"
     assert new["Unmapped selected variations"] == "0.0"
-    assert new["Publisher version"] == "variation-sheets-1"
+    assert new["Publisher version"] == "variation-sheets-2"
     assert new["Publication status"] == "SUCCESS" and new["Readback"] == "PASSED"
 
 
@@ -521,11 +551,13 @@ def test_rollback_restores_the_data_tabs_exactly_as_before_a_publication(world) 
     code, fake, _ = run(world)
     assert code == 0
     # A later manual change, then a second publication that backs it up and overwrites it.
-    header = fake.values(COMPARISON_TAB)[0]
-    fake.sheets[COMPARISON_TAB]["grid"][(1, header.index("Brand"))] = {
+    header = header_of(fake, COMPARISON_TAB)
+    brand_row = header_row(COMPARISON_TAB) + 1
+    fake.sheets[COMPARISON_TAB]["grid"][(brand_row, header.index("Brand"))] = {
         "userEnteredValue": {"stringValue": "MANUAL EDIT"}
     }
     before = {t: fake.values(t) for t in DATA_TABS}
+    groups_before = fake.sheets[COMPARISON_TAB]["groups"]
     code, fake, _ = run(world, fake=fake, now=datetime(2026, 10, 12, 4, tzinfo=UTC))
     assert code == 0 and fake.values(COMPARISON_TAB) != before[COMPARISON_TAB]
     folder = [p for p in sorted(world["out"].iterdir()) if p.name.endswith("_write")][-1]
@@ -539,9 +571,13 @@ def test_rollback_restores_the_data_tabs_exactly_as_before_a_publication(world) 
     for title in DATA_TABS:
         assert fake.values(title) == before[title]
     assert (
-        fake.cell(COMPARISON_TAB, 1, header.index("Brand"))["userEnteredValue"]["stringValue"]
+        fake.cell(COMPARISON_TAB, brand_row, header.index("Brand"))["userEnteredValue"][
+            "stringValue"
+        ]
         == "MANUAL EDIT"
     )
+    # Groups and conditional formats are restored as snapshotted, never doubled.
+    assert fake.sheets[COMPARISON_TAB]["groups"] == groups_before
 
 
 def test_a_partial_failure_is_logged_and_the_rerun_repairs_it(world) -> None:

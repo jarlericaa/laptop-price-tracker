@@ -5,7 +5,16 @@ saved, reviewed report files only (never fetches, rematches, imports or opens th
 store) and writes exactly the six data tabs and the run log named in
 ``config/shopee_variation_sheet_contract.json`` -- the exact headers the owner prepared in the live
 workbook. The contract, not the legacy publisher's column positions, defines every header; the live
-headers are read before anything is planned for a write and must equal the contract.
+headers are read before anything is planned for a write and must equal the contract (or be a
+layout of this publisher's own that the contract lists under ``earlier_headers``).
+
+Layout ``variation-compact-1`` (2026-11-05) is presentation only. PILOT_PRICE_COMPARISON shows a
+short visible block (rank, laptop, seller, variation, target specs, Shopee snapshot price and date,
+a Price / Result pair per retailer, the two in-stock minima, a row coverage summary) and keeps every
+other field in collapsed column groups; labels come from ``result_labels``, full explanations stay
+in cell notes and the detail groups, and ``source_agreement_issues`` checks every published number
+against the saved reports. The one other tab it may touch is TRACKER_GUIDE, by label-keyed text
+updates only (``sheet_guide``).
 
 Hard rules:
 
@@ -26,7 +35,8 @@ from __future__ import annotations
 import csv
 import hashlib
 import json
-from collections import defaultdict
+import time
+from collections import Counter, defaultdict
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import UTC, date, datetime, timedelta
@@ -38,6 +48,21 @@ from .price_tracking import (
     COMPARABLE,
     SELECTED,
 )
+from .result_labels import (
+    TAG_MEANING,
+    RetailerResult,
+    compact_specs,
+    coverage_summary,
+    retailer_result,
+    shopee_freshness,
+)
+from .sheet_guide import (
+    GUIDE_TAB,
+    guide_entries,
+    plan_guide,
+    verify_guide,
+    write_guide,
+)
 from .sheet_publication import (
     BASIS_TEXT,
     BASIS_WORDS,
@@ -45,7 +70,6 @@ from .sheet_publication import (
     NUMBER_FORMATS,
     RETAILER_NAMES,
     RETIRED_TABS,
-    STATUS_LEGEND,
     UNPRICED_STATUS_TEXT,
     Cell,
     ColumnStyle,
@@ -68,10 +92,12 @@ from .sheet_publication import (
     grid_sha256,
     guard_requests,
     history_plan,
+    labelled_php,
     load_pilot_report,
     number,
     read_tab,
     review_plan,
+    snapshot_rows,
     snapshot_tab,
     tab_requests,
     tag_fill,
@@ -104,7 +130,11 @@ from .verified_top import VerifiedRankingInputError, read_csv_rows
 CONTRACT_PATH = (
     Path(__file__).resolve().parents[2] / "config" / "shopee_variation_sheet_contract.json"
 )
-PUBLISHER_VERSION = "variation-sheets-1"
+PUBLISHER_VERSION = "variation-sheets-2"
+# The sheet layout (columns, groups, result labels, banners), versioned apart from the report
+# schema: the compact dashboard of 2026-11-05 changes presentation only, so the report files and
+# ``SCHEMA_VERSION`` (shopee-variation-sheets-1) are unchanged.
+LAYOUT_VERSION = "variation-compact-1"
 
 TOP_TAB = "TOP_100_SHOPEE_VARIATIONS"
 COMPARISON_TAB = "PILOT_PRICE_COMPARISON"
@@ -123,6 +153,10 @@ DATA_TABS: tuple[str, ...] = (
     REVIEW_TAB,
 )
 PUBLISHER_TABS: tuple[str, ...] = (*DATA_TABS, RUN_LOG_TAB)
+# Tabs whose cell notes the publisher owns: cleared and rewritten every publication, so a note of
+# an earlier run cannot stay attached to a new result. History, review and the run log keep any
+# notes people add.
+VARIATION_NOTE_TABS: tuple[str, ...] = (TOP_TAB, COMPARISON_TAB, OVERVIEW_TAB, ALTERNATIVES_TAB)
 assert not set(PUBLISHER_TABS) & set(RETIRED_TABS)
 
 RETAILER_ORDER = ("DBZ", "LF", "PCX", "PCC", "OCT")
@@ -141,12 +175,18 @@ class Contract:
     headers: Mapping[str, tuple[str, ...]]  # tab -> header the new/reset tabs carry
     appended: Mapping[str, tuple[str, ...]]  # tab -> columns appended to the existing header
     retired: tuple[str, ...]
+    layout_version: str = ""
+    # tab -> headers an earlier layout of this publisher wrote (the live tab may still carry one;
+    # it is this publisher's own content and is replaced by the current layout)
+    earlier_headers: Mapping[str, tuple[tuple[str, ...], ...]] = field(default_factory=dict)
 
 
 def load_contract(path: Path = CONTRACT_PATH) -> Contract:
     data = json.loads(path.read_text(encoding="utf-8"))
     if data["schema_version"] != SCHEMA_VERSION or data["ranking_grain"] != ROW_GRAIN:
         raise PublicationInputError(["the sheet contract is not shopee-variation-sheets-1"])
+    if data.get("layout_version") != LAYOUT_VERSION:
+        raise PublicationInputError([f"the sheet contract is not layout {LAYOUT_VERSION}"])
     retired = tuple(data["retired_tabs"])
     if set(retired) != set(RETIRED_TABS):
         raise PublicationInputError(["the contract's retired tabs differ from the publisher's"])
@@ -156,7 +196,144 @@ def load_contract(path: Path = CONTRACT_PATH) -> Contract:
         {tab: tuple(header) for tab, header in data["new_or_reset_headers"].items()},
         {tab: tuple(header) for tab, header in data["append_to_existing_headers"].items()},
         retired,
+        data["layout_version"],
+        {
+            tab: tuple(tuple(header) for header in headers)
+            for tab, headers in data.get("earlier_headers", {}).items()
+        },
     )
+
+
+# The compact comparison header (layout variation-compact-1): a short visible block, then
+# collapsed column groups that keep every earlier column and add the explicit detail fields.
+# ``COMPARISON_HEADER`` is the one definition; the contract JSON repeats it and a test keeps the
+# two equal.
+
+COMPARISON_VISIBLE_HEAD: tuple[str, ...] = (
+    "Rank",
+    "Laptop",
+    "Shopee seller",
+    "Shopee variation",
+    "Target specs",
+    "Shopee snapshot price (PHP)",
+    "Shopee snapshot date",
+)
+COMPARISON_VISIBLE_TAIL: tuple[str, ...] = (
+    "Lowest in-stock matching retailer price (PHP)",
+    "Lowest in-stock matching retailer(s)",
+    "Lowest in-stock alternative retailer price (PHP)",
+    "Lowest in-stock alternative retailer(s)",
+    "Row coverage",
+)
+COMPARISON_SPEC_GROUP: tuple[str, ...] = (
+    "Shopee item",
+    "Brand",
+    "Series",
+    "Model",
+    "Screen (in)",
+    "CPU family",
+    "CPU model",
+    "RAM (GB)",
+    "Storage (GB)",
+    "GPU",
+)
+COMPARISON_SHOPEE_GROUP: tuple[str, ...] = (
+    "Shopee listing link",
+    "Shopee price status",
+    "Shopee price observed (Asia/Singapore)",
+    "Shopee price date basis",
+)
+COMPARISON_MINIMA_GROUP: tuple[str, ...] = (
+    "Lowest matching retailer price (PHP)",
+    "Lowest matching retailer(s)",
+    "Lowest matching retailer price basis",
+    "Lowest in-stock matching retailer price basis",
+    "Lowest alternative retailer price (PHP)",
+    "Lowest alternative retailer(s)",
+    "Lowest alternative retailer price basis",
+    "Lowest in-stock alternative retailer price basis",
+    "Matching retailers",
+    "Alternative retailers",
+    "Comparison basis",
+)
+COMPARISON_METADATA_GROUP: tuple[str, ...] = (
+    "Comparison row ID",
+    "Source key",
+    "Shop ID",
+    "Item ID",
+    "Source model ID",
+    "Target ID",
+    "Mapping status",
+    "Row comparison status",
+    "M-1 GMV (USD)",
+    "MTD GMV (USD)",
+    "Ranking GMV (USD)",
+    "Shopee sales snapshot (extract date)",
+    "Sales run ID",
+    "Ranking metric scope",
+    "Reporting week (Asia/Singapore)",
+    "Week status",
+    "Report cutoff (Asia/Singapore)",
+    "Row grain",
+)
+# Per retailer: the detail columns, in order. Five (status, observed, product link, recheck link,
+# recheck note) are earlier columns kept under their earlier names; the others are the explicit
+# detail fields the dashboard adds, so no earlier information is dropped.
+RETAILER_DETAIL_SUFFIXES: tuple[str, ...] = (
+    "status",
+    "machine status",
+    "differences (target → retailer)",
+    "unknown fields and limits",
+    "warnings",
+    "stock",
+    "observed (Asia/Singapore)",
+    "product link",
+    "recheck link (unconfirmed)",
+    "recheck note",
+    "search / fetch outcome",
+    "offer details",
+    "observation ID",
+    "association ID",
+    "alternatives / review link",
+)
+
+
+def retailer_visible(name: str) -> tuple[str, str]:
+    return f"{name} price (PHP)", f"{name} result"
+
+
+def retailer_details(name: str) -> tuple[str, ...]:
+    return tuple(f"{name} {suffix}" for suffix in RETAILER_DETAIL_SUFFIXES)
+
+
+def comparison_groups() -> list[tuple[str, tuple[str, ...]]]:
+    """``(label, columns)`` of each collapsed group, in header order."""
+    groups: list[tuple[str, tuple[str, ...]]] = [
+        ("Expanded specifications", COMPARISON_SPEC_GROUP),
+        ("Shopee details", COMPARISON_SHOPEE_GROUP),
+    ]
+    groups += [
+        (f"{RETAILER_NAMES[code]} details", retailer_details(RETAILER_NAMES[code]))
+        for code in RETAILER_ORDER
+    ]
+    groups += [
+        ("Other price minima and bases", COMPARISON_MINIMA_GROUP),
+        ("IDs, GMV and run metadata", COMPARISON_METADATA_GROUP),
+    ]
+    return groups
+
+
+def comparison_header() -> tuple[str, ...]:
+    visible = [
+        *COMPARISON_VISIBLE_HEAD,
+        *(n for code in RETAILER_ORDER for n in retailer_visible(RETAILER_NAMES[code])),
+        *COMPARISON_VISIBLE_TAIL,
+    ]
+    return (*visible, *(name for _, columns in comparison_groups() for name in columns))
+
+
+def comparison_visible_width() -> int:
+    return len(COMPARISON_VISIBLE_HEAD) + 2 * len(RETAILER_ORDER) + len(COMPARISON_VISIBLE_TAIL)
 
 
 # Legacy headers of the tabs whose earlier columns are kept (the pilot-sheets-7 layouts).
@@ -634,7 +811,389 @@ def top_plan(report: VariationPublicationReport, header: Sequence[str]) -> TabPl
     return TabPlan(TOP_TAB, tuple(header), tuple(rows), tuple(notes.get(n, "") for n in header))
 
 
+# Compact dashboard (layout variation-compact-1, 2026-11-05)
+#
+# Presentation only: every price, rank, tag, stock status, minimum and identifier below is read
+# from the saved reports; nothing is recomputed, reselected or reclassified. The short result
+# label comes from ``result_labels.retailer_result``; the full explanation stays in the result
+# cell's note and in the collapsed detail columns.
+
+
+def _alternative_index(
+    report: VariationPublicationReport,
+) -> dict[tuple[str, str, str], Mapping[str, str]]:
+    return {
+        (a["comparison_row_id"], a["retailer_code"], a["observation_id"]): a
+        for a in report.alternatives
+    }
+
+
+def _row_results(
+    report: VariationPublicationReport,
+    row: Mapping[str, str],
+    alternatives: Mapping[tuple[str, str, str], Mapping[str, str]],
+) -> dict[str, tuple[RetailerResult, Mapping[str, str], Mapping[str, str] | None]]:
+    """``code -> (result, selection record, displayed alternative record or None)``."""
+    found = {}
+    for code in RETAILER_ORDER:
+        selection = report.selections[(row["comparison_row_id"], code)]
+        observation = selection.get("observation_id") or row.get(
+            f"{code}_Alternative_Observation_ID", ""
+        )
+        alt = (
+            alternatives.get((row["comparison_row_id"], code, observation))
+            if cell_tag(row, code).startswith("ALT")
+            else None
+        )
+        found[code] = (retailer_result(row, code, selection, alt), selection, alt)
+    return found
+
+
+def _local_short(moment: datetime) -> str:
+    return _local(moment)[:16].replace("T", " ")
+
+
+def banner_rows(report: VariationPublicationReport, width: int) -> tuple[tuple[Cell, ...], ...]:
+    """The reporting week, cutoff and a colour legend, once per sheet, above the header."""
+    status = report.summary["report_week"]["status"]
+    extract = report.summary["sales_snapshot"].get("extract_date", "")
+    first = [BLANK] * width
+    first[1] = text(
+        f"Week {week_text(report)} (Asia/Singapore, {status}) · report cutoff "
+        f"{_local_short(report.as_of)} · Shopee prices are snapshots from the sales extract of "
+        f"{extract}, never live prices",
+        bold=True,
+    )
+    second = [BLANK] * width
+    second[1] = text("Legend", bold=True)
+    for offset, (label, fill) in enumerate(
+        (
+            ("MATCH", "match"),
+            ("ALT 1", "alt1"),
+            ("ALT 2", "alt2"),
+            ("REVIEW", "review"),
+            ("NO PRICE", "missing"),
+        )
+    ):
+        second[2 + offset] = text(label, fill=fill)
+    second[7] = text(
+        "ALT = close alternative, not a matching configuration · REVIEW = RECHECK, EXCLUDED, "
+        "NOT COMPARED · NO PRICE is not 'not sold' · Out of stock, Limited, Listed specs, "
+        "Search limited and STALE qualify a result"
+    )
+    return (tuple(first), tuple(second))
+
+
+def _identity_note(row: Mapping[str, str]) -> str:
+    return (
+        f"{row['comparison_row_id']} — source key {row['source_key']}; target "
+        f"{row['target_id'] or 'none'}; mapping {row['mapping_status']}; "
+        f"{row['row_comparison_status']}: {row['row_comparison_detail']}\n"
+        f"Retailer results are this row's context cells (several variation rows can share one "
+        f"context and its observations); the Shopee price is this variation's own snapshot, "
+        f"never a current price. Full detail: collapsed column groups of {COMPARISON_TAB}."
+    )
+
+
+def shopee_date_note(row: Mapping[str, str]) -> str:
+    when = row["shopee_price_observed_at"]
+    if not row["shopee_price_php"] or not when:
+        return ""
+    if row["shopee_price_date_basis"] == "M_MINUS_1_RECORD_DATE":
+        lines = [
+            f"Monthly source-record date {when}: the date of this variation's M-1 record in the "
+            "sales extract, not an exact price observation time."
+        ]
+    else:
+        lines = [
+            f"Sales-extract date {when}: the day the extract was taken; no per-price "
+            "observation time exists."
+        ]
+    if row["shopee_price_status"] == "SNAPSHOT_PRICE_STALE":
+        lines.append("STALE: older than 7 days at the report cutoff.")
+    lines.append("The date is the source's; rebuilding the report does not refresh it.")
+    return "\n".join(lines)
+
+
+def result_note(
+    report: VariationPublicationReport,
+    row: Mapping[str, str],
+    code: str,
+    result: RetailerResult,
+    selection: Mapping[str, str],
+    alt: Mapping[str, str] | None,
+) -> str:
+    """The full explanation behind one result label (the cell note on the result cell)."""
+    name = RETAILER_NAMES[code]
+    if not row["context_id"]:
+        return (
+            f"{name}: {result.one_line}\n"
+            f"{retailer_status_text(row, code, selection)}\nNo retailer price: the row has no "
+            f"trusted comparison context. Row {row['comparison_row_id']}."
+        )
+    lines = [f"{name}: {result.one_line}", TAG_MEANING.get(result.tag, "")]
+    if result.priced and result.kind == "MATCH":
+        if row[f"{code}_Match_Basis"] == "LISTED_SPEC":
+            lines.append(
+                "Matching basis: listed specs — brand, family, screen, CPU series, installed RAM "
+                "and storage agree; the specific Shopee model is unknown."
+            )
+        else:
+            detail = ", ".join(
+                BASIS_TEXT[t] for t in row[f"{code}_Match_Basis"].split("+") if t in BASIS_TEXT
+            )
+            lines.append("Matching basis: exact product" + (f" ({detail})" if detail else "") + ".")
+        lines.append(f"Configuration: mapped target {row['target_id']}, {laptop_name(row)}.")
+    lines.append(f"Full status: {retailer_status_text(row, code, selection)}")
+    if result.kind == "ALT":
+        lines.append(
+            "Actual configuration: "
+            + (
+                _alternative_configuration(alt)
+                if alt
+                else row.get(f"{code}_Offer_Details", "") or "see the link"
+            )
+        )
+        lines.append(
+            f"Differences (target → retailer): {row.get(f'{code}_Alternative_Differences', '')}"
+        )
+        if row.get(f"{code}_Alternative_Unknowns"):
+            lines.append(f"Unknown fields and limits: {row[f'{code}_Alternative_Unknowns']}")
+        if alt and alt["comparison_basis"]:
+            lines.append(f"Limited comparison basis: {alt['comparison_basis']}.")
+        if alt and alt["warnings"]:
+            lines.append("Notes: " + _reason_text(_codes(alt["warnings"])))
+    elif result.priced:
+        warnings = [
+            w
+            for w in _codes(row.get(f"{code}_Warnings", ""))
+            if w != "SPECIFIC_IDENTITY_UNRESOLVED"
+        ]
+        if warnings:
+            lines.append("Notes: " + _reason_text(warnings) + ".")
+    elif result.reasons:
+        lines.append("Why: " + "; ".join(r for r in result.reasons if r))
+    stock = row.get(f"{code}_Stock", "")
+    if stock:
+        lines.append(f"Stock: {_stock_text(stock)}.")
+    if row.get(f"{code}_Observed_At"):
+        lines.append(f"Observed: {row[f'{code}_Observed_At']} (Asia/Singapore).")
+    url = row.get(f"{code}_Offer_URL", "")
+    candidate = row.get(f"{code}_Candidate_URL", "")
+    if result.priced and url:
+        lines.append(f"Selected offer: {url}")
+    elif candidate:
+        lines.append(f"Candidate (unconfirmed, not a price): {candidate}")
+        note = row.get(f"{code}_Recheck_Note") or row.get(f"{code}_Candidate_Detail", "")
+        if note:
+            lines.append(f"Candidate detail: {note}")
+    if row.get(f"{code}_Reason") and not result.priced:
+        lines.append(f"Search / fetch outcome: {row[f'{code}_Reason']}")
+    if row.get(f"{code}_Warnings") and not result.priced:
+        lines.append("Warnings: " + _reason_text(_codes(row[f"{code}_Warnings"])))
+    lines.append(
+        f"Evidence: observation {_observation_id(selection)}; association "
+        f"{selection.get('association_id', '')}; retailer context {row['context_id']}."
+    )
+    lines.append(
+        f"More: collapsed '{name} details' columns in {COMPARISON_TAB}; offers in "
+        f"{ALTERNATIVES_TAB}; unconfirmed candidates in {REVIEW_TAB} (row "
+        f"{row['comparison_row_id']})."
+    )
+    return "\n".join(line for line in lines if line)
+
+
+def _observation_id(selection: Mapping[str, str]) -> str:
+    return (
+        selection.get("observation_id")
+        or selection.get("alternative_observation_id")
+        or selection.get("candidate_observation_id", "")
+    )
+
+
+_PACKAGE_LABELS = {"BUNDLE_OFFER": "bundle offer", "INCLUDED_ITEMS_OFFER": "includes stated items"}
+
+
+def _minimum_text(row: Mapping[str, str], retailers: str, notes: str, basis_key: str) -> str:
+    """Retailers of a matching minimum (with a bundle or included-items note, as before); a
+    listed-spec winner says so. The matching minima's report columns are not named alike
+    (``Lowest_In_Stock_Price_Retailers`` but ``Lowest_In_Stock_Notes``), so each is passed."""
+    text_value = _minimum_retailers(row[retailers], row.get(notes, ""))
+    basis = row.get(basis_key, "")
+    if text_value and basis == "LISTED_SPEC":
+        text_value += " · Listed specs"
+    elif text_value and basis == "MIXED":
+        text_value += " · Listed specs (some)"
+    return text_value
+
+
+def _alternative_minimum_text(
+    row: Mapping[str, str],
+    prefix: str,
+    alternatives: Mapping[tuple[str, str, str], Mapping[str, str]],
+) -> str:
+    """``DataBlitz: ALT 1 · CPU · Limited (includes stated items)``: the retailer as the report
+    names it (with its bundle or included-items note), the tag and a limited comparison basis."""
+    if not row.get(prefix):
+        return ""
+    tags = _named(row.get(f"{prefix}_Tag", ""))
+    if not tags:
+        return _minimum_retailers(
+            row.get(f"{prefix}_Retailers", ""), row.get(f"{prefix}_Notes", "")
+        )
+    observations = dict(
+        part.split(":", 1)
+        for part in row.get(f"{prefix}_Observation_IDs", "").split(";")
+        if ":" in part
+    )
+    packages = {
+        note.split(":", 1)[0]: _PACKAGE_LABELS[note.split(":", 1)[1]]
+        for note in row.get(f"{prefix}_Notes", "").split(";")
+        if ":" in note and note.split(":", 1)[1] in _PACKAGE_LABELS
+    }
+    names = {name: code for code, name in RETAILER_NAMES.items()}
+    segments = []
+    for segment in tags.split("; "):
+        code = names.get(segment.split(":", 1)[0], "")
+        found = alternatives.get((row["comparison_row_id"], code, observations.get(code, "")))
+        segments.append(
+            segment
+            + (" · Limited" if found and found["comparison_basis"] else "")
+            + (f" ({packages[code]})" if code in packages else "")
+        )
+    return "; ".join(segments)
+
+
+def _minimum_price_cell(row: Mapping[str, str], prefix: str, note: str) -> Cell:
+    cell = number(row[prefix], "php", note=note)
+    url = row.get(f"{prefix}_Offer_URL", "")
+    if cell.kind == "number" and url and ";" not in url:
+        cell = replace(cell, link=url)
+    return cell
+
+
+def _detail_cells(
+    report: VariationPublicationReport,
+    row: Mapping[str, str],
+    code: str,
+    result: RetailerResult,
+    selection: Mapping[str, str],
+    alt: Mapping[str, str] | None,
+    alt_counts: Mapping[tuple[str, str], int],
+) -> dict[str, Cell]:
+    """The retailer's explicit detail fields (the collapsed group), none shortened."""
+    name = RETAILER_NAMES[code]
+    url = row[f"{code}_Offer_URL"]
+    tag = cell_tag(row, code) if row["context_id"] else ""
+    link, note = _recheck_cells(row, code)
+    status_code = row.get(f"{code}_Price_Status", "")
+    machine = "; ".join(
+        filter(
+            None,
+            (
+                f"price status {status_code}" if status_code else "",
+                f"tag {tag}" if tag else "",
+                f"match basis {row[f'{code}_Match_Basis']}" if row[f"{code}_Match_Basis"] else "",
+                f"candidate status {row[f'{code}_Candidate_Status']}"
+                if row[f"{code}_Candidate_Status"]
+                else "",
+                f"selection {selection.get('selection_reason')}"
+                if selection.get("selection_reason")
+                else "",
+            ),
+        )
+    )
+    unknown = row.get(f"{code}_Alternative_Unknowns", "")
+    if row.get(f"{code}_Match_Basis") == "LISTED_SPEC":
+        unknown = "; ".join(
+            filter(None, (unknown, "listed-spec match: the specific Shopee model is unknown"))
+        )
+    count = alt_counts.get((row["comparison_row_id"], code), 0)
+    reviews = int(row.get(f"{code}_Recheck_Count") or 0) if row.get(f"{code}_Candidate_URL") else 0
+    destination = f"Alternatives ({count})" if count else f"Review ({reviews})" if reviews else ""
+    return {
+        f"{name} status": text(retailer_status_text(row, code, selection)),
+        f"{name} machine status": text(machine),
+        f"{name} differences (target → retailer)": text(
+            row.get(f"{code}_Alternative_Differences", "")
+        ),
+        f"{name} unknown fields and limits": text(unknown),
+        f"{name} warnings": text(_reason_text(_codes(row.get(f"{code}_Warnings", "")))),
+        f"{name} stock": text(_stock_text(row.get(f"{code}_Stock", ""))),
+        f"{name} observed (Asia/Singapore)": text(row[f"{code}_Observed_At"]),
+        f"{name} product link": text(url, link=url),
+        f"{name} recheck link (unconfirmed)": link,
+        f"{name} recheck note": note,
+        f"{name} search / fetch outcome": text(row.get(f"{code}_Reason", "")),
+        f"{name} offer details": text(row.get(f"{code}_Offer_Details", "")),
+        f"{name} observation ID": text(_observation_id(selection)),
+        f"{name} association ID": text(selection.get("association_id", "")),
+        f"{name} alternatives / review link": text(destination),
+    }
+
+
+DASHBOARD_LEGEND = (
+    "Fill: green = MATCH, yellow = ALT 1, orange = ALT 2 (close alternatives, not matching "
+    "configurations), violet = RECHECK / EXCLUDED / NOT COMPARED (review, no comparable price), "
+    "grey = no price (NO RESULTS, NO RELEVANT, PENDING, DEFERRED). Every fill also has its text "
+    "label."
+)
+
+RESULT_VOCABULARY = (
+    "Result labels (short; the full explanation is in this cell's note and the collapsed "
+    "details columns): MATCH · Listed specs / Out of stock; ALT 1 · CPU, ALT 2 · CPU, Storage "
+    "(+ Limited when the comparison basis was limited); RECHECK · Variant ambiguous / Specs "
+    "incomplete / Spec conflict; EXCLUDED · Bundle terms; PENDING · Not fetched; DEFERRED · "
+    "Rate limited; NO RESULTS; NO RELEVANT (+ Search limited when the search was capped or "
+    "incomplete). NO RESULTS never means the retailer does not sell the laptop."
+)
+
+
+def comparison_header_notes(report: VariationPublicationReport) -> dict[str, str]:
+    notes = {
+        "Rank": f"{LIST_NAME}: one row per eligible Shopee seller variation with a verified "
+        "configuration mapping (variations sharing a target keep separate rows), ranked by its "
+        "own ranking_gmv_usd (M-1 + MTD). Compact view: the first 22 columns; collapsed groups "
+        "to the right hold every other field (use the + above the column letters).",
+        "Laptop": "Brand, series and model of the mapped target. The cell note identifies the "
+        "row (comparison row ID, source key, mapping).",
+        "Target specs": "Screen · CPU · RAM · storage · GPU of the mapped target, from recorded "
+        "fields only. Expanded specifications: first collapsed group.",
+        "Shopee snapshot price (PHP)": "SNAPSHOT price of this variation's own Shopee listing "
+        "from the sales extract; never a current or live price and never another seller's. "
+        "Links to the Shopee listing.",
+        "Shopee snapshot date": "Source date of the snapshot price and what kind of date it is "
+        "(sales extract date, or a monthly source-record date that is not an exact price "
+        "time). STALE = older than 7 days at the report cutoff.",
+        "Lowest in-stock matching retailer price (PHP)": "Lowest eligible IN-STOCK matching "
+        "price (matching offers only; never an alternative). Out-of-stock matching prices are "
+        "excluded here and kept in 'Other price minima and bases'.",
+        "Lowest in-stock alternative retailer price (PHP)": "Lowest eligible IN-STOCK close "
+        "alternative (ALT 1 / ALT 2 only; not a matching configuration). Separate from the "
+        "matching minimum.",
+        "Row coverage": "How this row's five retailer results split: match, alt, recheck, "
+        "excluded, pending and no price.",
+    }
+    for code in RETAILER_ORDER:
+        name = RETAILER_NAMES[code]
+        notes[f"{name} price (PHP)"] = (
+            "Numeric eligible price (blank when no comparable price). Links to the selected "
+            "product page. Out-of-stock matching prices stay visible with an Out of stock label."
+        )
+        notes[f"{name} result"] = RESULT_VOCABULARY
+    for label, columns in comparison_groups():
+        notes[columns[0]] = (
+            notes.get(columns[0], "")
+            + ("\n" if columns[0] in notes else "")
+            + f"Column group '{label}' (collapsed by default): click + above the column "
+            "letters to expand."
+        )
+    return notes
+
+
 def comparison_plan(report: VariationPublicationReport, header: Sequence[str]) -> TabPlan:
+    alternatives = _alternative_index(report)
+    alt_counts = Counter((a["comparison_row_id"], a["retailer_code"]) for a in report.alternatives)
     alt_retailers = _alternative_retailers(report)
     week, status, cutoff = (
         week_text(report),
@@ -643,11 +1202,26 @@ def comparison_plan(report: VariationPublicationReport, header: Sequence[str]) -
     )
     rows = []
     for row in report.comparison:
+        results = _row_results(report, row, alternatives)
+        stale_text, stale = shopee_freshness(row)
+        price = number(
+            row["shopee_price_php"],
+            "php",
+            note=_shopee_status(row) if row["shopee_price_php"] else "",
+        )
+        if price.kind == "number" and row["shopee_listing_url"]:
+            price = replace(price, link=row["shopee_listing_url"])
         cells: dict[str, Cell] = {
             "Rank": number(row["rank"], "integer"),
+            "Laptop": text(laptop_name(row), note=_identity_note(row)),
             "Shopee seller": text(seller_name(row)),
-            "Shopee item": text(row["item_name"]),
             "Shopee variation": text(row["shopee_model_name"]),
+            "Target specs": text(compact_specs(row)),
+            "Shopee snapshot price (PHP)": price,
+            "Shopee snapshot date": text(
+                stale_text, fill="stale" if stale else "", note=shopee_date_note(row)
+            ),
+            "Shopee item": text(row["item_name"]),
             "Brand": text(row["brand"]),
             "Series": text(row["series"]),
             "Model": text(row["model"]),
@@ -657,48 +1231,60 @@ def comparison_plan(report: VariationPublicationReport, header: Sequence[str]) -
             "RAM (GB)": number(row["ram_capacity_gb"], "integer"),
             "Storage (GB)": number(row["storage_capacity_gb"], "integer"),
             "GPU": text(row["gpu_model"]),
-            "Shopee price (PHP, snapshot)": number(row["shopee_price_php"], "php"),
             "Shopee listing link": text(row["shopee_listing_url"], link=row["shopee_listing_url"]),
             "Shopee price status": text(_shopee_status(row)),
             "Shopee price observed (Asia/Singapore)": text(_price_observed(row)),
+            "Shopee price date basis": text(row["shopee_price_date_basis"]),
         }
         for code in RETAILER_ORDER:
             name = RETAILER_NAMES[code]
-            selection = report.selections[(row["comparison_row_id"], code)]
+            result, selection, alt = results[code]
             url = row[f"{code}_Offer_URL"]
-            tag = cell_tag(row, code) if row["context_id"] else ""
-            priced = bool(row[f"{code}_Price"])
-            fill = tag_fill(tag, priced=priced)
-            price_cell = number(row[f"{code}_Price"], "php")
-            if fill in {"match", "alt1", "alt2"} and priced:
-                price_cell = replace(price_cell, fill=fill)
-            recheck_fill = "recheck" if tag == "RECHECK" and not priced else ""
-            cells |= {
-                f"{name} price (PHP)": price_cell,
-                f"{name} product link": text(url, link=url),
-                f"{name} status": text(
-                    retailer_status_text(row, code, selection),
-                    fill=fill if priced else recheck_fill,
-                ),
-                f"{name} observed (Asia/Singapore)": text(row[f"{code}_Observed_At"]),
-            }
-            link, note = _recheck_cells(row, code)
-            cells |= {f"{name} recheck link (unconfirmed)": link, f"{name} recheck note": note}
+            retailer_price = number(row[f"{code}_Price"], "php", fill=result.fill)
+            if retailer_price.kind == "number" and url:
+                retailer_price = replace(retailer_price, link=url)
+            cells[f"{name} price (PHP)"] = retailer_price
+            cells[f"{name} result"] = text(
+                result.label,
+                fill=result.fill,
+                note=result_note(report, row, code, result, selection, alt),
+            )
+            cells |= _detail_cells(report, row, code, result, selection, alt, alt_counts)
         cells |= {
+            "Lowest in-stock matching retailer price (PHP)": _minimum_price_cell(
+                row,
+                "Lowest_In_Stock_Price",
+                _minimum_basis(
+                    row.get("Lowest_In_Stock_Label", ""), row.get("Lowest_In_Stock_Basis", "")
+                ),
+            ),
+            "Lowest in-stock matching retailer(s)": text(
+                _minimum_text(
+                    row,
+                    "Lowest_In_Stock_Price_Retailers",
+                    "Lowest_In_Stock_Notes",
+                    "Lowest_In_Stock_Basis",
+                )
+            ),
+            "Lowest in-stock alternative retailer price (PHP)": _minimum_price_cell(
+                row,
+                "Lowest_Alternative_In_Stock_Price",
+                _alternative_basis(row, "Lowest_Alternative_In_Stock_Price"),
+            ),
+            "Lowest in-stock alternative retailer(s)": text(
+                _alternative_minimum_text(row, "Lowest_Alternative_In_Stock_Price", alternatives)
+            ),
+            "Row coverage": text(
+                coverage_summary([results[c][0] for c in RETAILER_ORDER])
+                if row["context_id"]
+                else "Not compared"
+            ),
             "Lowest matching retailer price (PHP)": number(row["Lowest_Price"], "php"),
             "Lowest matching retailer(s)": text(
                 _minimum_retailers(row["Lowest_Price_Retailers"], row.get("Lowest_Price_Notes", ""))
             ),
             "Lowest matching retailer price basis": text(
                 _minimum_basis(row.get("Lowest_Price_Label", ""), row.get("Lowest_Price_Basis", ""))
-            ),
-            "Lowest in-stock matching retailer price (PHP)": number(
-                row["Lowest_In_Stock_Price"], "php"
-            ),
-            "Lowest in-stock matching retailer(s)": text(
-                _minimum_retailers(
-                    row["Lowest_In_Stock_Price_Retailers"], row.get("Lowest_In_Stock_Notes", "")
-                )
             ),
             "Lowest in-stock matching retailer price basis": text(
                 _minimum_basis(
@@ -716,15 +1302,6 @@ def comparison_plan(report: VariationPublicationReport, header: Sequence[str]) -
             ),
             "Lowest alternative retailer price basis": text(
                 _alternative_basis(row, "Lowest_Alternative_Price")
-            ),
-            "Lowest in-stock alternative retailer price (PHP)": number(
-                row["Lowest_Alternative_In_Stock_Price"], "php"
-            ),
-            "Lowest in-stock alternative retailer(s)": text(
-                _minimum_retailers(
-                    row["Lowest_Alternative_In_Stock_Price_Retailers"],
-                    row.get("Lowest_Alternative_In_Stock_Price_Notes", ""),
-                )
             ),
             "Lowest in-stock alternative retailer price basis": text(
                 _alternative_basis(row, "Lowest_Alternative_In_Stock_Price")
@@ -763,98 +1340,14 @@ def comparison_plan(report: VariationPublicationReport, header: Sequence[str]) -
         if missing:
             raise PublicationInputError([f"comparison plan has no value for {missing[0]!r}"])
         rows.append(tuple(cells[name] for name in header))
-    return TabPlan(COMPARISON_TAB, tuple(header), tuple(rows))
-
-
-def _overview_note(
-    report: VariationPublicationReport,
-    row: Mapping[str, str],
-    code: str,
-    alternatives: Mapping[tuple[str, str, str], Mapping[str, str]],
-) -> str:
-    """Note of one overview retailer cell: the tag and its meaning, basis, the actual
-    configuration, differences, unknowns, stock, evidence and links. No price, no recheck: none."""
-    if not row["context_id"]:
-        return ""
-    name, tag = RETAILER_NAMES[code], cell_tag(row, code)
-    priced = bool(row[f"{code}_Price"])
-    if not priced and tag != "RECHECK":
-        return ""
-    url = row.get(f"{code}_Offer_URL", "")
-    selection = report.selections[(row["comparison_row_id"], code)]
-    obs = selection.get("observation_id", "")
-    row_ref = f"Comparison row {row['comparison_row_id']} (rank {row['rank']})"
-    if tag == "RECHECK":
-        lines = [
-            f"{name}: RECHECK — unresolved evidence; no confirmed comparison price.",
-            retailer_status_text(row, code, selection) + ".",
-        ]
-        note = row.get(f"{code}_Recheck_Note") or row.get(f"{code}_Candidate_Detail", "")
-        if note:
-            lines.append(f"Why: {note}")
-        if url:
-            lines.append(f"Page to recheck (unconfirmed, not a price): {url}")
-        lines.append(f"Detailed record: {COMPARISON_TAB} and {REVIEW_TAB} ({row_ref}).")
-        return "\n".join(lines)
-    alt = alternatives.get((row["comparison_row_id"], code, obs)) if tag.startswith("ALT") else None
-    if tag.startswith("ALT"):
-        lines = [
-            f"{name}: {tag} — close alternative, NOT a matching configuration.",
-            "Matching basis: none (ALTERNATIVE; at most two established differences from the "
-            f"mapped configuration: {laptop_name(row)}).",
-            "Actual configuration: "
-            + (
-                _alternative_configuration(alt)
-                if alt
-                else row.get(f"{code}_Offer_Details", "") or "see the link"
-            ),
-            f"Differences: {row.get(f'{code}_Alternative_Differences', '')}",
-        ]
-        if row.get(f"{code}_Alternative_Unknowns"):
-            lines.append(f"Unknown / limited: {row[f'{code}_Alternative_Unknowns']}")
-        if alt and alt["warnings"]:
-            lines.append("Notes: " + _reason_text(_codes(alt["warnings"])))
-    else:
-        if row[f"{code}_Match_Basis"] == "LISTED_SPEC":
-            lines = [
-                f"{name}: MATCH — matching configuration (listed-spec match).",
-                "Matching basis: listed specs — brand, family, screen, CPU series, installed "
-                "RAM and storage agree; the specific Shopee model is unknown.",
-            ]
-        else:
-            detail = ", ".join(
-                BASIS_TEXT[t] for t in row[f"{code}_Match_Basis"].split("+") if t in BASIS_TEXT
-            )
-            lines = [
-                f"{name}: MATCH — matching configuration (exact product match).",
-                "Matching basis: exact product" + (f" ({detail})" if detail else "") + ".",
-            ]
-        lines.append(f"Configuration: the mapped target {row['target_id']}, {laptop_name(row)}.")
-        warnings = [
-            w
-            for w in _codes(row.get(f"{code}_Warnings", ""))
-            if w != "SPECIFIC_IDENTITY_UNRESOLVED"
-        ]
-        if warnings:
-            lines.append("Notes: " + _reason_text(warnings) + ".")
-        hidden = row.get(f"{code}_Alternative_Offers", "")
-        if hidden not in {"", "0"}:
-            lines.append(
-                f"{hidden} close alternative offer(s) at this retailer are also listed "
-                f"in {ALTERNATIVES_TAB}."
-            )
-    lines += [
-        f"Stock: {_stock_text(row.get(f'{code}_Stock', ''))}.",
-        f"Observed: {row.get(f'{code}_Observed_At', '')} (Asia/Singapore).",
-        f"Offer: {url}",
-        f"Evidence: observation {obs}; association {selection.get('association_id', '')}; "
-        f"retailer context {row['context_id']} (shared by every variation row of that "
-        "configuration; the observation is stored once).",
-        f"Detailed record: {COMPARISON_TAB}"
-        + (f" and {ALTERNATIVES_TAB}" if alt else "")
-        + f" ({row_ref}).",
-    ]
-    return "\n".join(lines)
+    notes = comparison_header_notes(report)
+    return TabPlan(
+        COMPARISON_TAB,
+        tuple(header),
+        tuple(rows),
+        tuple(notes.get(n, "") for n in header),
+        banner_rows(report, len(header)),
+    )
 
 
 def overview_labels(row: Mapping[str, str]) -> str:
@@ -867,39 +1360,40 @@ def overview_labels(row: Mapping[str, str]) -> str:
 
 
 def overview_plan(report: VariationPublicationReport, header: Sequence[str]) -> TabPlan:
-    alternatives = {
-        (a["comparison_row_id"], a["retailer_code"], a["observation_id"]): a
-        for a in report.alternatives
-    }
+    """The concise price matrix: the same prices, labels, fills and notes as the comparison."""
+    alternatives = _alternative_index(report)
     week = week_text(report)
     code_of = {f"{RETAILER_NAMES[c]} (PHP)": c for c in OVERVIEW_ORDER}
     rows = []
     for row in report.comparison:
-        status_note = (
-            f"{row['comparison_row_id']} — source key {row['source_key']}; target "
-            f"{row['target_id'] or 'none'}; mapping {row['mapping_status']}; "
-            f"{row['row_comparison_status']}: {row['row_comparison_detail']}\n"
-            f"Retailer prices are this row's context cells in {COMPARISON_TAB} (several variation "
-            "rows can share one context and its observations); the Shopee price is this "
-            "variation's own historical snapshot, never a current price."
+        results = _row_results(report, row, alternatives)
+        _, stale = shopee_freshness(row)
+        shopee = number(
+            row["shopee_price_php"],
+            labelled_php("STALE") if stale else "php",
+            note=_shopee_status(row) if row["shopee_price_php"] else "",
         )
+        if shopee.kind == "number" and row["shopee_listing_url"]:
+            shopee = replace(shopee, link=row["shopee_listing_url"])
         cells: dict[str, Cell] = {
             "Rank": number(row["rank"], "integer"),
             "Shopee seller": text(seller_name(row)),
-            "Laptop": text(laptop_name(row), note=status_note),
+            "Laptop": text(laptop_name(row), note=_identity_note(row)),
             "Shopee variation": text(row["shopee_model_name"]),
             "Screen (in)": number(row["screen_size_in"], "decimal"),
             "CPU family": text(row["cpu_series"]),
             "RAM (GB)": number(row["ram_capacity_gb"], "integer"),
             "Storage (GB)": number(row["storage_capacity_gb"], "integer"),
             "GPU": text(row["gpu_model"]),
-            "Shopee (PHP, snapshot)": number(
-                row["shopee_price_php"], "php", note=_shopee_status(row)
-            ),
+            "Shopee (PHP, snapshot)": shopee,
             "Mapping status": text(row["mapping_status"]),
             "Row comparison status": text(row["row_comparison_status"]),
             "Shopee listing link": text(row["shopee_listing_url"], link=row["shopee_listing_url"]),
-            "Shopee price date": text(row["shopee_price_observed_at"]),
+            "Shopee price date": text(
+                shopee_freshness(row)[0].replace("\n", " · "),
+                fill="stale" if stale else "",
+                note=shopee_date_note(row),
+            ),
             "Comparison row ID": text(row["comparison_row_id"]),
             "Source key": text(row["source_key"]),
             "Target ID": text(row["target_id"]),
@@ -909,34 +1403,42 @@ def overview_plan(report: VariationPublicationReport, header: Sequence[str]) -> 
             "Row grain": text(row["row_grain"]),
         }
         for label, code in code_of.items():
-            tag = cell_tag(row, code) if row["context_id"] else ""
-            priced = bool(row[f"{code}_Price"])
-            link = row.get(f"{code}_Offer_URL", "") if priced and tag.startswith("ALT") else ""
-            cells[label] = number(
+            result, selection, alt = results[code]
+            url = row.get(f"{code}_Offer_URL", "")
+            cell = number(
                 row[f"{code}_Price"],
-                "php",
-                note=_overview_note(report, row, code, alternatives),
-                italic=priced and row[f"{code}_Match_Basis"] == "LISTED_SPEC",
-                fill=tag_fill(tag, priced=priced),
+                labelled_php(result.one_line) if result.priced else "php",
+                note=result_note(report, row, code, result, selection, alt),
+                italic=result.priced and row[f"{code}_Match_Basis"] == "LISTED_SPEC",
+                fill=result.fill,
             )
-            if link:
-                cells[label] = replace(cells[label], link=link)
+            if cell.kind == "number" and url:
+                cell = replace(cell, link=url)
+            cells[label] = cell
         rows.append(tuple(cells[name] for name in header))
     retailer_note = (
         f"The price shown in {COMPARISON_TAB} for the week {week}: a matching configuration when "
         "one is comparable, otherwise the best close alternative (ALT 1 before ALT 2, then the "
-        "lowest price). Blank means no comparable price (not 'not sold'). Italic = listed-spec "
-        f"match. {STATUS_LEGEND} Why a cell is blank, stock and evidence: cell notes and "
-        f"{COMPARISON_TAB}; every alternative: {ALTERNATIVES_TAB}."
+        "lowest price). The label after the amount names the result (MATCH, ALT 1, ALT 2, with "
+        "Listed specs, Limited or Out of stock where they apply). Blank means no comparable "
+        "price: the cell note says why, and a blank is never 'not sold'. Italic = listed-spec "
+        f"match. Links open the selected product page. {DASHBOARD_LEGEND}"
     )
     notes = {
         "Rank": "Shopee variation rank (own ranking GMV, M-1 + MTD); one row per variation.",
-        "Shopee (PHP, snapshot)": "HISTORICAL SNAPSHOT of this variation's own price in the sales "
-        "extract; never a current price, never another seller's.",
+        "Shopee (PHP, snapshot)": "SNAPSHOT price of this variation's own listing in the sales "
+        "extract (labelled STALE when older than 7 days at the cutoff); never a current price, "
+        "never another seller's. Links to the Shopee listing.",
+        "Shopee price date": "Source date and kind of date (sales extract, or a monthly "
+        "source record that is not an exact price time); STALE when older than 7 days.",
         **{label: retailer_note for label in code_of},
     }
     return TabPlan(
-        OVERVIEW_TAB, tuple(header), tuple(rows), tuple(notes.get(n, "") for n in header)
+        OVERVIEW_TAB,
+        tuple(header),
+        tuple(rows),
+        tuple(notes.get(n, "") for n in header),
+        banner_rows(report, len(header)),
     )
 
 
@@ -1015,7 +1517,7 @@ def alternatives_plan(report: VariationPublicationReport, header: Sequence[str])
         "per Shopee variation row and retailer offer: offers that are NOT matching configurations "
         "but differ in at most two established specifications (model, screen, CPU, installed RAM, "
         "installed storage and GPU share that budget). A reused retailer observation appears once "
-        f"per variation row it supports (Association ID). {STATUS_LEGEND}"
+        f"per variation row it supports (Association ID). {DASHBOARD_LEGEND}"
     )
     notes = {
         "Rank": intro,
@@ -1236,6 +1738,8 @@ class VariationPublicationPlan:
     run_log_columns: tuple[str, ...] | None = None
     # Live history/review records kept because this publication does not regenerate them.
     retained: dict[str, int] = field(default_factory=dict)
+    # Internal links set from the live tab IDs and final row positions (``apply_navigation``).
+    linked: int = 0
 
     @property
     def run_log_header(self) -> tuple[str, ...]:
@@ -1388,7 +1892,7 @@ def build_variation_plan(
         for row in plan.rows:
             if len(row) != plan.width:
                 raise PublicationInputError([f"{plan.title} row width differs from its header"])
-    issues = plan_issues(report, tabs)
+    issues = plan_issues(report, tabs) + source_agreement_issues(report, tabs)
     if issues:
         raise PublicationInputError(issues)
     return VariationPublicationPlan(
@@ -1423,12 +1927,12 @@ def plan_issues(report: VariationPublicationReport, tabs: Mapping[str, TabPlan])
             ("rank", c[c_idx["Rank"]], t[t_idx["rank"]]),
             (
                 "Shopee price",
-                c[c_idx["Shopee price (PHP, snapshot)"]],
+                c[c_idx["Shopee snapshot price (PHP)"]],
                 t[t_idx["shopee_current_price_php"]],
             ),
             (
                 "Shopee price",
-                c[c_idx["Shopee price (PHP, snapshot)"]],
+                c[c_idx["Shopee snapshot price (PHP)"]],
                 o[o_idx["Shopee (PHP, snapshot)"]],
             ),
         ):
@@ -1437,20 +1941,25 @@ def plan_issues(report: VariationPublicationReport, tabs: Mapping[str, TabPlan])
         for code in OVERVIEW_ORDER:
             name = RETAILER_NAMES[code]
             mine, theirs = o[o_idx[f"{name} (PHP)"]], c[c_idx[f"{name} price (PHP)"]]
-            if (mine.kind, mine.value, mine.number_format) != (
-                theirs.kind,
-                theirs.value,
-                theirs.number_format,
-            ):
+            shown = c[c_idx[f"{name} result"]]
+            if (mine.kind, mine.value) != (theirs.kind, theirs.value):
                 issues.append(f"{key}: overview {name} price differs from the comparison")
+            if not (mine.fill == theirs.fill == shown.fill):
+                issues.append(f"{key}: {name} fills differ between the price, result and overview")
+            priced = theirs.kind == "number"
             tag = cell_tag(row, code) if row["context_id"] else ""
-            if mine.fill != tag_fill(tag, priced=mine.kind == "number"):
-                issues.append(f"{key}: overview {name} fill differs from its tag")
-            if mine.kind == "number" and not mine.note:
+            if not shown.value:
+                issues.append(f"{key}: {name} has no result label")
+            if priced != shown.value.startswith(("MATCH", "ALT")):
+                issues.append(f"{key}: {name} label and price disagree on a comparable price")
+            if priced and tag and not shown.value.startswith(tag):
+                issues.append(f"{key}: {name} label does not start with its tag {tag!r}")
+            if priced and row[f"{code}_Price_Status"] not in {SELECTED, ALTERNATIVE_SELECTED}:
+                issues.append(f"{key}: {name} shows a price that is not a comparable selection")
+            if not shown.note:
+                issues.append(f"{key}: {name} result has no cell note")
+            if priced and not mine.note:
                 issues.append(f"{key}: overview {name} price has no cell note")
-            status_cell = c[c_idx[f"{name} status"]]
-            if status_cell.fill and not (tag and tag in status_cell.value):
-                issues.append(f"{key}: {name} colour has no matching text")
             if not row["context_id"] and (theirs.kind == "number" or row[f"{code}_Price"]):
                 issues.append(f"{key}: a row without a context shows a retailer price")
         if t[t_idx["comparison_status"]].value != row["comparison_status"]:
@@ -1466,6 +1975,50 @@ def plan_issues(report: VariationPublicationReport, tabs: Mapping[str, TabPlan])
             ids = [row[index].value for row in plan.rows if row[index].value]
             if len(ids) != len(set(ids)) and title != HISTORY_TAB:
                 issues.append(f"{title} repeats an association ID")
+    return issues
+
+
+def source_agreement_issues(
+    report: VariationPublicationReport, tabs: Mapping[str, TabPlan]
+) -> list[str]:
+    """The dashboard changes presentation only: every number and identity it publishes must equal
+    the saved report's own. Rank, row ID, snapshot price, each retailer price (and its link), the
+    in-stock and other minima, GMV, the alternatives and the history associations are compared
+    with the report files; nothing is recomputed, so any difference is a presentation defect."""
+    issues: list[str] = []
+    comparison, alternatives = tabs[COMPARISON_TAB], tabs[ALTERNATIVES_TAB]
+    index = {name: i for i, name in enumerate(comparison.header)}
+    expected = {
+        "Rank": "rank",
+        "Comparison row ID": "comparison_row_id",
+        "Source key": "source_key",
+        "Shopee snapshot price (PHP)": "shopee_price_php",
+        "Ranking GMV (USD)": "ranking_gmv_usd",
+        "M-1 GMV (USD)": "m_minus_1_gmv_usd",
+        "MTD GMV (USD)": "mtd_gmv_usd",
+        "Lowest matching retailer price (PHP)": "Lowest_Price",
+        "Lowest in-stock matching retailer price (PHP)": "Lowest_In_Stock_Price",
+        "Lowest alternative retailer price (PHP)": "Lowest_Alternative_Price",
+        "Lowest in-stock alternative retailer price (PHP)": "Lowest_Alternative_In_Stock_Price",
+    }
+    for row, cells in zip(report.comparison, comparison.rows, strict=True):
+        key = row["comparison_row_id"]
+        for name, source in expected.items():
+            got = cells[index[name]].value
+            if got != row[source]:
+                issues.append(f"{key}: {name} is {got!r} but the report has {row[source]!r}")
+        for code in RETAILER_ORDER:
+            name = f"{RETAILER_NAMES[code]} price (PHP)"
+            cell, price = cells[index[name]], row[f"{code}_Price"]
+            if cell.value != price or (cell.kind == "number") != bool(price):
+                issues.append(f"{key}: {name} is not the report's price {price!r}")
+            if price and cell.link != row[f"{code}_Offer_URL"]:
+                issues.append(f"{key}: {name} does not link to the selected offer")
+    shown = {r[alternatives.header.index("Association ID")].value for r in alternatives.rows}
+    if shown != {a["association_id"] for a in report.alternatives} or len(alternatives.rows) != len(
+        report.alternatives
+    ):
+        issues.append("the alternatives tab differs from the report's alternatives")
     return issues
 
 
@@ -1560,7 +2113,74 @@ def apply_live_retention(
     )
 
 
+# Internal navigation
+
+
+def apply_navigation(
+    plan: VariationPublicationPlan, states: Mapping[str, TabState]
+) -> VariationPublicationPlan:
+    """Give each comparison row's alternatives / review cell, and the result cells it explains, a
+    native internal link (``#gid=..&range=A<row>``) to the first matching row of
+    PILOT_PRICE_ALTERNATIVES or PILOT_PRICE_REVIEW.
+
+    The destination is found by the stable comparison row ID and retailer, in the final planned
+    tab (after any retained earlier records), never by rank or by the position of a row in the
+    comparison. A cell whose destination row does not exist stays unlinked. Rebuilding is
+    idempotent: links are recomputed from the plan, never accumulated.
+    """
+    gid = {
+        title: states[title].sheet_id
+        for title in (ALTERNATIVES_TAB, REVIEW_TAB)
+        if states.get(title) is not None and states[title].sheet_id is not None
+    }
+    if len(gid) != 2:
+        return plan
+    first: dict[str, dict[tuple[str, str], int]] = {"Alternatives": {}, "Review": {}}
+    for title, kind in ((ALTERNATIVES_TAB, "Alternatives"), (REVIEW_TAB, "Review")):
+        tab = plan.tabs[title]
+        index = {name: i for i, name in enumerate(tab.header)}
+        for n, row in enumerate(tab.rows):
+            category = row[index["Category"]].value if "Category" in index else ""
+            if kind == "Review" and category != "Recheck candidate (unconfirmed)":
+                continue
+            key = (row[index["Comparison row ID"]].value, row[index["Retailer"]].value)
+            if all(key):
+                first[kind].setdefault(key, tab.header_row + 2 + n)  # 1-based sheet row
+    comparison = plan.tabs[COMPARISON_TAB]
+    index = {name: i for i, name in enumerate(comparison.header)}
+    rows, linked = [], 0
+    for row in comparison.rows:
+        cells = list(row)
+        rid = row[index["Comparison row ID"]].value
+        for code in RETAILER_ORDER:
+            name = RETAILER_NAMES[code]
+            nav = index[f"{name} alternatives / review link"]
+            kind = next((k for k in first if cells[nav].value.startswith(f"{k} (")), "")
+            target = first[kind].get((rid, name)) if kind else None
+            if target is None:
+                continue
+            tab_title = ALTERNATIVES_TAB if kind == "Alternatives" else REVIEW_TAB
+            uri = f"#gid={gid[tab_title]}&range=A{target}"
+            cells[nav] = replace(cells[nav], link=uri)
+            result = index[f"{name} result"]
+            if cells[result].value.startswith("ALT") or kind == "Review":
+                cells[result] = replace(cells[result], link=uri)
+                linked += 1
+            linked += 1
+        rows.append(tuple(cells))
+    tabs = dict(plan.tabs)
+    tabs[COMPARISON_TAB] = replace(comparison, rows=tuple(rows))
+    return replace(plan, tabs=tabs, content_sha256=grid_sha256(list(tabs.values())), linked=linked)
+
+
 # Destination checks
+
+
+def _trim(header: Sequence[str]) -> list[str]:
+    trimmed = list(header)
+    while trimmed and not trimmed[-1]:
+        trimmed.pop()
+    return trimmed
 
 
 def retired_tab_titles(spreadsheet) -> list[str]:
@@ -1587,13 +2207,25 @@ def check_destinations(
     }
     for title in PUBLISHER_TABS:
         state = states[title]
-        header = state.header() if state.exists else []
+        # A tab with banner rows carries its header below them; a tab still in an earlier layout
+        # (no banner) carries it in row 1. The current layout's header row is tried first.
+        tab_plan = plan.tabs.get(title)
+        at_row = 0
+        if (
+            state.exists
+            and tab_plan is not None
+            and tab_plan.header_row
+            and _trim(state.header(tab_plan.header_row)) == list(expected[title])
+        ):
+            at_row = tab_plan.header_row
+        header = state.header(at_row) if state.exists else []
         live[title] = {
             "exists": state.exists,
             "used_rows": state.used_rows,
             "header": header,
+            "header_row": at_row + 1,
             "header_notes": [
-                cell.get("note", "") for cell in (state.grid[0] if state.grid else ())
+                cell.get("note", "") for cell in (state.grid[at_row] if state.grid else ())
             ],
         }
         if not state.exists:
@@ -1603,9 +2235,7 @@ def check_destinations(
             )
             continue
         want = list(expected[title])
-        trimmed = list(header)
-        while trimmed and not trimmed[-1]:
-            trimmed.pop()
+        trimmed = _trim(header)
         if title == RUN_LOG_TAB:
             resolved = resolve_run_log_header(state, contract)
             if resolved is None:
@@ -1627,8 +2257,8 @@ def check_destinations(
             continue
         if state.used_rows == 0:
             continue
-        if trimmed == want:
-            continue
+        if trimmed == want or tuple(trimmed) in contract.earlier_headers.get(title, ()):
+            continue  # the current layout, or this publisher's own earlier layout (replaced)
         # Header present: say whether it is the wrong grain or something else.
         if "Target ID" in trimmed and "Comparison row ID" not in trimmed:
             problems.append(
@@ -1677,6 +2307,90 @@ _IDENTITY = {
 }
 
 
+BANNER_HEIGHTS = (26, 26)  # reporting week / cutoff row, legend row
+
+_DETAIL_WIDTHS = {
+    "status": ColumnStyle(360),
+    "machine status": ColumnStyle(230),
+    "differences (target → retailer)": ColumnStyle(300),
+    "unknown fields and limits": ColumnStyle(300),
+    "warnings": ColumnStyle(240),
+    "stock": ColumnStyle(100),
+    "observed (Asia/Singapore)": ColumnStyle(175),
+    "product link": ColumnStyle(175, **_LINK),
+    "recheck link (unconfirmed)": ColumnStyle(180, **_LINK),
+    "recheck note": ColumnStyle(350),
+    "search / fetch outcome": ColumnStyle(380),
+    "offer details": ColumnStyle(330),
+    "observation ID": ColumnStyle(190, **_LINK),
+    "association ID": ColumnStyle(180, **_LINK),
+    "alternatives / review link": ColumnStyle(150, **_LINK),
+}
+
+
+def comparison_layout(header: Sequence[str]) -> TabLayout:
+    """The compact comparison: a short visible block (frozen: rank, laptop, seller), then the
+    collapsed detail groups. Fills are the plan's (result and price cells), set last."""
+    styles: dict[str, ColumnStyle] = {
+        "Rank": ColumnStyle(48, **_NUMBER),
+        "Laptop": ColumnStyle(200),
+        "Shopee seller": ColumnStyle(130),
+        "Shopee variation": ColumnStyle(170),
+        "Target specs": ColumnStyle(215),
+        "Shopee snapshot price (PHP)": ColumnStyle(112, "orange", "shopee", **_NUMBER),
+        "Shopee snapshot date": ColumnStyle(150, "orange"),
+        "Lowest in-stock matching retailer price (PHP)": ColumnStyle(
+            128, "navy", "in_stock", **_NUMBER
+        ),
+        "Lowest in-stock matching retailer(s)": ColumnStyle(190, "navy_alt"),
+        "Lowest in-stock alternative retailer price (PHP)": ColumnStyle(
+            128, "navy", "retailer", **_NUMBER
+        ),
+        "Lowest in-stock alternative retailer(s)": ColumnStyle(230, "navy_alt"),
+        "Row coverage": ColumnStyle(170, "navy_alt"),
+    }
+    for index, code in enumerate(RETAILER_ORDER):
+        name, head = RETAILER_NAMES[code], ("navy", "navy_alt")[index % 2]
+        # Alternating header shades mark the retailer boundaries; the price and result columns
+        # of one retailer share a header shade.
+        styles[f"{name} price (PHP)"] = ColumnStyle(104, head, "retailer", **_NUMBER)
+        styles[f"{name} result"] = ColumnStyle(150, head)
+        for suffix, style in _DETAIL_WIDTHS.items():
+            styles[f"{name} {suffix}"] = replace(style, header=head)
+    for name in COMPARISON_SHOPEE_GROUP:
+        styles[name] = ColumnStyle(
+            330 if name.endswith("status") else 175 if name.endswith("link") else 200, "orange"
+        )
+    for name in (*COMPARISON_SPEC_GROUP, *COMPARISON_MINIMA_GROUP, *COMPARISON_METADATA_GROUP):
+        number_like = "(PHP)" in name and not name.endswith("basis") or name.endswith("GMV (USD)")
+        styles.setdefault(
+            name,
+            ColumnStyle(130, "navy_alt", **_NUMBER)
+            if number_like
+            else ColumnStyle(
+                {"Shopee item": 260, "Model": 200, "Ranking metric scope": 420}.get(name, 160),
+                "navy_alt",
+            ),
+        )
+    for name, style in _IDENTITY.items():
+        if name in header and name not in styles:
+            styles[name] = replace(style, header="navy_alt")
+    groups: list[tuple[int, int]] = []
+    for _, columns in comparison_groups():
+        if columns[0] in header:
+            first = list(header).index(columns[0])
+            groups.append((first, first + len(columns)))
+    return TabLayout(
+        tuple(styles.get(n, ColumnStyle(160, "navy_alt")) for n in header),
+        3,
+        56,
+        42,
+        preface_heights=BANNER_HEIGHTS,
+        groups=tuple(groups),
+        manage_columns=True,
+    )
+
+
 def variation_tab_layout(title: str, header: Sequence[str]) -> TabLayout | None:
     """The house layout (navy/orange headers, Roboto, banding, frozen identifiers, widths) of the
     variation tabs; history, review and the run log keep the legacy layout rules (none)."""
@@ -1703,53 +2417,27 @@ def variation_tab_layout(title: str, header: Sequence[str]) -> TabLayout | None:
         }
         return TabLayout(tuple(styles.get(n, ColumnStyle(130)) for n in header), 2, 56, 40)
     if title == COMPARISON_TAB:
-        styles = dict(_IDENTITY)
-        styles |= {
-            "Shopee price (PHP, snapshot)": ColumnStyle(140, "orange", "shopee", **_NUMBER),
-            "Shopee listing link": ColumnStyle(175, "orange", **_LINK),
-            "Shopee price status": ColumnStyle(330, "orange"),
-            "Shopee price observed (Asia/Singapore)": ColumnStyle(210, "orange"),
-        }
-        for index, code in enumerate(RETAILER_ORDER):
-            name, head = RETAILER_NAMES[code], ("navy", "navy_alt")[index % 2]
-            styles |= {
-                f"{name} price (PHP)": ColumnStyle(136, head, "retailer", **_NUMBER),
-                f"{name} product link": ColumnStyle(175, head, **_LINK),
-                f"{name} status": ColumnStyle(320, head),
-                f"{name} observed (Asia/Singapore)": ColumnStyle(175, head),
-                f"{name} recheck link (unconfirmed)": ColumnStyle(180, head, **_LINK),
-                f"{name} recheck note": ColumnStyle(350, head),
-            }
-        for name in header:
-            if name.startswith("Lowest") and "(PHP)" in name:
-                styles[name] = ColumnStyle(
-                    155, "navy", "in_stock" if "in-stock" in name else "retailer", **_NUMBER
-                )
-            elif name.startswith("Lowest"):
-                styles[name] = ColumnStyle(320, "navy_alt")
-            elif name.endswith("GMV (USD)"):
-                styles[name] = ColumnStyle(130, "navy_alt", **_NUMBER)
-            elif name not in styles:
-                styles[name] = ColumnStyle(160, "navy_alt")
-        styles["Ranking metric scope"] = ColumnStyle(420, "navy_alt")
-        return TabLayout(tuple(styles.get(n, ColumnStyle(160)) for n in header), 4, 72, 72)
+        return comparison_layout(header)
     if title == OVERVIEW_TAB:
         styles = dict(_IDENTITY) | {
-            "Shopee (PHP, snapshot)": ColumnStyle(150, "orange", "shopee", **_NUMBER),
+            "Shopee (PHP, snapshot)": ColumnStyle(150, "orange", "shopee", align="RIGHT"),
             "Shopee listing link": ColumnStyle(175, "orange", **_LINK),
-            "Shopee price date": ColumnStyle(120, "orange"),
+            "Shopee price date": ColumnStyle(210, "orange"),
             "Mapping status": ColumnStyle(190),
             "Row comparison status": ColumnStyle(210),
             "Ranking GMV (USD)": ColumnStyle(130, "navy_alt", **_NUMBER),
         }
-        price = ColumnStyle(120, fill="retailer", **_NUMBER)
+        # The label after the amount (``₱19,990.00 · MATCH · Out of stock``) wraps in two lines.
+        price = ColumnStyle(210, fill="retailer", align="RIGHT")
         return TabLayout(
             tuple(
                 styles.get(n, price if n.endswith("(PHP)") else ColumnStyle(150)) for n in header
             ),
             4,
             64,
-            48,
+            36,
+            preface_heights=BANNER_HEIGHTS,
+            manage_columns=True,
         )
     if title == ALTERNATIVES_TAB:
         styles = dict(_IDENTITY) | {
@@ -1792,6 +2480,38 @@ class PublicationOutcome:
     readback_issues: list[str]
     tab_ids: dict[str, int]
     error: str = ""
+    guide: str = ""  # TRACKER_GUIDE: UPDATED, UNCHANGED, SKIPPED (reason) or FAILED (reason)
+
+
+# Sheets answers a burst of reads with HTTP 429 ("Read requests per minute"). The six-tab readback
+# uses most of the quota, so a read that is refused for that reason is retried after the minute
+# has moved on instead of reporting the publication as a partial failure (2026-11-05 runs).
+READ_RETRY_SECONDS = (20, 30, 45, 60)
+
+
+def read_tab_with_retry(spreadsheet, title: str, *, sleep=time.sleep) -> TabState:
+    for delay in (*READ_RETRY_SECONDS, None):
+        try:
+            return read_tab(spreadsheet, title, PUBLISHER_TABS)
+        except Exception as exc:
+            message = str(exc)
+            if delay is None or not ("429" in message or "Quota exceeded" in message):
+                raise
+            sleep(delay)
+    raise AssertionError("unreachable")  # pragma: no cover
+
+
+def guide_entries_for(
+    plan: VariationPublicationPlan, published_at: datetime
+) -> list[tuple[str, str]]:
+    return guide_entries(
+        layout_version=plan.contract.layout_version,
+        publication_id=plan.publication_id,
+        week=week_text(plan.report),
+        cutoff=_local_short(plan.report.as_of),
+        rows=len(plan.tabs[TOP_TAB].rows),
+        published=published_at.astimezone(UTC).strftime("%Y-%m-%d"),
+    )
 
 
 def existing_run_log_rows(state: TabState, header: Sequence[str]) -> list[list[Cell]]:
@@ -1837,7 +2557,7 @@ def publish_variation(
     problems, _ = check_destinations(states, plan)
     if problems:
         raise DestinationError("; ".join(problems))
-    plan = apply_live_retention(plan, states)
+    plan = apply_navigation(apply_live_retention(plan, states), states)
     backup_dir.mkdir(parents=True, exist_ok=True)
     for title, state in states.items():
         if state.used_rows:
@@ -1856,8 +2576,15 @@ def publish_variation(
                 attempts = 0
     first = first or published_at.astimezone(UTC).isoformat(timespec="seconds")
 
-    def write(title: str, grid: Sequence[Sequence[Cell]], width: int) -> None:
-        requests = tab_requests(states[title], grid, width, layout_fn=variation_tab_layout)
+    def write(title: str, grid: Sequence[Sequence[Cell]], width: int, header_row: int = 0) -> None:
+        requests = tab_requests(
+            states[title],
+            grid,
+            width,
+            layout_fn=variation_tab_layout,
+            header_row=header_row,
+            notes=title in VARIATION_NOTE_TABS,
+        )
         guard_requests(requests, allowed)
         step(f"writing {title} ({len(grid) - 1} data rows)")
         spreadsheet.batch_update({"requests": requests})
@@ -1885,7 +2612,8 @@ def publish_variation(
     try:
         log("IN_PROGRESS", written, "NOT_RUN", "Publication started; data tabs pending.")
         for title in DATA_TABS:
-            write(title, plan.tabs[title].grid(), plan.tabs[title].width)
+            tab = plan.tabs[title]
+            write(title, tab.grid(), tab.width, tab.header_row)
             written.append(title)
     except Exception as exc:  # Record what happened, then report partial failure.
         error = f"{type(exc).__name__}: {exc}"
@@ -1903,20 +2631,58 @@ def publish_variation(
     issues: list[str] = []
     for title in DATA_TABS:
         step(f"reading back {title}")
-        issues += verify_tab(read_tab(spreadsheet, title, PUBLISHER_TABS), plan.tabs[title].grid())
+        issues += verify_tab(
+            read_tab_with_retry(spreadsheet, title),
+            plan.tabs[title].grid(),
+            notes=title in VARIATION_NOTE_TABS,
+        )
         issues += verify_layout(
             spreadsheet, plan.tabs[title], layout_fn=variation_tab_layout, allowed=PUBLISHER_TABS
         )
+    # The TRACKER_GUIDE text that goes with this layout (advisory: a problem with it is reported
+    # but never undoes the data tabs; its snapshot is saved first and --rollback restores it).
+    guide = ""
+    try:
+        guide_plan = plan_guide(spreadsheet, guide_entries_for(plan, published_at))
+        if guide_plan.skipped:
+            guide = f"SKIPPED ({guide_plan.skipped})"
+        elif not guide_plan.requests:
+            guide = "UNCHANGED"
+        else:
+            step(
+                f"updating {GUIDE_TAB} ({len(guide_plan.updated)} updated, "
+                f"{len(guide_plan.appended)} appended)"
+            )
+            write_backup(
+                backup_dir,
+                TabState(
+                    GUIDE_TAB,
+                    True,
+                    guide_plan.sheet_id,
+                    grid=tuple(tuple(row) for row in snapshot_rows(guide_plan.snapshot)),
+                ),
+                guide_plan.snapshot,
+            )
+            write_guide(spreadsheet, guide_plan)
+            guide_issues = verify_guide(spreadsheet, guide_plan)
+            issues += guide_issues
+            guide = "UPDATED" if not guide_issues else f"READBACK_ISSUES ({len(guide_issues)})"
+    except Exception as exc:
+        guide = f"FAILED ({type(exc).__name__}: {exc})"
     status = "SUCCESS" if not issues else "READBACK_FAILED"
     readback = "PASSED" if not issues else f"FAILED ({len(issues)} issue(s))"
-    try:
-        grid = log(
-            status,
-            written,
-            readback,
-            "" if not issues else "Readback found differences; see the local report.",
+    notes = "; ".join(
+        filter(
+            None,
+            (
+                "" if not issues else "Readback found differences; see the local report.",
+                "" if guide in {"", "UPDATED", "UNCHANGED"} else f"{GUIDE_TAB}: {guide}",
+            ),
         )
-        issues += verify_tab(read_tab(spreadsheet, RUN_LOG_TAB, PUBLISHER_TABS), grid)
+    )
+    try:
+        grid = log(status, written, readback, notes)
+        issues += verify_tab(read_tab_with_retry(spreadsheet, RUN_LOG_TAB), grid)
     except Exception as exc:
         return PublicationOutcome(
             "PARTIAL_FAILURE",
@@ -1924,7 +2690,8 @@ def publish_variation(
             issues,
             tab_ids,
             f"Run-log update failed: {type(exc).__name__}: {exc}",
+            guide,
         )
     return PublicationOutcome(
-        "SUCCESS" if not issues else "READBACK_FAILED", written, issues, tab_ids
+        "SUCCESS" if not issues else "READBACK_FAILED", written, issues, tab_ids, "", guide
     )
