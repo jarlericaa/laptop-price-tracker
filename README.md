@@ -1,350 +1,418 @@
-# laptop-price-tracker
+# Laptop Price Tracker
 
-**Start here:** [Weekly workflow, dataflow and commands](docs/WEEKLY_WORKFLOW.md) explains the Sheet tabs, CSVs, weekly refresh, automatic search and publishing step by step.
+A competitive-pricing pipeline for laptops sold on Shopee in the Philippines. It takes internal
+Shopee sales data from a Google Sheet, works out which laptop variations matter most, finds the
+same laptop configurations at five Philippine electronics retailers, compares prices and
+availability, and publishes the result to a Google Sheets dashboard.
 
-[Cached catalog search](docs/CATALOG_INDEX.md) finds candidate links locally from
-retailer sitemaps, with page evidence and a measured discovery benchmark. It requires
-no LLM or search API and supplies leads to the existing workflow.
+Tracked retailers: **DataBlitz**, **Laptop Factory**, **PC Express**, **PC Central** and **Octagon**.
 
-This project processes Shopee Electronics data from Google Sheets and produces a ranked list
-of laptop models for future retailer price tracking. The current Python pipeline reads the
-`raw` worksheet, validates and classifies data, detects M-1 and MTD, and generates local ranking
-and review files. A shared, retailer-neutral scraping framework (overall Phase 6) and five
-offline-tested retailer adapters, Laptop Factory, DataBlitz, PC Express, PC Central, and
-Octagon (Phase 7), are implemented and enabled for live use under project-owner decisions.
-Laptop Factory, DataBlitz, and PC Express each have a user-reported live check; Laptop Factory
-and PC Express also have a controlled 2026-10-01 check with plain-string URLs. The
-external-policy findings for PC Express and Octagon are RESTRICTED under the retailers' terms.
-PC Central's bare-URL check failed safely; a selected-variant live check returned one in-stock
-offer. A user-reported OCT live check returned one in-stock HP 15-FC0413AU offer at PHP 37,999.
-Exact configuration matching (overall Phase 8) and weekly price comparisons with price history
-(overall Phase 9) run offline over saved observations. `collect_and_match.py` adds manual
-online collection of explicitly listed product pages into the same store and matcher. Automatic
-product discovery and the supervised multi-retailer pilot are implemented;
-Phase 10 remains in progress. Price reports can be published to dedicated tracker tabs.
-GitHub Actions scheduling is not implemented.
+## Why it exists
 
-The latest read-only live dry run completed in 57.49 seconds and generated 100 targets. The
-21 historical conflicting keys had fingerprint-matched `EXCLUDE_KEY` decisions; their source
-rows remain excluded, with no disputed values selected or summed. The user accepted the current
-Top 100 and eligibility CSV reports on 2026-09-29. The user reports that the nine approved `P1_*`
-production tabs were created with headers only and verified on 2026-09-29. A synthetic-data
-writer test completed on a dedicated test spreadsheet; a read-only report confirmed the nine
-tabs and headers, expected synthetic rows, and a run-log count of 1. The full
-`run_phase1.py --write-sheets` command has not been run on the production P1 outputs. The
-separate pilot price publisher has written and verified the dedicated production pilot tabs.
+Comparing hundreds of Shopee laptop variations against five retailer websites by hand is slow and
+error-prone. Laptop names are inconsistent (the same machine appears under several titles, RAM and
+storage options hide inside variants), so a naive title match produces wrong comparisons. The
+pipeline automates the repetitive parts (ranking, searching, page collection, matching, report
+building) and keeps people in the loop for the judgement calls: the approved catalog, the
+mappings from Shopee listings to laptop configurations, and the final publication.
 
-Phase 5 is COMPLETE (2026-10-12). The `TARGET_MASTER` identity is the five-field core key approved
-on 2026-10-05 (`model`, `screen_size_in`, `cpu_series` at CPU-family level, `ram_capacity_gb`,
-`storage_capacity_gb`), and the local validators for `TARGET_MASTER`, `SOURCE_MODEL_MAP`, and
-`MATCH_REVIEW` enforce it. Rows have a tracking mode: `CONFIGURATION` (the default) uses the
-five-field identity and exact retailer matching; `LISTING_ONLY` covers products confirmed to have
-no verifiable model, is tracked by `shop_id` + `item_id` + `source_model_id`, and is never matched
-across retailers. On 2026-10-12 the catalog held 205 targets (193 `CONFIGURATION`, 12
-`LISTING_ONLY`), 360 mappings, and 5,154 review rows, all passing the read-only validator. The
-tracker's working list is the **Top 100 verified configurations**: 128 configurations qualify,
-100 are selected, and the list is published in the `P1_TOP_100_CONFIGURATIONS` tab. It excludes
-`LISTING_ONLY` targets and unresolved identities. See
-[docs/TARGET_MASTER_SCHEMA.md](docs/TARGET_MASTER_SCHEMA.md).
+## Key features
 
-Phase 8 is COMPLETE as an offline path. Replaying the nine Laptop Factory observations saved on
-2026-10-08 against the current catalog gives 9 `EXACT` matches. That is one retailer and nine
-offers, not a pilot. See [docs/MATCHING.md](docs/MATCHING.md).
+- **Sales ranking.** Reads the `raw` sheet, validates it, applies eligibility rules and duplicate
+  decisions, and ranks Shopee variations by combined last-month (M-1) and month-to-date (MTD) GMV.
+- **Catalog-driven selection.** A **Top 100 eligible mapped Shopee variations** list: only
+  variations with a verified mapping to an active `TARGET_MASTER` configuration are selected.
+  The filter runs before the 100-row limit, and a shortfall is reported, never padded.
+- **Retailer discovery and collection.** Bounded search of the five retailers, ranked candidates,
+  variant inspection from each page's own structured data, and page collection through one
+  adapter per retailer.
+- **Exact configuration matching.** Offers are matched to a target on five fields (model, screen
+  size, CPU family, RAM, storage). Ambiguous or contradictory evidence goes to review instead of
+  being matched. Close alternatives (`ALT 1`, `ALT 2`) are labelled separately from matches.
+- **Price history.** Observations are stored in an append-only local SQLite store and compared
+  week by week (Monday to Monday, Asia/Singapore).
+- **Rate limiting and caching.** One request scheduler per retailer (spacing, `Retry-After`
+  cooldowns, pauses) with state that survives restarts, plus a replay cache for saved search and
+  inspection responses.
+- **Dashboard publication.** A manual, preview-first publisher writes a fixed set of tabs, snapshots
+  them first, verifies every cell by readback, and supports rollback.
 
-Phase 9 is COMPLETE as an offline path (2026-10-12). `track_prices.py` stores observations in an
-append-only local SQLite history and matches them under a recorded catalog and rule version. It
-then writes a weekly comparison (Monday to Monday, Asia/Singapore) for the selected working list,
-with `DBZ_Price`, `LF_Price`, `PCX_Price`, `PCC_Price`, and `OCT_Price`, plus price history. On the
-nine saved 2026-10-08 observations, 3 of the 100 selected configurations get a comparable price.
-See [docs/PRICE_TRACKING_OUTPUT_SCHEMA.md](docs/PRICE_TRACKING_OUTPUT_SCHEMA.md).
+## How the pipeline works
 
-Phase 6 is COMPLETE as a framework. `src/laptop_tracker/offers.py` and
-`src/laptop_tracker/scraping.py` define the adapter contract and the normalized offer
-observation (`Decimal` price, ISO currency, UTC retrieval time, no `target_id`). They also
-provide timeouts, bounded retries, and per-retailer throttling. An offline example adapter
-under `tests/` exercises them with synthetic fixtures. See
-[docs/SCRAPING_FRAMEWORK.md](docs/SCRAPING_FRAMEWORK.md).
-
-Phase 7 is COMPLETE. Jarelle Ricaforte maintains all five retailer adapters: LF, DBZ, PCX, PCC, and OCT. Known unobserved page states remain documented limitations, and retailer-policy findings are recorded separately from project-owner authorization.
-
-`src/laptop_tracker/adapters/laptop_factory.py` parses Laptop Factory product pages offline and has a controlled bare-URL live check returning one in-stock Acer Aspire AI 14 offer at a sale price. Retailer permission remains unverified. See [docs/adapters/LAPTOP_FACTORY.md](docs/adapters/LAPTOP_FACTORY.md).
-
-`src/laptop_tracker/adapters/datablitz.py` parses DataBlitz product pages on `ecommerce.datablitz.com.ph`; a user-reported live spot check returned one in-stock MSI offer. See [docs/adapters/DATABLITZ.md](docs/adapters/DATABLITZ.md).
-
-`src/laptop_tracker/adapters/pcx.py` parses PC Express product pages on `pcx.com.ph`. Internal live use is enabled by the project-owner decision; the retailer's external-policy finding remains RESTRICTED. A controlled check confirmed the offer URL is a plain string. See [docs/adapters/PCX.md](docs/adapters/PCX.md).
-
-`src/laptop_tracker/adapters/pcc.py` parses PC Central product pages on `pccentralcomputerstore.com`. Products with several variants need a `?variant=<id>` URL. A selected-variant live check returned one in-stock ASUS VivoBook offer. See [docs/adapters/PCC.md](docs/adapters/PCC.md).
-
-`src/laptop_tracker/adapters/oct.py` parses Octagon product pages on `www.octagon.com.ph`. Its terms prohibit scraping, so the external-policy finding is RESTRICTED; the project-owner decision is not Octagon's consent. A user-reported live check returned one in-stock HP offer. See [docs/adapters/OCT.md](docs/adapters/OCT.md).
-
-The script is named `run_phase1.py` for historical reasons. Its raw-data and Top 100 work maps
-mainly to **overall Phase 4** in the revised plan. Google access is overall Phase 1.
-
-## Setup
-
-Create a local `.env` from `.env.example`. Keep the service-account JSON outside this
-repository and share the spreadsheet with the service-account email address. Install the
-dependencies into `.venv` with `python -m pip install -r requirements.txt`.
-
-The minimum live configuration is:
-
-```dotenv
-GOOGLE_SERVICE_ACCOUNT_FILE=/home/<username>/.config/laptop-price-tracker/google-service-account.json
-SPREADSHEET_ID=<your spreadsheet ID>
-RAW_TAB_NAME=raw
+```mermaid
+flowchart TD
+    raw["Sheet: raw (Shopee sales)"] --> sales["1. Sales refresh<br/>run_phase1.py"]
+    cat["Sheets: TARGET_MASTER,<br/>SOURCE_MODEL_MAP, MATCH_REVIEW"] --> check["2. Catalog check<br/>check_target_tables.py"]
+    sales --> build["3. Top 100 variation build + audits"]
+    check --> build
+    build --> leads["4. Catalog leads (sitemaps)"]
+    leads --> disc["5. Discovery + collection<br/>discover_products.py"]
+    build --> disc
+    disc --> store[("SQLite price history")]
+    store --> prices["6. Weekly price reports<br/>track_prices.py"]
+    prices --> reports["7. Variation reports + diagnostics"]
+    reports --> preview["8. Publish preview<br/>(stops here: READY_TO_PUBLISH)"]
+    preview -. "manual review" .-> write["9. publish_variation_prices.py --write-sheets"]
+    write --> out["Sheets: dashboard tabs"]
 ```
 
-Do not place the credential JSON in this repository. Manual eligibility overrides belong in
-`config/eligibility_decisions.csv`; existing decisions are merged rather than discarded when
-the optional `P1_ELIGIBILITY_DECISIONS` tab is updated.
+Steps 1 to 8 are run in order by the driver script [run_variation_week.sh](run_variation_week.sh),
+which stops at the publish preview and writes `status.json` (`READY_TO_PUBLISH` or
+`FAILED_AT_<stage>`) into its run folder. **Step 9 is never run automatically.** A person reviews the
+audits and the preview, then runs the publisher.
 
-## Safe commands
+Two stages need human attention outside the driver:
+
+- **Catalog maintenance** (`TARGET_MASTER`, `SOURCE_MODEL_MAP`, `MATCH_REVIEW`) is done by hand in the
+  Google Sheet. The pipeline validates these tabs but never creates targets or mappings.
+- **Conflicting duplicate sales rows** are quarantined. The driver applies the standing owner rule
+  "keep the latest sheet row" for same-date conflicts (`apply_latest_row_decisions.py --write`, which
+  backs up `config/duplicate_decisions.csv` first); anything else stays quarantined and the stage fails.
+
+## Repository structure
+
+```text
+laptop-price-tracker/
+├── src/laptop_tracker/        Application package: schema, eligibility, matching, rate limiting,
+│   └── adapters/              scraping, price tracking, Sheets reader/writer/publisher.
+│                              One adapter per retailer (datablitz, laptop_factory, pcx, pcc, oct).
+├── *.py                       Command-line entry points (36 scripts; see the catalogue below).
+├── run_variation_week.sh      Weekly driver, stops at the publish preview.
+├── config/                    Rules, registries, templates and owner decisions (see Configuration).
+├── data/                      Runtime state and generated output (mostly Git-ignored):
+│   ├── output/                  generated reports; weekly runs under output/weekly_runs/<UTC time>/
+│   ├── history/                 price_history.sqlite3 and retailer_rate_limits.json (persistent state)
+│   ├── collection/              saved collection runs
+│   ├── review/                  local review files
+│   └── backups/                 backups written before decision-file changes
+├── tests/                     pytest suite; fixtures in tests/scraping_fixtures/
+├── docs/                      Design, schema and operations documents (index below)
+├── .env.example               Template for the local .env
+├── pyproject.toml             Python version, dependencies, pytest and ruff settings
+└── requirements.txt           Runtime plus test/lint dependencies
+```
+
+The 36 entry-point scripts deliberately stay in the repository root. Each one locates `src/` and
+`data/` relative to its own file, and `run_variation_week.sh`, the tests and the docs call them by
+those paths. Moving them would require editing every script and every documented command, for no
+functional gain.
+
+### Script catalogue
+
+| Purpose | Scripts |
+|---|---|
+| Sales refresh | `smoke_test.py`, `run_phase1.py` |
+| Duplicate decisions | `apply_latest_row_decisions.py`, `migrate_duplicate_decisions.py` |
+| Catalog validation and review | `check_target_master.py`, `check_target_tables.py`, `seed_match_review.py`, `audit_top_100_coverage.py`, `propose_catalog_conventions.py`, `propose_catalog_corrections.py`, `reconcile_catalog.py`, `build_catalog_correction_queue.py` |
+| Top 100 selection | `build_top_shopee_variations.py`, `audit_top_shopee_variations.py`, `audit_variation_selection.py`; earlier configuration-grain: `build_verified_top_100.py`, `audit_verified_top_100.py` |
+| Discovery and collection | `discover_catalog_leads.py`, `discover_products.py`, `collect_and_match.py`, `search_catalog_index.py`, `discover_candidates.py` |
+| Matching and prices | `match_offers.py`, `track_prices.py`, `audit_alternatives.py` |
+| Reports and diagnostics | `build_variation_reports.py`, `build_publication_diagnostics.py`, `build_before_after_report.py`, `coverage_report.py`, `diagnose_blank_cells.py` |
+| Replay and benchmarking | `replay_extraction.py`, `compare_alternative_replay.py`, `measure_discovery.py`, `benchmark_catalog_index.py` |
+| Publication (writes Sheets) | `publish_variation_prices.py` (current), `publish_prices.py` (earlier configuration grain; refuses a workbook prepared for the variation grain) |
+
+Run any script with `--help` for its options.
+
+## Requirements
+
+- Python 3.11 or newer (`pyproject.toml`). The maintained environment is a Linux (WSL) virtualenv.
+- Packages: `pandas`, `gspread`, `google-auth`, `python-dotenv`; `pytest` and `ruff` for development
+  (all in `requirements.txt`). No other dependency manager is used.
+- A Google Cloud **service account** with a JSON key, and the spreadsheet shared with the
+  service account's email address. Reading needs access to the spreadsheet; publishing needs edit
+  access.
+- Outbound HTTPS access to the retailer sites for live discovery and collection.
+
+## Installation and setup
 
 ```bash
-python smoke_test.py
-python run_phase1.py --dry-run
+git clone https://github.com/jarlericaa/laptop-price-tracker.git
+cd laptop-price-tracker
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install -r requirements.txt
+cp .env.example .env
 ```
 
-Both commands only read the `raw` tab. `python run_phase1.py --write-sheets` additionally
-updates the explicitly allowed `P1_*` output tabs; it can never write to `raw`.
-The command defaults to local-output-only behavior even when `--dry-run` is omitted. Source
-reads use a read-only Google Sheets OAuth scope; the write scope is requested only after the
-explicit `--write-sheets` option is supplied.
+Edit `.env` (see Configuration). Keep the service-account JSON **outside** the repository.
 
-```bash
-python check_target_master.py path/to/target_master_export.csv
-```
-
-This validates a local `TARGET_MASTER` CSV snapshot (header template:
-`config/target_master_template.csv`) without Google access.
-
-```bash
-python check_target_tables.py --target-master tm.csv --source-model-map map.csv --match-review review.csv
-python check_target_tables.py --from-sheets
-python seed_match_review.py
-```
-
-`check_target_tables.py` validates local snapshots of any of the three Phase 5 tables. Mapping
-checks require the master snapshot, so target references can be verified. The header templates
-`config/source_model_map_template.csv` and `config/match_review_template.csv` are exact
-contracts. With `--from-sheets`, the command reads the three tabs with the read-only scope. It
-never writes or creates tabs. `seed_match_review.py` creates
-`data/review/match_review_candidates.csv`, with one `NEW` candidate per distinct Top 100 model
-ID. All specifications, URLs, and approvals are left blank for human research. It never creates
-`TARGET_MASTER` or mapping rows. All three commands write reports only under ignored `data/`
-paths and print counts only.
-
-```bash
-python match_offers.py --target-master tm.csv --observations offer_observations.csv
-python match_offers.py --target-master-from-sheets --observations offer_observations.csv
-python audit_top_100_coverage.py --from-sheets
-python propose_catalog_conventions.py --target-master data/output/target_master_validated.csv
-python build_verified_top_100.py            # add --from-sheets to read the three catalog tabs
-python audit_verified_top_100.py
-```
-
-`audit_top_100_coverage.py` classifies each accepted Phase 4 Top 100 `model_id` (exact text) as
-mapped to an ACTIVE target, mapped to an inactive or invalid target, unmapped but in
-`MATCH_REVIEW` (by status), or missing. It also lists `COMPLETE` review rows without an ACTIVE
-mapping. It accepts the same three local snapshots as `check_target_tables.py` (exports or
-validated copies) or reads the tabs read-only, writes local reports under `data/output/`, and
-prints counts only. It never reads `raw` or `P1_TOP_100_TARGETS` and never writes to Sheets.
-
-`match_offers.py` (Phase 8) matches saved retailer offer observations to a fully valid
-`TARGET_MASTER` using the five-field exact rule. `--target-master` accepts a sheet export or a
-`check_target_tables.py` validated copy; `--target-master-from-sheets` reads only the live
-`TARGET_MASTER` tab with the read-only scope instead. It writes
-`offer_match_results.csv`, `offer_match_review_queue.csv`, and `offer_match_evidence.csv` under
-`data/output/` and prints counts only. See [docs/MATCHING.md](docs/MATCHING.md).
-
-`propose_catalog_conventions.py` proposes `model`/`cpu_series` corrections under the 2026-10-08
-conventions for each `target_id` in a validated snapshot. Optional mapping and review snapshots,
-Top 100 coverage, and saved observations add evidence. It writes local reports under
-`data/output/catalog_conventions/`, including a sheet correction report, and never edits the
-catalog. See [docs/SHEET_MIGRATION_MODEL_CPU_CONVENTIONS.md](docs/SHEET_MIGRATION_MODEL_CPU_CONVENTIONS.md).
-
-`build_verified_top_100.py` produces the **Top 100 verified configurations** (owner decision
-2026-10-12). This is the tracker's working list, not the overall sales Top 100:
-
-- **Members.** It contains unique ACTIVE `CONFIGURATION` targets with complete, unconflicted
-  five-field identities.
-- **Ranking.** Targets are ranked by the combined M-1 + MTD GMV of their eligible, approved
-  mapped variations. Each target is counted once, and GMV is summed exactly from the Phase 4 text.
-- **Inputs.** It reads the full Phase 4 eligible ranking (`eligible_model_ranking.csv`), checks
-  it against the accepted source Top 100 (kept unchanged as a reference), and reads the three
-  validated catalog tables. With `--from-sheets`, the catalog tabs are read with the read-only
-  scope.
-- **Outputs.** It writes the full ranking, the Top 100, a contribution ledger, exclusions, a
-  review-priority queue, and a run summary under `data/output/verified_top_100/`.
-- **Sales periods.** The GMV comes from the historical sales snapshot that Phase 4 extracted. A
-  new build date does not make the sales current.
-
-```bash
-python track_prices.py --observations data/output/pilot_matching_2026-10-08/observations.csv \
-  --week-start 2026-10-05 --as-of 2026-10-12T09:00:00+08:00
-```
-
-`track_prices.py` (Phase 9, offline) does four things:
-
-- **Validates** the three catalog snapshots, the published selected list, and its contribution
-  ledger.
-- **Imports** observation CSVs into `data/history/price_history.sqlite3`. Exact repeats are
-  skipped, and a contradicting record refuses the file.
-- **Matches** stored observations under the current catalog and rule version.
-- **Writes** the weekly comparison, retailer selections (URL, retrieval time, and reason), a
-  weekly series, per-observation history, a review queue, a configuration-to-source ledger, and a
-  summary under `data/output/price_tracking/week_<date>/`.
-
-Dates are explicit, and the output prints counts only. It makes no retailer requests and never
-touches Sheets. See [docs/SETUP_AND_OPERATIONS.md](docs/SETUP_AND_OPERATIONS.md#offline-price-comparisons-and-history-overall-phase-9).
-
-```bash
-python collect_and_match.py --preview --manifest config/collection_manifest.csv
-python collect_and_match.py --live --manifest config/collection_manifest.csv
-```
-
-`collect_and_match.py` is **manual online collection and matching** of explicitly listed product
-pages. The manifest (`request_id,retailer_id,product_url,expected_target_id,enabled`; synthetic
-template in `config/collection_manifest_template.csv`) is validated as a whole, together with the
-catalog and the selected list, before any request. `--preview` sends nothing. `--live` fetches
-each enabled page once through the existing adapters and shared `Fetcher`, stores valid
-observations in the Phase 9 history store, matches them with the five-field `ExactMatcher`, and
-writes a new run directory under `data/output/collection_runs/`: request report, failures, an
-observation CSV usable by `match_offers.py` and `track_prices.py`, match results, a review queue,
-field evidence, and a run summary. `expected_target_id` is only a hint; a different outcome is
-flagged for review. Exit codes: 0 success or preview, 2 partial success, 1 failure. One Laptop
-Factory product page was checked live on 2026-10-12. The broader multi-retailer, multi-week pilot
-and scheduled automation are separate work. See
-[docs/SETUP_AND_OPERATIONS.md](docs/SETUP_AND_OPERATIONS.md#manual-online-collection-and-matching).
-
-```bash
-python publish_prices.py --preview --report-dir <reviewed report folder> --pilot-scope <scope.csv>
-python publish_prices.py --write-sheets --report-dir <reviewed report folder> --pilot-scope <scope.csv>
-```
-
-`publish_prices.py` publishes **reviewed** pilot reports to six dedicated tabs of the configured
-spreadsheet: `PILOT_PRICE_COMPARISON` (prices with clickable retailer links and the dated, historical
-Shopee snapshot price), `PILOT_PRICE_SUMMARY` (the same prices in seven columns, context in cell
-notes), `PILOT_PRICE_OVERVIEW` (rank, screen, CPU family, RAM, storage and the same prices in twelve
-columns, since `pilot-sheets-6`), `PILOT_PRICE_HISTORY`, `PILOT_PRICE_REVIEW`, and `PILOT_PRICE_RUN_LOG`. It validates every input before any Sheets
-access. Preview is read-only. A write saves a full local snapshot of the existing pilot tabs, replaces their content
-(so repeats never duplicate rows), applies the house layout, and reports `SUCCESS` only after a full cell readback.
-`--rollback <publication folder>` restores the snapshotted data tabs; the owner-built overview is replaced only with
-`--adopt-overview`. It never collects, rematches, or touches the history store, `raw`, the catalog, or other tabs. The first
-seven-configuration pilot cycle was published on 2026-10-12. See
-[docs/SETUP_AND_OPERATIONS.md](docs/SETUP_AND_OPERATIONS.md#publishing-pilot-results-to-google-sheets-phase-10-manual)
-and [docs/PHASE_10_PILOT.md](docs/PHASE_10_PILOT.md).
-
-`discover_products.py` searches the five retailers for verified configurations within explicit request limits (`--preview` sends nothing), ranks the results with reasons, lists variants only from each page's own structured data, writes a `collect_and_match.py` manifest, and with `--collect` collects and matches those pages. Ranking never assigns a target. When a complete model code returns no result, it also tries the code's spellings (2026-10-22); `--max-second-pass-candidates-per-target-retailer` (opt-in) collects relevant candidates a per-round limit skipped. See [docs/SETUP_AND_OPERATIONS.md](docs/SETUP_AND_OPERATIONS.md#automatic-product-discovery-phase-10-manual-runs).
-
-`discover_catalog_leads.py` (opt-in, 2026-10-22) reads the sitemaps the retailers advertise in robots.txt, within a hard request ceiling, and writes supplied-URL leads for pages whose URL shows a scoped target's complete model code; discovery re-fetches and re-matches them. `diagnose_blank_cells.py` explains every configuration x retailer cell (furthest stage reached, queries, limits, observed versus comparable price), and `measure_discovery.py` scores a run against the labelled benchmark in `tests/scraping_fixtures/discovery_benchmark/`. All three are offline except `discover_catalog_leads.py --live`. See [docs/DISCOVERY_IMPROVEMENTS_2026-10-22.md](docs/DISCOVERY_IMPROVEMENTS_2026-10-22.md).
-
-`search_catalog_index.py` reuses the collector's saved sitemap responses to search product names,
-model codes and punctuation variations locally. One catalog refresh serves many searches, with
-no LLM or search API. Add `--live` only to fetch candidate product pages. Exported supplied-URL
-leads still pass the existing downstream checks. See [cached catalog search](docs/CATALOG_INDEX.md)
-and the [measured benchmark](docs/benchmarks/catalog-index-2026-10-25.md).
-
-`replay_extraction.py` replays a saved collection offline through the current extractor (from the
-observation CSV) and the current adapters (from saved HTML), and writes a before/after comparison;
-re-parsed records are never imported. `discover_candidates.py` ranks saved observations as
-research candidates for reference configurations and plans search queries, without making
-requests or changing matching. See
-[docs/SETUP_AND_OPERATIONS.md](docs/SETUP_AND_OPERATIONS.md#offline-extraction-replay-and-candidate-discovery-phase-10).
-
-`audit_verified_top_100.py` independently checks a run: unique targets, ACTIVE `CONFIGURATION`
-status, complete identities, valid contributors, totals, deterministic order, and the catalog
-version used. See [docs/TARGET_MASTER_SCHEMA.md](docs/TARGET_MASTER_SCHEMA.md#top-100-verified-configurations-2026-10-12).
-
-## Conflicting duplicates
-
-Exact duplicate rows for a `period_month`/`shop_id`/`item_id`/`model_id` key are kept once.
-Rows sharing a key but differing in any field are quarantined and reported in
-`conflicting_duplicates.csv`; publication is blocked until a valid decision is recorded. Each
-run writes a local, redacted `data/output/duplicate_review.csv` (source identifiers, the
-conflict date, differing field names and one content fingerprint per conflicting record; no GMV,
-prices, names or sheet row numbers) and `data/output/duplicate_resolution_log.csv` (the sheet row
-each record occupies in this run). To record a decision, copy the row into
-`config/duplicate_decisions.csv` and fill in `decision`, `reviewer`, `reviewed_at`, and `reason`:
-
-- `EXCLUDE_KEY` keeps the key out of aggregation.
-- `KEEP_RECORD` retains only the record whose fingerprint is in `selected_record_fingerprint`
-  (one of the listed `record_fingerprints`; use the resolution log to find it in the sheet).
-
-A decision is identified by content, not by sheet rows (fingerprint format `content-v1`, a hash of
-each record's exact raw cell text), so re-sorting `raw` does not invalidate it. It applies only
-while the key's conflicting records are exactly the reviewed ones: if a reviewed record's values
-change, or a record is added or removed, the decision is invalidated even when the selected
-record still exists, and the key is quarantined again for re-review. Model identity conflicts
-cannot be overridden this way. `migrate_duplicate_decisions.py` converts the retired row-number
-layout (preview by default; `--write` backs up first) and migrates only decisions whose reviewed
-records and winner can be established.
-
-**Standing owner rule (2026-11-03): keep the latest sheet row.** A conflict on one date with
-differing values and no valid decision is resolved by keeping the record on the highest current
-sheet row: `python apply_latest_row_decisions.py` (preview) or `--write` (backs up the decisions
-file first). It never handles model-identity conflicts or keys with several conflict dates; those
-stay quarantined. See the
-[decision](docs/DECISIONS.md#standing-rule-for-conflicting-duplicates-keep-the-latest-sheet-row-owner-decision-2026-11-03).
-
-Generated local CSV and JSON outputs live under `data/output/` and are intentionally ignored
-by Git. If intentionally processing an older snapshot, set `SKIP_FRESHNESS_CHECK=true`.
-
-Do not run `--write-sheets` against the production spreadsheet during setup or verification.
-The latest live dry run took 57.49 seconds and did not write to any Google Sheets output tab.
-
-## Documentation
-
-- [Product requirements](docs/PRD.md)
-- [Architecture](docs/ARCHITECTURE.md)
-- [Implementation phases](docs/IMPLEMENTATION_PHASES.md)
-- [Progress log](docs/PROGRESS_LOG.md)
-- [Decision log](docs/DECISIONS.md)
-- [Setup and operations](docs/SETUP_AND_OPERATIONS.md)
-- [TARGET_MASTER schema (approved)](docs/TARGET_MASTER_SCHEMA.md)
-- [Shared scraping framework (Phase 6)](docs/SCRAPING_FRAMEWORK.md)
-- [Retailer data-use review](docs/RETAILER_DATA_USE_REVIEW.md)
-- [Laptop Factory adapter (Phase 7)](docs/adapters/LAPTOP_FACTORY.md)
-- [DataBlitz adapter (Phase 7)](docs/adapters/DATABLITZ.md)
-- [PC Express adapter (Phase 7)](docs/adapters/PCX.md)
-- [PC Central adapter (Phase 7)](docs/adapters/PCC.md)
-- [Octagon adapter (Phase 7)](docs/adapters/OCT.md)
-- [Exact offer matching (Phase 8)](docs/MATCHING.md)
-- [Sheet migration for tracking modes](docs/SHEET_MIGRATION_TRACKING_MODES.md)
-- [Sheet migration for model/CPU conventions](docs/SHEET_MIGRATION_MODEL_CPU_CONVENTIONS.md)
-- [Price tracking output schema](docs/PRICE_TRACKING_OUTPUT_SCHEMA.md)
-- [Close-alternative comparisons (2026-10-27)](docs/CLOSE_ALTERNATIVES_2026-10-27.md)
-- [Top 100 eligible mapped Shopee variations: selection rule, exclusions and commands (2026-11-03)](docs/MAPPED_TOP_100_2026-11-03.md)
-- [Shopee variation grain: contract, prices, contexts and publisher (2026-10-27)](docs/SHOPEE_VARIATION_GRAIN_2026-10-27.md)
-- [Compact Sheets dashboard: layout, result labels, column groups, TRACKER_GUIDE (2026-11-05)](docs/SHEETS_DASHBOARD_2026-11-05.md)
-- [Phase 10 pilot runbook](docs/PHASE_10_PILOT.md)
-
-## Local verification
+Validate the installation without any credentials or network access:
 
 ```bash
 python -m pytest -q
 python -m ruff check .
-python -m compileall src audit_alternatives.py compare_alternative_replay.py run_phase1.py smoke_test.py check_target_master.py check_target_tables.py seed_match_review.py match_offers.py audit_top_100_coverage.py propose_catalog_conventions.py build_verified_top_100.py audit_verified_top_100.py track_prices.py collect_and_match.py publish_prices.py replay_extraction.py discover_candidates.py discover_products.py discover_catalog_leads.py diagnose_blank_cells.py measure_discovery.py
-python smoke_test.py
-python run_phase1.py --dry-run
 ```
 
-The final two commands need the live configuration above. Writing Sheets is never part of the
-verification sequence; run `python run_phase1.py --write-sheets` only after reviewing the local
-outputs.
+`pytest` should pass completely. `ruff` currently reports 13 pre-existing style findings
+(line length and import order) in `src/laptop_tracker/catalog_proposals.py`,
+`src/laptop_tracker/page_cache.py`, `collect_and_match.py` and a few tests; none affect behaviour.
 
-### Current price comparison policy (2026-10-19)
+With credentials configured, `python smoke_test.py` reads the `raw` tab with the read-only scope and
+prints the headers it found.
 
-Valid displayed prices are compared for exact configurations whether IN_STOCK or OUT_OF_STOCK.
-Selected sold-out prices are labeled OUT OF STOCK; availability remains in history. Purchase terms
-decide bundles (`--offer-terms-policy purchase-terms/2026-10-19`, the default): an ordinary laptop
-offer with stated inclusions (Office, warranty, backpack) is comparable with an included-items
-note; paid packages, prices that require another purchase, restricted (financing, card, trade-in,
-member) prices and bundle wording without evidence of the terms are excluded with their reason.
-`bundle-flag/2026-10-15` keeps the earlier rule (every checked bundle comparable). Unknown bundle
-status, preorder/unknown availability, missing prices and unresolved matches remain excluded.
-Details: `docs/PRICE_TRACKING_OUTPUT_SCHEMA.md`.
+## Configuration
 
-### Close alternatives (2026-10-27)
+### Environment variables (`.env`)
 
-Intentional policy change: a retailer offer with up to two total established differences across model, screen size, CPU, installed RAM, installed storage and GPU (GPU shares the budget) is shown as a labelled `ALT 1` / `ALT 2` alternative for a target of the same brand and recognized product family. Matching prices, matching minimums, counts, stored matches and product identities are unchanged (`track_prices.py --no-alternatives` reproduces the matching-only report); alternatives have their own minimums, files (`weekly_price_alternatives.csv`) and the `PILOT_PRICE_ALTERNATIVES` tab. Contradictory evidence, missing core values and blocking conflicts are rechecks, never alternatives. Details: `docs/CLOSE_ALTERNATIVES_2026-10-27.md`.
+Loaded by `src/laptop_tracker/config.py`. `.env` is Git-ignored.
+
+| Variable | Required | Purpose |
+|---|---|---|
+| `SPREADSHEET_ID` | for any Sheets access | ID of the tracker spreadsheet. |
+| `GOOGLE_SERVICE_ACCOUNT_FILE` | one of the two credential variables | Path to the service-account JSON key. |
+| `GOOGLE_SERVICE_ACCOUNT_JSON` | one of the two credential variables | The key's JSON content, as an alternative to the file. Takes precedence over the file. |
+| `RAW_TAB_NAME` | optional, default `raw` | Name of the sales tab. |
+| `MAX_VALIDATION_ERRORS` | optional, default `1000` | Cap on validation errors reported per run. |
+| `SKIP_FRESHNESS_CHECK` | optional, default `false` | Set `true` only to deliberately process an older sales snapshot. |
+
+### Files in `config/`
+
+| File | Tracked | Purpose |
+|---|---|---|
+| `eligibility_rules.csv` | yes | Rules deciding which Shopee listings are eligible laptops. |
+| `eligibility_decisions.csv` | no (local) | Manual eligibility overrides. Read from here, not from the sheet copy. |
+| `duplicate_decisions.csv` | no (local) | Recorded decisions for conflicting duplicate sales rows. |
+| `identity_review_register.csv` | no (local) | Owner identity review register used by the Top 100 build. |
+| `product_family_registry.csv`, `product_name_registry.csv` | yes | Product-family and product-name conventions used in extraction and alternatives. |
+| `retailer_evidence_approvals.csv` | yes | Owner-recorded approvals of specific retailer evidence. |
+| `supplied_candidate_urls.csv` | yes | Retailer URLs supplied by the owner as discovery leads. |
+| `shopee_variation_sheet_contract.json` | yes | Tab headers and layout contract for the variation publisher. |
+| `collection_manifest.csv` | no (local) | URL list for `collect_and_match.py`; copy `collection_manifest_template.csv`. |
+| `*_template.csv`, `recovery_*_2026-11-03.csv` | yes | Header templates and a dated recovery scope/leads set (used by tests and docs). |
+
+`.gitignore` keeps credentials, `.env`, local decision files and everything under `data/output/`,
+`data/review/`, `data/history/` and `data/collection/` out of Git.
+
+## Running the pipeline
+
+Each command is labelled by what it can touch:
+
+- **Local**: reads and writes local files only.
+- **Reads Sheets**: network read of the spreadsheet (read-only scope).
+- **Retailer requests**: sends HTTP requests to retailer sites.
+- **Writes Sheets**: modifies the spreadsheet.
+
+### Recommended first-time workflow
+
+1. `python -m pytest -q` (local).
+2. `python smoke_test.py` (reads Sheets) to confirm credentials and the `raw` headers.
+3. `python run_phase1.py --dry-run` (reads Sheets, writes local files under `data/output/`).
+4. `python check_target_tables.py --from-sheets` (reads Sheets, writes validated copies locally).
+5. Read [docs/WEEKLY_WORKFLOW.md](docs/WEEKLY_WORKFLOW.md) and
+   [docs/MAPPED_TOP_100_2026-11-03.md](docs/MAPPED_TOP_100_2026-11-03.md) before the first full run.
+6. Run the weekly driver (below), review its output, and only then consider publishing.
+
+### Sales refresh
+
+```bash
+python run_phase1.py --dry-run          # default; reads Sheets, writes local files
+python run_phase1.py --write-sheets     # WRITES the nine P1_* output tabs
+```
+
+`--write-sheets` replaces only the allowed `P1_*` tabs (see Google Sheets integration) and can never
+write to `raw`. The write scope is requested only when this flag is given. Do not use it for testing.
+
+### Weekly run (stops at the publish preview)
+
+```bash
+setsid nohup bash run_variation_week.sh > /tmp/run_variation_week.out 2>&1 < /dev/null &
+cat "$(cat /tmp/current_weekly_run.txt)/status.json"       # READY_TO_PUBLISH or FAILED_AT_<stage>
+tail -3 "$(cat /tmp/current_weekly_run.txt)/driver.log"
+```
+
+**Reads Sheets, retailer requests, local writes. It does not write Sheets.** A full run takes
+roughly 25 to 50 minutes with a warm cache and over three hours cold. Run folders are created under
+`data/output/weekly_runs/<UTC timestamp>/`; the driver also writes `stages.jsonl` (per-stage exit
+codes) and one log per stage there.
+
+Optional environment variables for the driver (documented at the top of the script):
+
+| Variable | Effect |
+|---|---|
+| `SEARCH_CACHE` | Earlier discovery folder whose saved responses are replayed instead of re-requested. Default: the newest other run that has its index files. `SEARCH_CACHE=none` sends every request. |
+| `CACHE_HOURS` | Replay only responses retrieved within this many hours (default 24). |
+| `PREV_RUN` | Earlier run folder whose catalog is diffed in the selection audit. The script has a hard-coded default (`data/output/weekly_runs/20261103T062304Z`); set this to the previous run. |
+
+To stop a run: `pkill -f run_variation_week.sh; pkill -f "discover_products.py --live"`, then check
+`pgrep -fa discover_products`. Avoid aborting and restarting repeatedly; it tends to trigger
+retailer 429 responses.
+
+### Individual stages
+
+| Command | Touches |
+|---|---|
+| `python check_target_tables.py --from-sheets --output-dir DIR` | Reads Sheets; local writes |
+| `python check_target_tables.py --target-master tm.csv --source-model-map map.csv --match-review review.csv` | Local |
+| `python build_top_shopee_variations.py --help` (see the driver for the full argument set) | Local |
+| `python discover_products.py --preview ...` | Local (plans; no requests) |
+| `python discover_products.py --live --collect ...` | Retailer requests; local writes; updates the SQLite store |
+| `python discover_products.py --live --replay-only --search-cache DIR ...` | Local (sends no request; uses saved responses only) |
+| `python discover_catalog_leads.py --preview ...` / `--live ...` | Local / retailer requests (robots.txt and sitemaps) |
+| `python collect_and_match.py --preview --manifest config/collection_manifest.csv` | Local |
+| `python collect_and_match.py --live --manifest config/collection_manifest.csv` | Retailer requests; updates the SQLite store |
+| `python track_prices.py --store ... --week-start YYYY-MM-DD --as-of ISO8601 ...` | Local (never contacts Sheets or retailers) |
+| `python build_variation_reports.py ...`, `audit_alternatives.py ...`, `build_publication_diagnostics.py ...` | Local |
+| `python publish_variation_prices.py --preview ...` | Reads Sheets; local writes (plan only) |
+
+The exact argument sets used each week are in [run_variation_week.sh](run_variation_week.sh);
+copy them rather than composing arguments from memory.
+
+### Publishing to Google Sheets
+
+Publication is a separate, deliberate step after `READY_TO_PUBLISH`. Review `shopee_variations/selection_audit.md`,
+`variation_audit.log` and `publish_preview.log` in the run folder, then:
+
+```bash
+source .venv/bin/activate
+W="$(cat /tmp/current_weekly_run.txt)"
+python publish_variation_prices.py --write-sheets --variation-dir "$W/shopee_variations" \
+  --reports-dir "$W/variation_reports" --context-report-dir "$W/context_reports" \
+  --collection-dir "$W/discovery/collection" --output-root "$W/publications"
+# rollback: python publish_variation_prices.py --rollback <publication folder>
+```
+
+**Writes Sheets.** Safeguards: every input is validated before any Sheets access; only the prepared
+publisher tabs are written (a missing tab or one with a foreign header is refused); each tab is
+snapshotted locally first; every cell is verified by readback; `--rollback` restores the snapshot.
+Details: [docs/SHEETS_DASHBOARD_2026-11-05.md](docs/SHEETS_DASHBOARD_2026-11-05.md).
+
+### Other maintenance commands
+
+| Command | Touches |
+|---|---|
+| `python apply_latest_row_decisions.py` (preview) / `--write` | Local; `--write` backs up then rewrites `config/duplicate_decisions.csv` |
+| `python migrate_duplicate_decisions.py` (preview) / `--write` | Reads Sheets; `--write` backs up first |
+| `python replay_extraction.py ...`, `compare_alternative_replay.py ...`, `measure_discovery.py ...` | Local |
+| `python build_before_after_report.py ...` | Local (compares two runs' artifacts) |
+
+## Google Sheets integration
+
+One spreadsheet (`SPREADSHEET_ID`) holds both the inputs and the dashboard outputs.
+
+**Inputs (read by the pipeline, edited by people):**
+
+| Tab | Content |
+|---|---|
+| `raw` | Imported Shopee sales data. Read-only for this project; never written. |
+| `TARGET_MASTER` | Approved laptop configurations with stable `target_id`s. Validated, never auto-extended. |
+| `SOURCE_MODEL_MAP` | Approved links from Shopee variations (`source_model_id`) to targets. |
+| `MATCH_REVIEW` | Catalog candidates, missing specs and review history. |
+| `TRACKER_GUIDE` | Owner-maintained guide. The publisher only updates the text of rows it owns, keyed by the label in column A. |
+
+**Outputs of `publish_variation_prices.py` (replaced on each publication):**
+
+| Tab | Content |
+|---|---|
+| `TOP_100_SHOPEE_VARIATIONS` | The selected Top 100 eligible mapped Shopee variations. |
+| `PILOT_PRICE_COMPARISON` | Main dashboard: Shopee snapshot price against each retailer's price and result label (`MATCH`, `ALT 1`, `ALT 2`, `RECHECK ...`), plus collapsed detail column groups. |
+| `PILOT_PRICE_OVERVIEW` | Compact numeric overview of the same prices. |
+| `PILOT_PRICE_ALTERNATIVES` | The close-alternative offers. |
+| `PILOT_PRICE_HISTORY` | Dated observations. |
+| `PILOT_PRICE_REVIEW` | Retailer matching problems and exclusions. |
+| `PILOT_PRICE_RUN_LOG` | One row per publication (appended, not replaced). |
+
+**Outputs of `run_phase1.py --write-sheets`:** `P1_TOP_100_TARGETS`, `P1_ELIGIBLE_RANKING`,
+`P1_EXCLUDED_LISTINGS`, `P1_ELIGIBILITY_REVIEW`, `P1_ELIGIBILITY_DECISIONS`,
+`P1_CONFLICTING_DUPLICATES`, `P1_VALIDATION_ERRORS`, `P1_PERIOD_SUMMARY`, `P1_RUN_LOG`. Not part of the
+weekly driver.
+
+Retired tabs `PILOT_PRICE_SUMMARY` and `P1_TOP_100_CONFIGURATIONS` are never recreated or written.
+
+How inputs shape the dashboard: a Shopee variation is selected only if `SOURCE_MODEL_MAP` links it to
+exactly one active, complete, non-`LISTING_ONLY` target in `TARGET_MASTER` with no open conflict; the
+target's five identity fields then decide which retailer offers count as a `MATCH`. Fix the mapping or
+target in the sheet and rerun the stage; do not edit published tabs. Schemas:
+[docs/TARGET_MASTER_SCHEMA.md](docs/TARGET_MASTER_SCHEMA.md),
+[docs/PRICE_TRACKING_OUTPUT_SCHEMA.md](docs/PRICE_TRACKING_OUTPUT_SCHEMA.md).
+
+## Automation and scheduling
+
+There is **no GitHub Actions workflow** (no `.github/` directory) and no scheduler in this repository.
+A weekly run is started by hand with `run_variation_week.sh`, in the environment that holds the
+`.env` and the persistent `data/history/` store. Publication is always a separate manual command.
+To see how a run went, read `status.json`, `driver.log` and `stages.jsonl` in its run folder; a stage
+that exits with an unaccepted code stops the driver and records `FAILED_AT_<stage>` (the discovery
+stage accepts exit code 2, partial success).
+
+## Testing and validation
+
+```bash
+python -m pytest -q                # whole suite, offline, uses fixtures in tests/scraping_fixtures/
+python -m pytest -q tests/test_pcx.py   # one module
+python -m ruff check .
+```
+
+The tests use saved fixtures and fakes: no credentials, retailer requests or Sheets access. Commands
+that need credentials are `smoke_test.py`, `run_phase1.py`, `check_target_tables.py --from-sheets`,
+`publish_variation_prices.py` and `migrate_duplicate_decisions.py`. To avoid unintended publication:
+never pass `--write-sheets` while testing, use a separate test spreadsheet (`SPREADSHEET_ID`) if you
+need to exercise the writer, and use `--preview` first. Verify run outputs with the audit scripts
+(`audit_top_shopee_variations.py`, `audit_variation_selection.py`, `audit_alternatives.py`).
+
+## Troubleshooting
+
+| Symptom | What to do |
+|---|---|
+| Retailer returns HTTP 429 | The rate limiter persists cooldowns in `data/history/retailer_rate_limits.json`, so a restart does not skip the wait. Work whose wait cannot be afforded is recorded as deferred, not dropped. Let the cooldown pass and rerun with the replay cache. |
+| Stopped discovery run cannot be replayed | Index files (`search_requests.csv`, `product_inspections.csv`) are written at the end of a round; a run stopped early leaves unindexed `evidence/`. Rerun; completed earlier runs are used automatically. |
+| Cache not reused | Responses older than `CACHE_HOURS` (default 24) are ignored; raise it, or point `SEARCH_CACHE` at the right folder. |
+| Discovery finds no listing for a target | Inspect `search_requests.csv` and `candidates.csv` in the run's `discovery/` folder, and `diagnose_blank_cells.py` for the stage each cell reached. A lead can be supplied in `config/supplied_candidate_urls.csv`. |
+| Retailer cell blank or `RECHECK` | The result label and `PILOT_PRICE_REVIEW` give the reason (specs incomplete, variant ambiguous, price restricted, out of stock). A promising title never authorises a match; fix catalog data or approve evidence explicitly. |
+| Variation not selected | Check `mapping_exclusions.csv` in `shopee_variations/`: unmapped, inactive, `LISTING_ONLY` or conflicting targets are excluded. |
+| `SPREADSHEET_ID is required` / credentials errors | Set `SPREADSHEET_ID` and `GOOGLE_SERVICE_ACCOUNT_FILE` (or `_JSON`) in `.env`; the file must exist and the spreadsheet must be shared with the service account. |
+| Sales stage fails: stale month | Check the upstream import. Use `SKIP_FRESHNESS_CHECK=true` only to process an old snapshot on purpose. |
+| Sales stage fails: conflicting duplicates | Review `data/output/duplicate_review.csv`; run `apply_latest_row_decisions.py` or record a decision in `config/duplicate_decisions.csv`. Model-identity conflicts cannot be overridden. |
+| Publish reports a failure after a Sheets quota error | A read-quota 429 during readback was once reported as a failure although the write completed. Check `publication_report.json` and the newest `PILOT_PRICE_RUN_LOG` row before rerunning. |
+| Run takes hours | The discovery stage dominates; a cold cache run exceeds three hours. Use the replay cache, and do not abort and restart. |
+
+## Maintenance notes
+
+- **Targets and mappings.** Edit `TARGET_MASTER`, `SOURCE_MODEL_MAP` and `MATCH_REVIEW` in the sheet,
+  then validate with `python check_target_tables.py --from-sheets`. The pipeline never promotes review
+  rows. `build_catalog_correction_queue.py` produces an owner review queue of suspicious bindings
+  (read-only).
+- **Unmatched products.** Review `PILOT_PRICE_REVIEW` and each run's `catalog_corrections/` and
+  `diagnostics/` folders.
+- **Adding a retailer.** Use an existing adapter (for example `src/laptop_tracker/adapters/pcx.py`) and
+  [docs/SCRAPING_FRAMEWORK.md](docs/SCRAPING_FRAMEWORK.md) as the template, add offline fixtures and
+  tests, and add a `docs/adapters/` page. Retailer IDs are used in several modules (for example
+  `rate_limit.py`, `price_tracking.py`, `extraction.py`, `cell_diagnostics.py`); search `src/` for an
+  existing ID such as `oct` to find every integration point. Note the data-use findings in
+  [docs/RETAILER_DATA_USE_REVIEW.md](docs/RETAILER_DATA_USE_REVIEW.md).
+- **Dependencies.** Edit `pyproject.toml` and `requirements.txt` together, then run the full test suite.
+- **Before publishing.** Run `python -m pytest -q`, review the audits and publish preview for the run.
+- **Unexpected report changes.** Use `build_before_after_report.py` to compare two runs' own artifacts,
+  and `audit_variation_selection.py` for selection and catalog differences.
+- **Persistent state.** Back up `data/history/price_history.sqlite3` and `config/*decisions.csv`
+  before risky operations; they are not in Git.
+
+## Documentation
+
+Start here:
+
+- [Weekly workflow, dataflow and commands](docs/WEEKLY_WORKFLOW.md)
+- [Setup and operations](docs/SETUP_AND_OPERATIONS.md)
+- [Top 100 eligible mapped variations and the next-run commands](docs/MAPPED_TOP_100_2026-11-03.md)
+- [Compact Sheets dashboard](docs/SHEETS_DASHBOARD_2026-11-05.md)
+- [Shopee variation grain](docs/SHOPEE_VARIATION_GRAIN_2026-10-27.md)
+
+Reference:
+
+- [Architecture](docs/ARCHITECTURE.md), [TARGET_MASTER schema](docs/TARGET_MASTER_SCHEMA.md),
+  [Exact matching](docs/MATCHING.md), [Price tracking output schema](docs/PRICE_TRACKING_OUTPUT_SCHEMA.md),
+  [Scraping framework](docs/SCRAPING_FRAMEWORK.md), [Cached catalog search](docs/CATALOG_INDEX.md)
+- Retailer adapters: [DataBlitz](docs/adapters/DATABLITZ.md), [Laptop Factory](docs/adapters/LAPTOP_FACTORY.md),
+  [PC Express](docs/adapters/PCX.md), [PC Central](docs/adapters/PCC.md), [Octagon](docs/adapters/OCT.md);
+  [retailer data-use review](docs/RETAILER_DATA_USE_REVIEW.md)
+- Policies: [Close alternatives](docs/CLOSE_ALTERNATIVES_2026-10-27.md), [Decision log](docs/DECISIONS.md)
+- Sheet migrations: [tracking modes](docs/SHEET_MIGRATION_TRACKING_MODES.md),
+  [model/CPU conventions](docs/SHEET_MIGRATION_MODEL_CPU_CONVENTIONS.md)
+- Dated change notes: [discovery 2026-10-22](docs/DISCOVERY_IMPROVEMENTS_2026-10-22.md),
+  [discovery 2026-11-03](docs/DISCOVERY_IMPROVEMENTS_2026-11-03.md),
+  [extraction fixes](docs/EXTRACTION_FIXES_2026-11-03.md),
+  [catalog bindings and diagnostics](docs/CATALOG_BINDINGS_AND_DIAGNOSTICS_2026-11-03.md)
+
+Project history (written during development; some statements describe past states):
+[PRD](docs/PRD.md), [implementation phases](docs/IMPLEMENTATION_PHASES.md),
+[progress log](docs/PROGRESS_LOG.md), [Phase 10 pilot runbook](docs/PHASE_10_PILOT.md).
+`run_phase1.py` keeps its historical name; it is the sales-refresh step.
