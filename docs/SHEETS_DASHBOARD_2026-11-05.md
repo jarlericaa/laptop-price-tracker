@@ -209,10 +209,10 @@ the guide plan and the layout version). Publishing is the existing explicit step
 ```bash
 cd /home/phsp8184/laptop-price-tracker && source .venv/bin/activate
 W="$(cat /tmp/current_weekly_run.txt)"
-python publish_variation_prices.py --write-sheets --variation-dir "$W/shopee_variations" \
+python scripts/publish_variation_prices.py --write-sheets --variation-dir "$W/shopee_variations" \
   --reports-dir "$W/variation_reports" --context-report-dir "$W/context_reports" \
   --collection-dir "$W/discovery/collection" --output-root "$W/publications"
-# rollback if needed: python publish_variation_prices.py --rollback <publication folder>
+# rollback if needed: python scripts/publish_variation_prices.py --rollback <publication folder>
 ```
 
 The first write replaces the 80-column live tabs with the compact layout, removes the old rules, adds the

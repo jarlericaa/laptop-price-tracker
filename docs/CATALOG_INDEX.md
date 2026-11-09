@@ -84,7 +84,7 @@ From `/home/profile2/projects/laptop-price-tracker`, use a saved original live c
 run. This searches locally and fetches no pages:
 
 ```sh
-.venv/bin/python search_catalog_index.py \
+.venv/bin/python scripts/search_catalog_index.py \
   --cases tests/scraping_fixtures/discovery_benchmark/web_cases_v1.csv \
   --index-run data/output/catalog_index_20261025 \
   --output data/output/catalog_index_offline
@@ -95,7 +95,7 @@ Add `--live` to fetch candidate pages. The defaults are two queries per case, at
 explicitly for larger batches:
 
 ```sh
-.venv/bin/python search_catalog_index.py --live \
+.venv/bin/python scripts/search_catalog_index.py --live \
   --cases tests/scraping_fixtures/discovery_benchmark/web_cases_v1.csv \
   --index-run data/output/catalog_index_20261025 \
   --max-queries 1 --max-pages-per-case 2 \
@@ -134,7 +134,7 @@ To refresh all advertised sitemaps and the optional Laptop Factory feed, increas
 the collector's explicit limits for your chosen scope, for example:
 
 ```sh
-.venv/bin/python discover_catalog_leads.py --live \
+.venv/bin/python scripts/discover_catalog_leads.py --live \
   --target-master data/output/current/target_master_validated.csv \
   --scope-file data/output/current/pilot_scope.csv \
   --max-total-requests 90 --max-sitemaps-per-retailer 40 \
@@ -171,7 +171,7 @@ with open('data/output/catalog_index_scope.csv', 'w', newline='') as f:
     writer.writerows({'target_id': c['case_id'], 'brand': c['brand'], 'model': c['model']}
                      for c in cases)
 PY
-.venv/bin/python discover_catalog_leads.py --live \
+.venv/bin/python scripts/discover_catalog_leads.py --live \
   --target-master data/output/catalog_index_scope.csv \
   --targets W01,W02,W03,W04,W05,W06,W07,W08,W09,W10 \
   --max-total-requests 35 --max-sitemaps-per-retailer 5 \
@@ -188,7 +188,7 @@ Give native search every planned query tier, up to seven per case, first page ea
 and measure cached-query performance:
 
 ```sh
-.venv/bin/python benchmark_catalog_index.py --live \
+.venv/bin/python scripts/benchmark_catalog_index.py --live \
   --run data/output/catalog_index_search \
   --output data/output/catalog_index_comparison
 ```
@@ -209,7 +209,7 @@ verification fetches; a found-and-fetched link is not an accepted configuration.
 Replay saved search/page evidence without requests:
 
 ```sh
-.venv/bin/python search_catalog_index.py \
+.venv/bin/python scripts/search_catalog_index.py \
   --replay data/output/catalog_index_comparison \
   --output data/output/catalog_index_replay
 ```

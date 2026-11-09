@@ -178,7 +178,7 @@ Promotion and mapping are spreadsheet/manual operations, and they deliberately r
 The initial candidate universe is the full accepted Phase 4 Top 100. Seed a local candidate file with:
 
 ```bash
-python seed_match_review.py
+python scripts/seed_match_review.py
 ```
 
 - Reads `data/output/top_100_targets.csv` (override with `--top-100`) and writes `data/review/match_review_candidates.csv` (override with `--output`). Both paths are ignored by Git.
@@ -237,8 +237,8 @@ Synchronized with the 2026-10-05 policy on 2026-10-06 and with the tracking-mode
 The master spreadsheet is authoritative. Export local CSV snapshots and run either command:
 
 ```bash
-python check_target_master.py data/review/target_master_export.csv
-python check_target_tables.py \
+python scripts/check_target_master.py data/review/target_master_export.csv
+python scripts/check_target_tables.py \
   --target-master data/review/target_master_export.csv \
   --source-model-map data/review/source_model_map_export.csv \
   --match-review data/review/match_review_export.csv
@@ -251,7 +251,7 @@ The console prints table names, counts, and error codes, not row values. The err
 ## Read-only Google Sheets path
 
 ```bash
-python check_target_tables.py --from-sheets
+python scripts/check_target_tables.py --from-sheets
 ```
 
 This reads the `TARGET_MASTER`, `SOURCE_MODEL_MAP`, and `MATCH_REVIEW` tabs from the configured spreadsheet using the existing `.env` settings, service-account credentials, and the read-only `spreadsheets.readonly` scope. It calls only `get_all_values()` and runs the same validators and local reports as the CSV path. It never requests the write scope and never writes, clears, or creates tabs. A missing tab is reported with its template path and the check fails. The spreadsheet title and cell values are not printed.
@@ -264,11 +264,11 @@ This reads the `TARGET_MASTER`, `SOURCE_MODEL_MAP`, and `MATCH_REVIEW` tabs from
 
 ```bash
 # Read-only from the authoritative sheet tab (TARGET_MASTER only; never raw, never writes):
-python match_offers.py --target-master-from-sheets --observations offer_observations.csv
+python scripts/match_offers.py --target-master-from-sheets --observations offer_observations.csv
 
 # From a local snapshot: a sheet export or the validated copy written by check_target_tables.py
-python check_target_tables.py --from-sheets
-python match_offers.py --target-master data/output/target_master_validated.csv \
+python scripts/check_target_tables.py --from-sheets
+python scripts/match_offers.py --target-master data/output/target_master_validated.csv \
   --observations offer_observations.csv
 ```
 
@@ -277,11 +277,11 @@ Both paths validate `TARGET_MASTER` with `validate_target_master` again. If any 
 ## Top 100 coverage audit
 
 ```bash
-python audit_top_100_coverage.py \
+python scripts/audit_top_100_coverage.py \
   --target-master data/output/target_master_validated.csv \
   --source-model-map data/output/source_model_map_validated.csv \
   --match-review data/output/match_review_validated.csv
-python audit_top_100_coverage.py --from-sheets   # the three target tabs, read-only scope
+python scripts/audit_top_100_coverage.py --from-sheets   # the three target tabs, read-only scope
 ```
 
 - The candidate source is the accepted Phase 4 Top 100 CSV (`--top-100`, default `data/output/top_100_targets.csv`). It needs the same columns as the seeding command, and every `model_id` must be digits. It never reads `raw` or `P1_TOP_100_TARGETS`; that tab is empty and is not the source of truth.

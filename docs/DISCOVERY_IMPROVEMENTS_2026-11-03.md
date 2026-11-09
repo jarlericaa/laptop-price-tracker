@@ -184,7 +184,7 @@ jobs; the other 12 pairs (for example TGT-000293 at PC Express) only add cached 
 
 ```bash
 R=data/output/weekly_runs/20261103T062304Z
-python discover_products.py --live --collect \
+python scripts/discover_products.py --live --collect \
   --scope-file config/recovery_scope_2026-11-03.csv --retailers pcc,pcx,datablitz \
   --target-master $R/inputs/target_master_validated.csv \
   --selected-list $R/shopee_variations/context_selected_list.csv \

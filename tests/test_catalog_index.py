@@ -264,7 +264,8 @@ def test_target_with_an_unusable_name_is_reported_and_other_targets_still_search
 
 def cli():
     spec = importlib.util.spec_from_file_location(
-        "search_catalog_index_test", Path(__file__).parents[1] / "search_catalog_index.py")
+        "search_catalog_index_test",
+        Path(__file__).parents[1] / "scripts" / "search_catalog_index.py")
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
@@ -330,7 +331,7 @@ def test_cli_runs_from_a_fresh_checkout_without_an_editable_install(tmp_path):
     cases = tmp_path / "cases.csv"
     cases.write_text("case_id,retailer_id,model\nC1,pcx,FA607NUQ-RL011W\n")
     process = subprocess.run([
-        sys.executable, str(Path(__file__).parents[1] / "search_catalog_index.py"),
+        sys.executable, str(Path(__file__).parents[1] / "scripts" / "search_catalog_index.py"),
         "--cases", str(cases), "--index-run", str(folder), "--output", str(tmp_path / "search"),
     ], cwd=tmp_path, capture_output=True, text=True, timeout=15)
     assert process.returncode == 0, process.stderr
@@ -359,7 +360,8 @@ def test_live_fetch_round_trip_keeps_unconfirmed_configurations(tmp_path, monkey
 
 def test_expanded_benchmark_predeclares_bounded_native_queries_without_network(tmp_path):
     spec = importlib.util.spec_from_file_location(
-        "benchmark_catalog_index_test", Path(__file__).parents[1] / "benchmark_catalog_index.py")
+        "benchmark_catalog_index_test",
+        Path(__file__).parents[1] / "scripts" / "benchmark_catalog_index.py")
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     source = tmp_path / "source"
@@ -375,7 +377,8 @@ def test_expanded_benchmark_predeclares_bounded_native_queries_without_network(t
 
 def test_benchmark_reuses_only_identical_native_cohort_and_query_words(tmp_path):
     spec = importlib.util.spec_from_file_location(
-        "benchmark_index_reuse", Path(__file__).parents[1] / "benchmark_catalog_index.py")
+        "benchmark_index_reuse",
+        Path(__file__).parents[1] / "scripts" / "benchmark_catalog_index.py")
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     catalog = index_snapshot(tmp_path)

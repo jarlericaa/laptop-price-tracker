@@ -1,0 +1,696 @@
+#!/usr/bin/env python3
+"""Offline Phase 9: store saved observations, match them, and write weekly comparisons/history."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import sqlite3
+import sys
+from collections import Counter
+from datetime import UTC, datetime
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+
+from laptop_tracker.alternatives import MAX_DIFFERENCES, AlternativeEvaluator
+from laptop_tracker.alternatives import POLICY_VERSION as ALTERNATIVE_POLICY
+from laptop_tracker.listed_spec import ListedSpecMatcher
+from laptop_tracker.match_run import (
+    ObservationFileError,
+    TargetSnapshotError,
+    matcher_from_validated,
+    read_observations_csv,
+)
+from laptop_tracker.observation_store import (
+    ObservationConflictError,
+    ObservationStore,
+    ObservationStoreError,
+)
+from laptop_tracker.offer_terms import (
+    BUNDLE_FLAG_POLICY,
+    DEFAULT_OFFER_TERMS_POLICY,
+    OFFER_TERMS_POLICIES,
+)
+from laptop_tracker.pilot_coverage import (
+    COVERAGE_PRIORITY,
+    collection_lineage,
+    discovery_started_at,
+    load_discovery_logs,
+    search_stage_outcomes,
+)
+from laptop_tracker.price_tracking import (
+    ALTERNATIVE_COLUMNS,
+    COMPARISON_COLUMNS,
+    EVALUATION_COLUMNS,
+    HISTORY_COLUMNS,
+    MATCHING_RULES_VERSION,
+    REPORTING_CURRENCY,
+    REPORTING_TIMEZONE,
+    RETAILERS,
+    REVIEW_COLUMNS,
+    SEARCH_STAGE_STATUSES,
+    SELECTION_COLUMNS,
+    SERIES_COLUMNS,
+    SOURCE_LEDGER_COLUMNS,
+    TIE_BREAK,
+    PriceTrackingInputError,
+    build_price_tracking,
+    build_source_ledger,
+    match_stored_observations,
+    matching_context,
+    parse_as_of,
+    parse_week_start,
+    utc_text,
+    validate_selected_list,
+)
+from laptop_tracker.recheck import RECHECK_COLUMNS, RecheckCandidate, discovery_rechecks
+from laptop_tracker.shopee_snapshot import (
+    NO_MAPPED_SOURCE,
+    ShopeeSelection,
+    select_shopee_prices,
+    selection_row,
+)
+from laptop_tracker.shopee_snapshot import SELECTION_COLUMNS as SHOPEE_SELECTION_COLUMNS
+from laptop_tracker.shopee_snapshot import SELECTION_RULE as SHOPEE_SELECTION_RULE
+from laptop_tracker.supporting_tables import validate_match_review, validate_source_model_map
+from laptop_tracker.target_master import (
+    TargetMasterSchemaError,
+    read_table_snapshot_csv,
+    validate_target_master,
+)
+from laptop_tracker.verified_top import (
+    CONFIGURATION_COLUMNS,
+    LEDGER_COLUMNS,
+    VerifiedRankingInputError,
+    read_csv_rows,
+    sha256_file,
+    write_csv,
+)
+
+ROOT = Path(__file__).resolve().parents[1]
+OUTPUT = ROOT / "data" / "output"
+DEFAULT_STORE = ROOT / "data" / "history" / "price_history.sqlite3"
+SALES_RANKING_COLUMNS = (
+    "model_id",
+    "run_id",
+    "extract_date",
+    "m_minus_1_gmv_usd",
+    "mtd_gmv_usd",
+    "ranking_gmv_usd",
+    "shopee_current_price_php",
+    "price_status",
+)
+OUTPUT_FILES = {
+    "comparison": "weekly_price_comparison.csv",
+    "selections": "weekly_price_selections.csv",
+    "series": "weekly_price_series.csv",
+    "history": "price_history.csv",
+    "review": "price_review_queue.csv",
+    "ledger": "configuration_source_ledger.csv",
+    "rechecks": "recheck_candidates.csv",
+    "shopee": "shopee_price_selection.csv",
+    # Close alternatives (2026-10-27): qualifying associations and every evaluation (audit).
+    "alternatives": "weekly_price_alternatives.csv",
+    "evaluations": "alternative_evaluations.csv",
+    "summary": "price_tracking_run_summary.json",
+}
+
+
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description=(
+            "Offline Phase 9. Import saved OfferObservation CSVs into the local SQLite history "
+            "store (duplicates are skipped; contradictions refuse the batch), match every stored "
+            "observation against the validated TARGET_MASTER snapshot, and write a weekly "
+            "comparison for the selected configurations, retailer price selections, a weekly "
+            "price series, per-observation price history, a review queue, a configuration-to-"
+            "source ledger, and a run summary. Dates are explicit. Prints counts only. Makes no "
+            "retailer requests, never reads raw or Google Sheets, and never writes Sheets, "
+            "targets, or mappings."
+        )
+    )
+    parser.add_argument(
+        "--observations",
+        type=Path,
+        action="append",
+        default=[],
+        help="Saved observation CSV to import first (repeatable; optional).",
+    )
+    parser.add_argument("--store", type=Path, default=DEFAULT_STORE, help="SQLite history store.")
+    parser.add_argument(
+        "--target-master", type=Path, default=OUTPUT / "target_master_validated.csv"
+    )
+    parser.add_argument(
+        "--source-model-map", type=Path, default=OUTPUT / "source_model_map_validated.csv"
+    )
+    parser.add_argument("--match-review", type=Path, default=OUTPUT / "match_review_validated.csv")
+    parser.add_argument(
+        "--selected-list",
+        type=Path,
+        default=OUTPUT / "verified_top_100" / "top_100_verified_configurations.csv",
+    )
+    parser.add_argument(
+        "--contributions",
+        type=Path,
+        default=OUTPUT / "verified_top_100" / "verified_configuration_contributions.csv",
+    )
+    parser.add_argument(
+        "--sales-ranking",
+        type=Path,
+        default=OUTPUT / "eligible_model_ranking.csv",
+        help="Phase 4 eligible ranking for the Shopee snapshot price per source (optional).",
+    )
+    parser.add_argument(
+        "--no-sales-ranking", action="store_true", help="Do not read the sales ranking."
+    )
+    parser.add_argument(
+        "--week-start", required=True, help="Monday of the report week, YYYY-MM-DD."
+    )
+    parser.add_argument(
+        "--as-of",
+        required=True,
+        help="Explicit cut-off time with a UTC offset, e.g. 2026-10-12T09:00:00+08:00.",
+    )
+    parser.add_argument(
+        "--history-start",
+        help="Monday of the first history week (default: the first week with observations).",
+    )
+    parser.add_argument(
+        "--offer-terms-policy",
+        choices=OFFER_TERMS_POLICIES,
+        default=DEFAULT_OFFER_TERMS_POLICY,
+        help=(
+            "Commercial-terms rule for price eligibility (default: the purchase-terms policy of "
+            f"2026-10-19; '{BUNDLE_FLAG_POLICY}' keeps every checked bundle comparable)."
+        ),
+    )
+    parser.add_argument(
+        "--search-context",
+        type=Path,
+        action="append",
+        default=[],
+        help=(
+            "A collection match_results.csv (repeatable). Its expected_target_id links each "
+            "observation to the configuration it was searched for, so a blank price can name the "
+            "unconfirmed candidate. Context only: never an assignment."
+        ),
+    )
+    parser.add_argument(
+        "--discovery-dir",
+        type=Path,
+        action="append",
+        default=[],
+        help=(
+            "A discovery folder of the report week (repeatable; its collection/ inside). Its "
+            "candidate lineage links collected offers to the configurations they were searched "
+            "for, and its recorded search outcomes explain blank cells with no related offer "
+            "(NO_RELEVANT_CANDIDATE, SEARCH_FAILED, FETCH_FAILED, ...). A folder whose discovery "
+            "started outside the report week is refused. Context only: never an assignment."
+        ),
+    )
+    parser.add_argument(
+        "--no-alternatives",
+        action="store_true",
+        help=(
+            "Report matching configurations only (the policy before 2026-10-27): no close "
+            "alternatives are evaluated, shown or counted."
+        ),
+    )
+    parser.add_argument(
+        "--output-dir",
+        type=Path,
+        help="Report directory (default: data/output/price_tracking/week_<week-start>).",
+    )
+    return parser.parse_args(argv)
+
+
+def read_search_context(paths: list[Path]) -> dict[str, list[str]]:
+    """``observation_id -> [expected target IDs]`` from collection match results."""
+    context: dict[str, list[str]] = {}
+    for path in paths:
+        for row in read_csv_rows(path, ("observation_id", "expected_target_id"), "Search context"):
+            if row["observation_id"] and row["expected_target_id"]:
+                context.setdefault(row["observation_id"], []).append(row["expected_target_id"])
+    return context
+
+
+def read_discovery(paths: list[Path], week, catalog_targets=None) -> tuple[
+    dict[str, list[str]], dict[tuple[str, str], tuple[str, str]],
+    dict[tuple[str, str], list[RecheckCandidate]],
+]:
+    """Search context and blank-cell search outcomes from discovery folders of ``week``.
+
+    Returns ``(observation_id -> [configurations], (target_id, retailer_code) -> (status,
+    explanation), (target_id, retailer_code) -> recheck candidates)``. Several folders: the most
+    informative outcome per cell wins. ``catalog_targets`` (target_id -> catalog row) ranks and
+    explains family-name leads by the target's own recorded code and screen.
+    """
+    context: dict[str, list[str]] = {}
+    outcomes: dict[tuple[str, str], tuple[str, str]] = {}
+    rechecks: dict[tuple[str, str], list[RecheckCandidate]] = {}
+    codes = {retailer_id: code for code, retailer_id in RETAILERS}
+    for folder in paths:
+        if not folder.is_dir():
+            raise PriceTrackingInputError(f"Discovery folder not found: {folder}")
+        started_text = discovery_started_at(folder)
+        if not started_text:
+            raise PriceTrackingInputError(f"{folder} records no discovery start time.")
+        started = parse_as_of(started_text)
+        if not week.start_utc <= started < week.end_utc:
+            raise PriceTrackingInputError(
+                f"{folder} was searched {utc_text(started)}, outside the report week; its search "
+                "outcomes cannot explain this week's cells."
+            )
+        logs = load_discovery_logs(folder)
+        results = folder / "collection" / "match_results.csv"
+        if results.is_file():
+            rows = read_csv_rows(results, ("observation_id", "expected_target_id"), "Collection")
+            for observation, targets in collection_lineage(logs, rows).items():
+                known = context.setdefault(observation, [])
+                known += [target for target in targets if target not in known]
+        listed = discovery_rechecks(
+            [row for rows in logs.listed.values() for row in rows],
+            [row for rows in logs.requested.values() for row in rows],
+            logs.report,
+            catalog_targets,
+        )
+        for (target_id, retailer_id), found in listed.items():
+            if codes.get(retailer_id):
+                rechecks.setdefault((target_id, codes[retailer_id]), []).extend(found)
+        for (target_id, retailer_id), (status, text) in search_stage_outcomes(logs).items():
+            key = (target_id, codes.get(retailer_id, ""))
+            if not key[1] or status not in SEARCH_STAGE_STATUSES:
+                continue
+            if key not in outcomes or COVERAGE_PRIORITY.index(status) < COVERAGE_PRIORITY.index(
+                outcomes[key][0]
+            ):
+                outcomes[key] = (status, text)
+    return context, outcomes, rechecks
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = parse_args(argv)
+    run_started = datetime.now(UTC)
+    try:
+        week = parse_week_start(args.week_start)
+        as_of = parse_as_of(args.as_of)
+        history_start = parse_week_start(args.history_start).start if args.history_start else None
+    except PriceTrackingInputError as exc:
+        print(f"Price tracking stopped: {exc}", file=sys.stderr)
+        return 1
+    output_dir = args.output_dir or OUTPUT / "price_tracking" / f"week_{week.start.isoformat()}"
+    output_dir.mkdir(parents=True, exist_ok=True)
+    outputs = {key: output_dir / name for key, name in OUTPUT_FILES.items()}
+    for path in outputs.values():
+        path.unlink(missing_ok=True)  # A failed run never leaves stale reports behind.
+
+    # 1. Validate the catalog, the selected list, and every observation file before any write.
+    try:
+        target_master = validate_target_master(read_table_snapshot_csv(args.target_master))
+        mapping = validate_source_model_map(
+            read_table_snapshot_csv(args.source_model_map), target_master
+        )
+        review = validate_match_review(read_table_snapshot_csv(args.match_review))
+        for name, table in (
+            ("TARGET_MASTER", target_master),
+            ("SOURCE_MODEL_MAP", mapping),
+            ("MATCH_REVIEW", review),
+        ):
+            if not table.is_valid:
+                raise PriceTrackingInputError(
+                    f"{name} did not pass validation; run check_target_tables.py first."
+                )
+        target_master_sha256 = sha256_file(args.target_master)
+        contributions = read_csv_rows(args.contributions, LEDGER_COLUMNS, "Contribution ledger")
+        selected = validate_selected_list(
+            read_csv_rows(args.selected_list, CONFIGURATION_COLUMNS, "Selected list"),
+            contributions,
+            target_master,
+            target_master_sha256=target_master_sha256,
+            list_sha256=sha256_file(args.selected_list),
+        )
+        use_sales = not args.no_sales_ranking and args.sales_ranking.is_file()
+        sales_rows = (
+            read_csv_rows(args.sales_ranking, SALES_RANKING_COLUMNS, "Sales ranking")
+            if use_sales
+            else None
+        )
+        ledger = build_source_ledger(selected, contributions, mapping, sales_rows)
+        # The lowest eligible mapped-listing snapshot price per configuration (2026-10-20);
+        # every listing keeps its row and gains its role in that selection.
+        shopee, ledger = select_shopee_prices(ledger)
+        matcher = matcher_from_validated(target_master)
+        context = matching_context(
+            target_master,
+            target_master_sha256=target_master_sha256,
+            source_label=str(args.target_master),
+        )
+        batches = [
+            (path, read_observations_csv(path), sha256_file(path)) for path in args.observations
+        ]
+        search_context = read_search_context(args.search_context)
+        discovery_context, search_outcomes, discovered_rechecks = read_discovery(
+            args.discovery_dir, week,
+            {item.target_id: item.target for item in selected.configurations})
+        for observation, targets in discovery_context.items():
+            known = search_context.setdefault(observation, [])
+            known += [target for target in targets if target not in known]
+    except (
+        FileNotFoundError,
+        UnicodeDecodeError,
+        KeyError,
+        ValueError,
+        TargetMasterSchemaError,
+        TargetSnapshotError,
+        VerifiedRankingInputError,
+        PriceTrackingInputError,
+        ObservationFileError,
+    ) as exc:
+        print(f"Price tracking stopped before any store write: {exc}", file=sys.stderr)
+        return 1
+
+    # 2. Import (one transaction per file), match under the current context, then report.
+    try:
+        with ObservationStore.open(args.store) as store:
+            before = store.counts()
+            imports = [
+                store.import_observations(
+                    [item.observation for item in observations],
+                    source_label=str(path),
+                    imported_at=run_started,
+                    source_sha256=digest,
+                )
+                for path, observations, digest in batches
+            ]
+            known_contexts = {row["context_id"] for row in store.contexts()}
+            matched_now = match_stored_observations(store, context, matcher, now=run_started)
+            stored = store.observations()
+            matches = store.match_results(context.context_id)
+            after = store.counts()
+            contexts = store.contexts()
+        result = build_price_tracking(
+            stored,
+            matches,
+            selected,
+            context,
+            week=week,
+            as_of=as_of,
+            history_start=history_start,
+            offer_terms_policy=args.offer_terms_policy,
+            search_context=search_context,
+            search_outcomes=search_outcomes,
+            discovery_rechecks=discovered_rechecks,
+            listed_spec=ListedSpecMatcher(target_master.valid_rows),
+            shopee=shopee,
+            alternatives=None if args.no_alternatives else AlternativeEvaluator(
+                [item.target for item in selected.configurations]),
+        )
+    except (
+        ObservationConflictError,
+        ObservationStoreError,
+        PriceTrackingInputError,
+        sqlite3.Error,
+    ) as exc:
+        print(f"Price tracking stopped: {exc}", file=sys.stderr)
+        return 1
+
+    write_csv(outputs["comparison"], COMPARISON_COLUMNS, result.comparison)
+    write_csv(outputs["selections"], SELECTION_COLUMNS, result.selections)
+    write_csv(outputs["series"], SERIES_COLUMNS, result.series)
+    write_csv(outputs["history"], HISTORY_COLUMNS, result.history)
+    write_csv(outputs["review"], REVIEW_COLUMNS, result.review)
+    write_csv(outputs["ledger"], SOURCE_LEDGER_COLUMNS, ledger)
+    sales_fields = {"sales_run_id": selected.sales_run_id,
+                    "sales_extract_date": selected.sales_extract_date,
+                    "sales_period_label": selected.gmv_period_label()}
+    shopee_rows = [
+        selection_row(str(item.rank), shopee.get(item.target_id) or ShopeeSelection(
+            item.target_id, NO_MAPPED_SOURCE), sales_fields)
+        for item in selected.configurations
+    ]
+    write_csv(outputs["shopee"], SHOPEE_SELECTION_COLUMNS, shopee_rows)
+    shopee_counts = Counter(row["shopee_price_status"] for row in shopee_rows)
+    write_csv(outputs["rechecks"], RECHECK_COLUMNS, result.rechecks)
+    write_csv(outputs["alternatives"], ALTERNATIVE_COLUMNS, result.alternatives)
+    write_csv(outputs["evaluations"], EVALUATION_COLUMNS, result.evaluations)
+
+    status = week.status(as_of)
+    inputs = {
+        str(path): sha256_file(path)
+        for path in (
+            args.target_master,
+            args.source_model_map,
+            args.match_review,
+            args.selected_list,
+            args.contributions,
+            *((args.sales_ranking,) if use_sales else ()),
+            *args.observations,
+            *args.search_context,
+            *(
+                path for folder in args.discovery_dir
+                for path in (folder / name for name in (
+                    "search_jobs.csv", "search_requests.csv", "candidates.csv", "manifest.csv",
+                    "collection/match_results.csv", "collection/request_report.csv"))
+                if path.is_file()
+            ),
+        )
+    }
+    summary = {
+        "description": "Offline Phase 9 weekly price comparison and price history.",
+        "run_started_at_utc": utc_text(run_started),
+        "report_week": {
+            "start": week.start.isoformat(),
+            "end_exclusive": week.end.isoformat(),
+            "timezone": REPORTING_TIMEZONE,
+            "start_utc": utc_text(week.start_utc),
+            "end_utc_exclusive": utc_text(week.end_utc),
+            "status": status,
+            "label": (
+                "Historical: the week had ended at as_of; prices are the observations "
+                "retrieved during that week, not current prices."
+                if status == "CLOSED_HISTORICAL"
+                else "In progress: provisional prices from observations so far."
+            ),
+        },
+        "as_of_utc": utc_text(as_of),
+        "history_start": history_start.isoformat() if history_start else "",
+        "policy": {
+            "currency": REPORTING_CURRENCY,
+            "price_basis": "Trusted displayed price (REGULAR or SALE price type); vouchers and "
+            "shipping are not observed and stay unknown.",
+            "comparable": "EXACT match to a selected target, or a listed-spec match to a "
+            "selected broad-family target (2026-10-20), IN_STOCK or OUT_OF_STOCK, acceptable "
+            "purchase terms, PHP, known price type. Stock status remains visible.",
+            "close_alternatives": {
+                "policy_version": ALTERNATIVE_POLICY,
+                "enabled": not args.no_alternatives,
+                "rule": "Intentional policy change of 2026-10-27: an offer with at most "
+                f"{MAX_DIFFERENCES} established differences across model, screen size, CPU, "
+                "installed RAM, installed storage and GPU (GPU shares the same budget) may "
+                "appear as a labelled alternative (ALT 1, ALT 2) for a target of the same brand "
+                "and recognized product family. Differences are kept apart from unknowns and "
+                "contradictory evidence (RECHECK). Exact identities, stored matches, matching "
+                "minimums, counts, TARGET_MASTER, SOURCE_MODEL_MAP and rankings are unchanged; "
+                "a cell shows an alternative only when no matching configuration is "
+                "comparable; alternative-only minimums use the full eligible alternative pool.",
+            },
+            "listed_spec": "A broad-family target (catalog model is a family name) may be priced "
+            "by an offer whose own evidence states the same brand and family and the same "
+            "screen, CPU series, installed RAM and installed storage, with no contradicted "
+            "recorded code or secondary specification. It is labelled LISTED_SPEC, never an "
+            "exact product match; an exact comparable offer at the same retailer is preferred. "
+            "Several equally specific family targets: none is priced (review). Minimums that "
+            "include listed-spec prices are labelled 'matching listed specs'.",
+            "offer_terms_policy": args.offer_terms_policy,
+            "bundles": (
+                "Ordinary offers with stated inclusions (Office, warranty, backpack, ...) are "
+                "comparable with an INCLUDED_ITEMS_OFFER note. Paid packages, prices that "
+                "require another purchase, restricted (financing, card, trade-in, member) "
+                "prices, and bundle wording without evidence of the terms are excluded with "
+                "their reason. No accessory value is estimated or deducted."
+                if args.offer_terms_policy != BUNDLE_FLAG_POLICY else
+                "Included at the displayed package price; no accessory value is estimated or "
+                "deducted. Unknown bundle status remains excluded."
+            ),
+            "comparison_policy_version": (
+                "displayed-price/stock-and-purchase-terms/2026-10-19"
+                if args.offer_terms_policy != BUNDLE_FLAG_POLICY
+                else "displayed-price/stock-and-bundles/2026-10-15"
+            ),
+            "recheck_candidates": "A blank price lists the relevant pages found for the "
+            "configuration that are not confirmed comparable offers (fetched but unconfirmed, "
+            "fetch failed, or not fetched), most useful first, in recheck_candidates.csv; the "
+            "first is named in the comparison. Accessories and unrelated results are never "
+            "listed. An amount shown is labelled unconfirmed and never used.",
+            "unconfirmed_candidates": "A blank price may name an unconfirmed candidate offer "
+            "(link, outcome, differing values); its price is never shown or used in minimums.",
+            "search_outcomes": "With --discovery-dir, a cell with no related offer this week "
+            "takes the week's recorded discovery outcome (NO_RELEVANT_CANDIDATE, "
+            "NO_CANDIDATE_FOUND, SEARCH_FAILED, FETCH_FAILED, CANDIDATE_NOT_FETCHED, "
+            "DISCOVERY_NOT_ATTEMPTED), the same rule as coverage.csv; earlier weeks never do.",
+            "representative_observation": "Latest observation of each offer within the week.",
+            "selection": "Lowest comparable price per target and retailer; no averaging.",
+            "tie_break": TIE_BREAK,
+            "stale_observations": "Never carried forward; earlier weeks are shown only as stale "
+            "references in the selections file.",
+            "missing_price": "Blank cell with a status code; never zero.",
+            "retention": "Observations, import batches, matching contexts, and results are "
+            "append-only and kept indefinitely; reports are regenerated per run.",
+        },
+        "sales_snapshot": {
+            "run_id": selected.sales_run_id,
+            "extract_date": selected.sales_extract_date,
+            "m_minus_1_month": selected.sales_m_minus_1_month,
+            "mtd_month": selected.sales_mtd_month,
+            "label": selected.gmv_period_label(),
+            "note": "Shopee GMV (USD) and snapshot prices (PHP) are historical values from the "
+            "sales extract; they are not current marketplace prices and are never mixed with "
+            "retailer prices.",
+        },
+        "shopee_snapshot_prices": {
+            "rule": SHOPEE_SELECTION_RULE,
+            "snapshot_extract_date": selected.sales_extract_date,
+            "sales_run_id": selected.sales_run_id,
+            "label": selected.gmv_period_label(),
+            "note": "Historical Shopee snapshot prices from the sales extract, dated by that "
+            "extract; not current prices, no verified stock, and never part of the retailer "
+            "minimums or the comparable-retailer count. The product-page link does not select "
+            "the variation.",
+            "configurations_with_price": shopee_counts.get("SNAPSHOT_PRICE", 0),
+            "configurations_by_status": dict(sorted(shopee_counts.items())),
+            "configurations_with_tied_lowest_price": sum(
+                1 for row in shopee_rows if ";" in row["tied_model_ids"]),
+            "configurations_with_several_distinct_prices": sum(
+                1 for row in shopee_rows if row["distinct_prices"] not in {"", "0", "1"}),
+            "listings_by_role": dict(sorted(Counter(
+                row["shopee_price_role"] for row in ledger).items())),
+        },
+        "selected_list": {
+            "configurations": len(selected.configurations),
+            "sha256": selected.sha256,
+            "built_on_target_master_sha256": selected.built_on_target_master_sha256,
+            "catalog_matches_build": selected.catalog_matches_build,
+            "source_ledger_rows": len(ledger),
+            "ledger_sources_not_currently_mapped": sum(
+                1 for row in ledger if row["currently_mapped_to_target"] != "True"
+            ),
+        },
+        "matching_context": {
+            "context_id": context.context_id,
+            "target_master_sha256": context.target_master_sha256,
+            "configuration_targets": context.configuration_targets,
+            "listing_only_targets": context.listing_only_targets,
+            "matching_rules_version": MATCHING_RULES_VERSION,
+            "matching_rules_sha256": context.matching_rules_sha256,
+            "new_in_this_run": context.context_id not in known_contexts,
+        },
+        "store": {
+            "path": str(args.store),
+            "before": before,
+            "after": after,
+            "imports": [
+                {
+                    "source": str(path),
+                    "batch_id": report.batch_id,
+                    "received": report.received,
+                    "new": report.new,
+                    "duplicates_in_store": report.duplicates_in_store,
+                    "duplicates_in_batch": report.duplicates_in_batch,
+                }
+                for (path, _, _), report in zip(batches, imports, strict=True)
+            ],
+            "match_results_added": matched_now,
+            "matching_contexts": contexts,
+        },
+        "input_sha256": inputs,
+        "counts": result.counts,
+        # Price eligibility of this week's exact matches under each offer-terms policy, with the
+        # same matches: the commercial-terms effect, separate from identity matching.
+        "offer_terms_effect": result.terms_effect,
+        "outputs": {key: str(path) for key, path in outputs.items()},
+    }
+    outputs["summary"].write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")
+
+    # Counts only: offer URLs, prices, and IDs stay in the local reports.
+    counts = result.counts
+    print(
+        f"Report week {week.start.isoformat()} to {week.end.isoformat()} (exclusive, "
+        f"{REPORTING_TIMEZONE}): {status}; as of {utc_text(as_of)}."
+    )
+    print(
+        f"Shopee sales snapshot {selected.sales_run_id}: {selected.gmv_period_label()}. Not "
+        "current marketplace data."
+    )
+    for report, (path, _, _) in zip(imports, batches, strict=True):
+        print(
+            f"Imported {path.name}: received {report.received}; new {report.new}; already "
+            f"stored {report.duplicates_in_store}; repeated in file {report.duplicates_in_batch}."
+        )
+    added = after["observations"] - before["observations"]
+    print(
+        f"Store: {after['observations']} observations ({added} new), {after['offers']} offers, "
+        f"{after['import_batches']} import batches, {after['matching_contexts']} matching "
+        f"contexts; {matched_now} match results added."
+    )
+    print(
+        f"Selected configurations: {counts['selected_configurations']}; with a comparable "
+        f"price: {counts['selected_targets_with_comparable_price']}; without: "
+        f"{counts['selected_targets_without_comparable_price']}."
+    )
+    print(
+        f"Observations in week: {counts['observations_in_week']} "
+        f"(EXACT {counts['week_match_EXACT']}, UNMATCHED {counts['week_match_UNMATCHED']}, "
+        f"AMBIGUOUS {counts['week_match_AMBIGUOUS']}, REVIEW_REQUIRED "
+        f"{counts['week_match_REVIEW_REQUIRED']}); EXACT outside the selected list: "
+        f"{counts['week_exact_out_of_selected_list']}."
+    )
+    print(
+        "Retailer prices selected: "
+        + ", ".join(f"{code} {counts[f'prices_{code}']}" for code, _ in RETAILERS)
+        + f"; review rows: {counts['review_rows']}; history rows: {len(result.history)}."
+    )
+    print(
+        f"Shopee snapshot prices ({selected.sales_extract_date} extract, historical): "
+        f"{shopee_counts.get('SNAPSHOT_PRICE', 0)} of {len(shopee_rows)} configurations"
+        + "".join(f"; {status} {count}" for status, count in sorted(shopee_counts.items())
+                  if status != "SNAPSHOT_PRICE") + "."
+    )
+    print(
+        f"Price basis: exact product {counts['selected_retailer_prices_exact_product']}, "
+        f"listed-spec {counts['selected_retailer_prices_listed_spec']}; configurations priced "
+        f"exact-only {counts['configurations_priced_exact_product']}, listed-spec-only "
+        f"{counts['configurations_priced_listed_spec']}, mixed "
+        f"{counts['configurations_priced_mixed']}; listed-spec associations this week "
+        f"{counts['week_listed_spec_associations']} (ambiguous "
+        f"{counts['week_listed_spec_ambiguous']})."
+    )
+    if not args.no_alternatives:
+        print(
+            f"Close alternatives ({ALTERNATIVE_POLICY}): cells showing one "
+            f"{counts['selected_retailer_alternative_prices']} (ALT 1 "
+            f"{counts['cells_displaying_alt_1']}, ALT 2 {counts['cells_displaying_alt_2']}); "
+            f"configurations with an alternative price "
+            f"{counts['configurations_with_alternative_price']}; associations this week "
+            f"{counts['week_alternative_associations']} (eligible "
+            f"{counts['week_alternative_associations_eligible']}); rechecks "
+            f"{counts['week_alternative_evaluations_recheck']}."
+        )
+    if not selected.catalog_matches_build:
+        print(
+            "Note: TARGET_MASTER differs from the catalog the selected list was built on; every "
+            "selected identity was rechecked and is unchanged."
+        )
+    if args.discovery_dir:
+        print(
+            "Blank cells explained by the recorded discovery: "
+            + ", ".join(f"{status} {counts[f'cells_{status}']}" for status in
+                        SEARCH_STAGE_STATUSES if counts[f"cells_{status}"])
+            + f"; still unexplained: {counts['cells_NO_OBSERVATION_IN_WEEK']}."
+        )
+    print(f"Reports written to {output_dir}.")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -345,7 +345,7 @@ def test_invalid_headers_stop_validation(headers: list[str], message: str) -> No
 
 def load_cli():
     spec = importlib.util.spec_from_file_location(
-        "check_target_master", ROOT / "check_target_master.py"
+        "check_target_master", ROOT / "scripts" / "check_target_master.py"
     )
     assert spec and spec.loader
     module = importlib.util.module_from_spec(spec)

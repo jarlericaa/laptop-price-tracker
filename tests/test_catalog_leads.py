@@ -141,7 +141,7 @@ def test_leads_use_the_supplied_url_format_and_never_assign_by_url_alone() -> No
 
 def load_cli():
     spec = importlib.util.spec_from_file_location("catalog_cli",
-                                                  ROOT / "discover_catalog_leads.py")
+                                                  ROOT / "scripts" / "discover_catalog_leads.py")
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module

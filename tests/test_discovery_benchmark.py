@@ -72,7 +72,8 @@ def test_the_measurement_script_runs_offline_on_minimal_inputs(tmp_path) -> None
                           "offer_url,match_status,target_id,price"),
                          (report / "weekly_price_comparison.csv", "target_id")):
         path.write_text(header + "\n", encoding="utf-8")
-    spec = importlib.util.spec_from_file_location("measure", ROOT / "measure_discovery.py")
+    spec = importlib.util.spec_from_file_location(
+        "measure", ROOT / "scripts" / "measure_discovery.py")
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     out = tmp_path / "metrics.json"

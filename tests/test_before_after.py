@@ -206,7 +206,7 @@ def test_markdown_states_unrecorded_figures_and_the_recovery_rows(tmp_path) -> N
 
 
 def test_the_cli_writes_only_under_data_output_and_never_into_config(tmp_path, capsys) -> None:
-    sys.path.insert(0, str(ROOT))
+    sys.path.insert(0, str(ROOT / "scripts"))
     import build_before_after_report as cli
 
     run = write_run(tmp_path / "r", summary={"selected_variations": 1})

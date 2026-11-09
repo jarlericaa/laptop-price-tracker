@@ -181,7 +181,7 @@ def test_validated_copies_are_read_as_their_template_tables(tmp_path: Path) -> N
 
 def load_cli():
     spec = importlib.util.spec_from_file_location(
-        "audit_top_100_coverage", ROOT / "audit_top_100_coverage.py"
+        "audit_top_100_coverage", ROOT / "scripts" / "audit_top_100_coverage.py"
     )
     assert spec and spec.loader
     module = importlib.util.module_from_spec(spec)

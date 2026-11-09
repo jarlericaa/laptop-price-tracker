@@ -12,8 +12,8 @@ other location (and `config/`).
 queue for the owner. Library: `src/laptop_tracker/catalog_corrections.py`.
 
 ```
-python build_catalog_correction_queue.py            # writes catalog_corrections/ next to the run
-python build_catalog_correction_queue.py --dry-run  # counts only, writes nothing
+python scripts/build_catalog_correction_queue.py            # writes catalog_corrections/ next to the run
+python scripts/build_catalog_correction_queue.py --dry-run  # counts only, writes nothing
 ```
 
 Inputs (read only): `shopee_variations/shopee_variation_ranking.csv`, and from `inputs/` the
@@ -108,9 +108,9 @@ their target-level checks apply.
 `src/laptop_tracker/publication_diagnostics.py`.
 
 ```
-python build_publication_diagnostics.py             # writes <run>/diagnostics/
-python build_publication_diagnostics.py --discovery-dir data/output/weekly_runs/<run>/discovery
-python build_publication_diagnostics.py --dry-run
+python scripts/build_publication_diagnostics.py             # writes <run>/diagnostics/
+python scripts/build_publication_diagnostics.py --discovery-dir data/output/weekly_runs/<run>/discovery
+python scripts/build_publication_diagnostics.py --dry-run
 ```
 
 `--discovery-dir` defaults to the newest `weekly_runs/*/discovery` with a `search_jobs.csv`.
@@ -158,10 +158,10 @@ never mutated, unknown outcome vocabulary, writes only into the output folder).
 retailer, Sheet or history store). Library: `src/laptop_tracker/before_after.py`.
 
 ```
-python build_before_after_report.py \
+python scripts/build_before_after_report.py \
   --before-dir data/output/weekly_runs/20261103T023824Z \
   --after-dir  data/output/weekly_runs/<new run>          # writes <after>/before_after/
-python build_before_after_report.py --before-dir ... --after-dir ... --dry-run   # print only
+python scripts/build_before_after_report.py --before-dir ... --after-dir ... --dry-run   # print only
 ```
 
 Reads `shopee_variations/shopee_variation_run_summary.json`, `variation_reports/variation_coverage.json`,

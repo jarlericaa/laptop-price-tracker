@@ -83,7 +83,7 @@ Publish only after the cycle's reports have been reviewed and reconciled. Never 
 1. Confirm the reviewed report folder (for example `.../cycle_NN/with_retailer_links/`) and the
    cycle's `pilot_scope.csv`.
 2. Preview:
-   `python publish_prices.py --preview --report-dir <reviewed reports> --pilot-scope <scope>`.
+   `python scripts/publish_prices.py --preview --report-dir <reviewed reports> --pilot-scope <scope>`.
    Check the reporting week, cutoff, Shopee label, scope count, outcome counts, and that each of
    the five tabs is new or already holds this publisher's header.
 3. Publish: the same command with `--write-sheets`. It backs up existing pilot tabs locally,
@@ -166,7 +166,7 @@ observations normally.
 
 1. Replay into a new folder; it must not exist yet:
    ```bash
-   python replay_extraction.py \
+   python scripts/replay_extraction.py \
      --observations <run>/collection/observations.csv \
      --target-master <inputs>/target_master_validated.csv \
      --html-dir <collection>/html \
@@ -179,7 +179,7 @@ observations normally.
    `html_replay/reparse_differences.csv` (only expected columns changed).
 2. Optionally plan research for configurations without a confirmed offer:
    ```bash
-   python discover_candidates.py \
+   python scripts/discover_candidates.py \
      --references <inputs>/top_100_verified_configurations.csv \
      --target-master <inputs>/target_master_validated.csv \
      --scope-file <collection>/pilot_scope.csv \

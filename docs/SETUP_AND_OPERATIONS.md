@@ -79,7 +79,7 @@ The production output tabs now exist according to the user's report. The first a
 With `.venv` active and `.env` configured:
 
 ```bash
-python smoke_test.py
+python scripts/smoke_test.py
 ```
 
 The command reads the configured raw tab, validates the required headers, reports the spreadsheet and worksheet names and row count, and checks that sample values are strings. It does not modify the Sheet. A successful check on 2026-09-28 reported 23,544 data rows and all expected headers.
@@ -87,7 +87,7 @@ The command reads the configured raw tab, validates the required headers, report
 ## Read-only Phase 5 table check
 
 ```bash
-python check_target_tables.py --from-sheets
+python scripts/check_target_tables.py --from-sheets
 ```
 
 This command reads `TARGET_MASTER`, `SOURCE_MODEL_MAP`, and `MATCH_REVIEW` from the configured spreadsheet using the read-only scope and `get_all_values()` only. It validates each tab against the current templates and writes local reports under `data/output/`. It prints table names, counts, and error codes, but never the spreadsheet title or cell values. A missing tab is reported and fails the check. The command never creates, clears, or writes tabs. On 2026-10-12 it passed all three tabs (205 targets, 360 mappings, 5,154 review rows). Each passing table also gets a `<table>_validated.csv` copy, which downstream commands (`match_offers.py`, `build_verified_top_100.py`, and `track_prices.py`) read.
@@ -97,7 +97,7 @@ This command reads `TARGET_MASTER`, `SOURCE_MODEL_MAP`, and `MATCH_REVIEW` from 
 This check validates a local CSV against the approved schema in [TARGET_MASTER_SCHEMA.md](TARGET_MASTER_SCHEMA.md). It needs no credentials and makes no Google calls. Start from the header-only `config/target_master_template.csv`. Keep real exports outside Git, for example under the ignored `data/review/` folder.
 
 ```bash
-python check_target_master.py data/review/target_master_export.csv
+python scripts/check_target_master.py data/review/target_master_export.csv
 ```
 
 - **Always writes:** `data/output/target_master_validation_errors.csv`. It is ignored by Git and can contain cell values.
@@ -110,7 +110,7 @@ The template alone fails with `NO_DATA_ROWS`, as expected. This command never re
 To check the mapping and review tables, or all three together, run:
 
 ```bash
-python check_target_tables.py --target-master data/review/target_master_export.csv \
+python scripts/check_target_tables.py --target-master data/review/target_master_export.csv \
   --source-model-map data/review/source_model_map_export.csv \
   --match-review data/review/match_review_export.csv
 ```
@@ -120,15 +120,15 @@ python check_target_tables.py --target-master data/review/target_master_export.c
 To create the initial local review worklist from the accepted Top 100, run:
 
 ```bash
-python seed_match_review.py
+python scripts/seed_match_review.py
 ```
 
-This writes `data/review/match_review_candidates.csv` with one `NEW` row per distinct Top 100 model ID. All specifications, URLs, and approvals are blank. The command refuses to overwrite an existing file and stops without writing if `data/output/top_100_targets.csv` is missing; run `python run_phase1.py --dry-run` first. It never touches Google Sheets or creates `TARGET_MASTER` or mapping rows.
+This writes `data/review/match_review_candidates.csv` with one `NEW` row per distinct Top 100 model ID. All specifications, URLs, and approvals are blank. The command refuses to overwrite an existing file and stops without writing if `data/output/top_100_targets.csv` is missing; run `python scripts/run_phase1.py --dry-run` first. It never touches Google Sheets or creates `TARGET_MASTER` or mapping rows.
 
 ## Offline price comparisons and history (overall Phase 9)
 
 ```bash
-python track_prices.py \
+python scripts/track_prices.py \
   --observations data/output/pilot_matching_2026-10-08/observations.csv \
   --week-start 2026-10-05 --as-of 2026-10-12T09:00:00+08:00
 ```
@@ -177,8 +177,8 @@ before a request is sent; messages name the row, field, and code, never the valu
 **2. Preview, then collect.**
 
 ```bash
-python collect_and_match.py --preview --manifest config/collection_manifest.csv
-python collect_and_match.py --live --manifest config/collection_manifest.csv
+python scripts/collect_and_match.py --preview --manifest config/collection_manifest.csv
+python scripts/collect_and_match.py --live --manifest config/collection_manifest.csv
 ```
 
 - **Preview** validates `TARGET_MASTER` (default `data/output/target_master_validated.csv`, or
@@ -225,10 +225,10 @@ configurations. It is separate from the legacy `run_phase1.py --write-sheets` wr
 when an operator starts it.
 
 ```bash
-python publish_prices.py --preview \
+python scripts/publish_prices.py --preview \
   --report-dir data/output/phase10_2026-10-12/cycle_01/with_retailer_links \
   --pilot-scope data/collection/phase10_2026-10-12/pilot_scope.csv
-python publish_prices.py --write-sheets \
+python scripts/publish_prices.py --write-sheets \
   --report-dir data/output/phase10_2026-10-12/cycle_01/with_retailer_links \
   --pilot-scope data/collection/phase10_2026-10-12/pilot_scope.csv
 ```
@@ -295,19 +295,19 @@ the existing collector. Nothing is scheduled; every run is started by a person.
 ```bash
 # 1. Preview: validates the catalog, working list, scope, and approvals file; writes the query
 #    plan and request limits; sends no request.
-python discover_products.py --preview --scope-file <pilot_scope.csv> \
+python scripts/discover_products.py --preview --scope-file <pilot_scope.csv> \
   --target-master <inputs>/target_master_validated.csv \
   --selected-list <inputs>/top_100_verified_configurations.csv \
   --contributions <inputs>/verified_configuration_contributions.csv \
   --output-dir data/output/<run>/discovery_preview
 
 # 2. Live search, ranking, and inspection only (writes manifest.csv for review).
-python discover_products.py --live --targets TGT-000059 <same inputs> \
+python scripts/discover_products.py --live --targets TGT-000059 <same inputs> \
   --max-total-requests 20 --max-search-requests 10 --max-product-fetches 8 \
   --baseline-manifest <earlier manifest.csv> --output-dir data/output/<run>/discovery_one
 
 # 3. Search, collect, extract, match, and report in one run.
-python discover_products.py --live --scope-file <pilot_scope.csv> <same inputs> \
+python scripts/discover_products.py --live --scope-file <pilot_scope.csv> <same inputs> \
   --max-total-requests 95 --max-search-requests 60 --max-product-fetches 30 \
   --max-search-pages 2 --max-candidates-per-target-retailer 2 --collect \
   --store data/history/price_history.sqlite3 --output-dir data/output/<run>/discovery_all
@@ -475,7 +475,7 @@ For a future full-pipeline write test using `run_phase1.py --write-sheets`:
 2. Configure the service account as an editor on that test spreadsheet only.
 3. Temporarily set `SPREADSHEET_ID` in a local test environment to the test spreadsheet ID. Do not alter the production `.env` without preserving its values securely.
 4. Ensure the fixture passes freshness checks or deliberately set `SKIP_FRESHNESS_CHECK=true` for that test environment. Resolve all duplicate conflicts so the pipeline can reach the writer.
-5. Review local outputs, then run `python run_phase1.py --write-sheets` against the test spreadsheet. This replaces only approved `P1_*` outputs, updates the decision tab with merge behavior, and appends the run log. It cannot target `raw`.
+5. Review local outputs, then run `python scripts/run_phase1.py --write-sheets` against the test spreadsheet. This replaces only approved `P1_*` outputs, updates the decision tab with merge behavior, and appends the run log. It cannot target `raw`.
 6. Confirm the test outputs and restore the normal local environment.
 
 On 2026-09-29, a direct synthetic-data integration test of `write_phase1_outputs()` completed against a separate test spreadsheet. A user-provided read-only inspection report confirmed the expected output tabs, headers, synthetic rows, and run-log count. The test was not run through `run_phase1.py --write-sheets`. Do not use `--write-sheets` as a verification command against the real spreadsheet.
@@ -494,7 +494,7 @@ The Sheets writer is sequential, not transactional. It reads and rewrites `P1_EL
 The default command is local-output-only. `--dry-run` makes that intent explicit:
 
 ```bash
-python run_phase1.py --dry-run
+python scripts/run_phase1.py --dry-run
 ```
 
 It reads `raw`, validates and ranks data, and writes files under `data/output/`. A run with unresolved duplicate or model-identity conflicts writes local diagnostics and exits safely without writing Sheets. The latest read-only live run completed in 57.49 seconds after fingerprint-matched decisions excluded 21 historical conflicting keys. It generated the expected local reports; review them before treating the ranking as business-approved. No Sheets output was written.
@@ -506,7 +506,7 @@ Expected files are `top_100_targets.csv`, `eligible_model_ranking.csv`, `exclude
 The code supports an explicit output write path:
 
 ```bash
-python run_phase1.py --write-sheets
+python scripts/run_phase1.py --write-sheets
 ```
 
 This reads the same raw source, completes local processing first, then requests the write scope and writes only allowed `P1_*` tabs. It is **not** part of normal setup, was not run during documentation work, and must only be used after reviewing the local output and resolving conflicts. Prefer a dedicated test spreadsheet for the first write.
@@ -522,7 +522,7 @@ This reads the same raw source, completes local processing first, then requests 
 | Missing or repeated headers | Compare the first row with the required raw columns in [the PRD](PRD.md#input-data). Do not rename or alter the production source as a troubleshooting shortcut. |
 | Stale source month | Confirm the source includes current Manila-month data. Disable freshness only for intentional historical test fixtures. |
 | Too many validation errors | Review the private `validation_errors.csv`; fix the source or reviewed data-quality issue before increasing the threshold. |
-| Unresolved duplicate/model-identity conflicts | Review the private conflict report and redacted `duplicate_review.csv`; record an authorized decision in `config/duplicate_decisions.csv` (content-based; `duplicate_resolution_log.csv` shows where each record sits in the sheet). A changed, added or removed conflicting record requires a new review; re-sorting `raw` does not. A file in the retired row-number layout is refused: convert it with `python migrate_duplicate_decisions.py` (preview, then `--write`). |
+| Unresolved duplicate/model-identity conflicts | Review the private conflict report and redacted `duplicate_review.csv`; record an authorized decision in `config/duplicate_decisions.csv` (content-based; `duplicate_resolution_log.csv` shows where each record sits in the sheet). A changed, added or removed conflicting record requires a new review; re-sorting `raw` does not. A file in the retired row-number layout is refused: convert it with `python scripts/migrate_duplicate_decisions.py` (preview, then `--write`). |
 | `TARGET_MASTER` check reports a header error | Ensure the sheet header exactly matches `config/target_master_template.csv` (or the pre-tracking-mode legacy header). |
 | `check_target_tables.py` reports a header error for `SOURCE_MODEL_MAP` or `MATCH_REVIEW` | `SOURCE_MODEL_MAP` must match its `config/` template exactly, including column order. `MATCH_REVIEW` may use any column order, but it must have exactly the template's columns (or the pre-tracking-mode set), with no blank, duplicate, misspelled, or extra header; the error lists which. |
 | `check_target_tables.py --from-sheets` reports a worksheet not found | Create the tab manually with the template headers. The command never creates tabs. |

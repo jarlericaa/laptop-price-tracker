@@ -13,9 +13,9 @@ after the owner approves them.
 ## 1. Produce the report (owner, read-only)
 
 ```bash
-python check_target_tables.py --from-sheets
-python audit_top_100_coverage.py --from-sheets
-python propose_catalog_conventions.py \
+python scripts/check_target_tables.py --from-sheets
+python scripts/audit_top_100_coverage.py --from-sheets
+python scripts/propose_catalog_conventions.py \
   --target-master data/output/target_master_validated.csv \
   --source-model-map data/output/source_model_map_validated.csv \
   --match-review data/output/match_review_validated.csv \
@@ -71,7 +71,7 @@ For each listed `target_id`, set `cpu_series` to the "set `cpu_series` to" value
 3. Replay the saved pilot observations against the corrected catalog:
 
    ```bash
-   python match_offers.py --target-master data/output/target_master_validated.csv \
+   python scripts/match_offers.py --target-master data/output/target_master_validated.csv \
      --observations data/output/pilot_matching_2026-10-08/observations.csv \
      --output-dir data/output/pilot_matching_2026-10-08/replay_corrected_authoritative
    ```

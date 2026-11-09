@@ -84,21 +84,21 @@ mkdir -p "$weekly_run/inputs"
 
 # 1. Refresh source inputs (read-only Sheets access; no Sheets writes). The sales refresh now also
 #    writes the local sidecar source_shop_names.csv (seller names).
-python run_phase1.py --dry-run | tee "$weekly_run/sales_refresh.log"
+python scripts/run_phase1.py --dry-run | tee "$weekly_run/sales_refresh.log"
 cp data/output/eligible_model_ranking.csv data/output/top_100_targets.csv \
    data/output/phase1_run_summary.json data/output/period_summary.csv \
    data/output/source_shop_names.csv "$weekly_run/inputs/"
-python check_target_tables.py --from-sheets --output-dir "$weekly_run/inputs"
+python scripts/check_target_tables.py --from-sheets --output-dir "$weekly_run/inputs"
 
 # 2. Build and audit the Top 100 Shopee variations and their contexts.
-python build_top_shopee_variations.py \
+python scripts/build_top_shopee_variations.py \
   --ranking "$weekly_run/inputs/eligible_model_ranking.csv" \
   --source-top-100 "$weekly_run/inputs/top_100_targets.csv" \
   --target-master "$weekly_run/inputs/target_master_validated.csv" \
   --source-model-map "$weekly_run/inputs/source_model_map_validated.csv" \
   --match-review "$weekly_run/inputs/match_review_validated.csv" \
   --output-dir "$weekly_run/shopee_variations"
-python audit_top_shopee_variations.py --variation-dir "$weekly_run/shopee_variations" \
+python scripts/audit_top_shopee_variations.py --variation-dir "$weekly_run/shopee_variations" \
   --ranking "$weekly_run/inputs/eligible_model_ranking.csv" \
   --target-master "$weekly_run/inputs/target_master_validated.csv" \
   --source-model-map "$weekly_run/inputs/source_model_map_validated.csv" \
@@ -107,15 +107,15 @@ python audit_top_shopee_variations.py --variation-dir "$weekly_run/shopee_variat
 
 # 3. Retailer layer, once per context (preview first; see WEEKLY_WORKFLOW.md for live discovery).
 V="$weekly_run/shopee_variations"
-python discover_products.py --preview --scope-file "$V/context_scope.csv" \
+python scripts/discover_products.py --preview --scope-file "$V/context_scope.csv" \
   --target-master "$weekly_run/inputs/target_master_validated.csv" \
   --selected-list "$V/context_selected_list.csv" --contributions "$V/context_contributions.csv" \
   --retailers laptop_factory,datablitz,pcx,pcc,oct --output-dir "$weekly_run/discovery_preview"
-#    A live run (python discover_products.py --live --collect ...) takes the same arguments plus
+#    A live run (python scripts/discover_products.py --live --collect ...) takes the same arguments plus
 #    --store; it is a separate, supervised step (rate limits: see the discovery notes).
 
 # 4. Context report (existing tracker on the context list), then variation reports.
-python track_prices.py --store data/history/price_history.sqlite3 \
+python scripts/track_prices.py --store data/history/price_history.sqlite3 \
   --target-master "$weekly_run/inputs/target_master_validated.csv" \
   --source-model-map "$weekly_run/inputs/source_model_map_validated.csv" \
   --match-review "$weekly_run/inputs/match_review_validated.csv" \
@@ -123,17 +123,17 @@ python track_prices.py --store data/history/price_history.sqlite3 \
   --sales-ranking "$weekly_run/inputs/eligible_model_ranking.csv" \
   --week-start "$week_start" --as-of "$as_of" --discovery-dir "$weekly_run/discovery" \
   --output-dir "$weekly_run/context_reports"
-python build_variation_reports.py --variation-dir "$V" \
+python scripts/build_variation_reports.py --variation-dir "$V" \
   --context-report-dir "$weekly_run/context_reports" --output-dir "$weekly_run/variation_reports"
 
 # 5. Publisher preview (reads the live workbook with the read-only scope; writes nothing).
-python publish_variation_prices.py --preview --variation-dir "$V" \
+python scripts/publish_variation_prices.py --preview --variation-dir "$V" \
   --reports-dir "$weekly_run/variation_reports" \
   --context-report-dir "$weekly_run/context_reports" \
   --output-root "$weekly_run/publications"
 # Only after review and explicit approval:
-#   python publish_variation_prices.py --write-sheets ...   (same arguments)
-#   python publish_variation_prices.py --rollback <publication folder>
+#   python scripts/publish_variation_prices.py --write-sheets ...   (same arguments)
+#   python scripts/publish_variation_prices.py --rollback <publication folder>
 ```
 
 `track_prices.py` is run on a *disposable copy* of the store when validating (it records pending

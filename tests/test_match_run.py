@@ -66,7 +66,8 @@ TARGET_ROWS = [
 
 
 def load_cli():
-    spec = importlib.util.spec_from_file_location("match_offers", ROOT / "match_offers.py")
+    spec = importlib.util.spec_from_file_location(
+        "match_offers", ROOT / "scripts" / "match_offers.py")
     assert spec and spec.loader
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)

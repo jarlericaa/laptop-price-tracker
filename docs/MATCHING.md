@@ -178,12 +178,12 @@ targets are never assigned and never listed as near candidates.
 ## Offline command
 
 ```bash
-python match_offers.py \
+python scripts/match_offers.py \
   --target-master data/review/target_master_export.csv \
   --observations data/review/offer_observations.csv
 
 # Or read the authoritative TARGET_MASTER tab directly (read-only scope, that tab only):
-python match_offers.py --target-master-from-sheets \
+python scripts/match_offers.py --target-master-from-sheets \
   --observations data/review/offer_observations.csv
 ```
 

@@ -80,8 +80,8 @@ source_model_id,target_id,reviewer,reviewed_at,notes
 After editing, the project owner runs (read-only):
 
 ```bash
-python check_target_tables.py --from-sheets
-python audit_top_100_coverage.py --from-sheets
+python scripts/check_target_tables.py --from-sheets
+python scripts/audit_top_100_coverage.py --from-sheets
 ```
 
 Expected: all three tabs pass with unchanged row counts (`TARGET_MASTER` 168, `SOURCE_MODEL_MAP` 326, `MATCH_REVIEW` 5,154 as of 2026-10-06, unless rows were added since). The coverage audit should still show 63 `MAPPED_CONFIGURATION`, 0 `MAPPED_LISTING_ONLY`, and the same unresolved candidates. If a header error appears, compare row 1 character by character with the lines above. The usual causes are a trailing space, a missing underscore, or a column inserted in the wrong place.

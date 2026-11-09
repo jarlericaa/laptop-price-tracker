@@ -359,11 +359,11 @@ def test_outputs_are_written_and_carry_the_evidence(tmp_path: Path):
 
 def test_the_script_refuses_an_output_folder_outside_data_output(tmp_path: Path, capsys):
     root = Path(__file__).resolve().parents[1]
-    sys.path.insert(0, str(root))
+    sys.path.insert(0, str(root / "scripts"))
     try:
         import build_catalog_correction_queue as script
     finally:
-        sys.path.remove(str(root))
+        sys.path.remove(str(root / "scripts"))
 
     status = script.main(["--run-dir", str(tmp_path), "--output-dir", str(tmp_path / "out")])
 
@@ -377,11 +377,11 @@ def test_the_script_writes_the_queue_only_into_its_output_dir_and_never_touches_
     import hashlib
 
     root = Path(__file__).resolve().parents[1]
-    sys.path.insert(0, str(root))
+    sys.path.insert(0, str(root / "scripts"))
     try:
         import build_catalog_correction_queue as script
     finally:
-        sys.path.remove(str(root))
+        sys.path.remove(str(root / "scripts"))
     monkeypatch.setattr(script, "ROOT", tmp_path)
     run = tmp_path / "data" / "output" / "run"
     ranked, targets, maps = hp_dell_catalog()

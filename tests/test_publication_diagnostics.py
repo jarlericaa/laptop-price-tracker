@@ -384,11 +384,11 @@ def write_csv(path: Path, rows: list[dict[str, str]], columns: list[str] | None 
 @pytest.fixture
 def script(monkeypatch, tmp_path: Path):
     root = Path(__file__).resolve().parents[1]
-    sys.path.insert(0, str(root))
+    sys.path.insert(0, str(root / "scripts"))
     try:
         import build_publication_diagnostics as module
     finally:
-        sys.path.remove(str(root))
+        sys.path.remove(str(root / "scripts"))
     monkeypatch.setattr(module, "ROOT", tmp_path)
     return module
 

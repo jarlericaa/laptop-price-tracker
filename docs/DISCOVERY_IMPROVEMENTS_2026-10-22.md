@@ -178,7 +178,7 @@ hypothesis costs a few requests, never a wrong price.
 Preview (read-only; reads the six tabs):
 
 ```bash
-python publish_prices.py --preview --adopt-overview \
+python scripts/publish_prices.py --preview --adopt-overview \
   --report-dir <reviewed report folder> --pilot-scope <scope.csv> \
   --collection-dir <discovery>/collection --selected-list <top_100_verified_configurations.csv> \
   --output-root <run>/publications
@@ -187,8 +187,8 @@ python publish_prices.py --preview --adopt-overview \
 Production, **only after explicit go-ahead**:
 
 ```bash
-python publish_prices.py --write-sheets --adopt-overview <same arguments>
-python publish_prices.py --rollback <run>/publications/<timestamp>_write --output-root <run>/publications
+python scripts/publish_prices.py --write-sheets --adopt-overview <same arguments>
+python scripts/publish_prices.py --rollback <run>/publications/<timestamp>_write --output-root <run>/publications
 ```
 
 `--adopt-overview` is needed once, for the first `pilot-sheets-6` write. Later cycles regenerate

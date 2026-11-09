@@ -224,7 +224,7 @@ If the terminal closes, restore `weekly_run` and `WEEKLY_RUN` to the saved folde
 ### Step 1 - Refresh sales from the current raw Sheet
 
 ```bash
-python run_phase1.py --dry-run | tee "$weekly_run/sales_refresh.log"
+python scripts/run_phase1.py --dry-run | tee "$weekly_run/sales_refresh.log"
 
 cp data/output/eligible_model_ranking.csv \
    data/output/top_100_targets.csv \
@@ -239,14 +239,14 @@ cp data/output/eligible_model_ranking.csv \
 
 `--dry-run` still reads Google Sheets and writes local files. It means **no Google Sheets writes**. This historical script name produces the sales-ranking inputs used by later phases.
 
-**Duplicate conflicts (standing owner rule, 2026-11-03).** If the command stops on conflicting duplicates without a valid decision, run `python apply_latest_row_decisions.py --write` (keeps the record on the latest sheet row; backs up `config/duplicate_decisions.csv`) and repeat Step 1. Model-identity conflicts and keys with several conflict dates are not covered and need a human decision. See [DECISIONS.md](DECISIONS.md#standing-rule-for-conflicting-duplicates-keep-the-latest-sheet-row-owner-decision-2026-11-03).
+**Duplicate conflicts (standing owner rule, 2026-11-03).** If the command stops on conflicting duplicates without a valid decision, run `python scripts/apply_latest_row_decisions.py --write` (keeps the record on the latest sheet row; backs up `config/duplicate_decisions.csv`) and repeat Step 1. Model-identity conflicts and keys with several conflict dates are not covered and need a human decision. See [DECISIONS.md](DECISIONS.md#standing-rule-for-conflicting-duplicates-keep-the-latest-sheet-row-owner-decision-2026-11-03).
 
 Unresolved duplicate/identity conflicts or stale source months can stop this command. Review diagnostics in `data/output/` and decision files before continuing. Do not turn off freshness checks to present old sales as current.
 
 ### Step 2 - Export and validate the live catalog/mappings
 
 ```bash
-python check_target_tables.py --from-sheets \
+python scripts/check_target_tables.py --from-sheets \
   --output-dir "$weekly_run/inputs" \
   | tee "$weekly_run/catalog_check.log"
 ```
@@ -258,7 +258,7 @@ python check_target_tables.py --from-sheets \
 **Optional - reconcile name-identified targets (local).** Many targets record a family name (`IdeaPad`, `Aspire`, `Victus`) as `model`; no retailer page can confirm those until the catalog names the product. After Step 3, run:
 
 ```bash
-python reconcile_catalog.py \
+python scripts/reconcile_catalog.py \
   --target-master "$weekly_run/inputs/target_master_validated.csv" \
   --selected-list "$weekly_run/verified_top_100/top_100_verified_configurations.csv" \
   --contributions "$weekly_run/verified_top_100/verified_configuration_contributions.csv" \
@@ -271,7 +271,7 @@ It writes `catalog_reconciliation.csv` (one row per selected target: original va
 ### Step 3 - Rebuild and audit the verified Top 100
 
 ```bash
-python build_verified_top_100.py \
+python scripts/build_verified_top_100.py \
   --ranking "$weekly_run/inputs/eligible_model_ranking.csv" \
   --source-top-100 "$weekly_run/inputs/top_100_targets.csv" \
   --target-master "$weekly_run/inputs/target_master_validated.csv" \
@@ -280,7 +280,7 @@ python build_verified_top_100.py \
   --output-dir "$weekly_run/verified_top_100" \
   | tee "$weekly_run/verified_top_100_build.log"
 
-python audit_verified_top_100.py \
+python scripts/audit_verified_top_100.py \
   --run-dir "$weekly_run/verified_top_100" \
   --ranking "$weekly_run/inputs/eligible_model_ranking.csv" \
   --target-master "$weekly_run/inputs/target_master_validated.csv" \
@@ -340,7 +340,7 @@ pilot_args=(
   --max-product-fetches 30
 )
 
-python discover_products.py --preview "${pilot_args[@]}" \
+python scripts/discover_products.py --preview "${pilot_args[@]}" \
   --output-dir "$weekly_run/discovery_preview"
 ```
 
@@ -351,10 +351,10 @@ python discover_products.py --preview "${pilot_args[@]}" \
 **Optional catalog leads (2026-10-22, live layouts not yet verified).** Store search misses products (Shopify predictive search shows at most 10 results; Laptop Factory's search omitted sold-out products and returned nothing for some complete hyphenated codes). Every store advertises a sitemap in robots.txt. To turn sitemap entries whose URL handle (or Shopify sitemap title) shows a scoped MODEL_CODE target's complete code into discovery leads:
 
 ```bash
-python discover_catalog_leads.py --preview --scope-file "$weekly_run/pilot_scope.csv" \
+python scripts/discover_catalog_leads.py --preview --scope-file "$weekly_run/pilot_scope.csv" \
   --target-master "$weekly_run/inputs/target_master_validated.csv" \
   --output-dir "$weekly_run/catalog_leads_preview"
-python discover_catalog_leads.py --live --max-total-requests 35 --max-sitemaps-per-retailer 5 \
+python scripts/discover_catalog_leads.py --live --max-total-requests 35 --max-sitemaps-per-retailer 5 \
   --scope-file "$weekly_run/pilot_scope.csv" \
   --target-master "$weekly_run/inputs/target_master_validated.csv" \
   --output-dir "$weekly_run/catalog_leads"
@@ -367,7 +367,7 @@ It reads robots.txt first and requests nothing it disallows, fetches no product 
 ### Step 6 - Search, collect, extract and match
 
 ```bash
-python discover_products.py --live --collect "${pilot_args[@]}" \
+python scripts/discover_products.py --live --collect "${pilot_args[@]}" \
   --store data/history/price_history.sqlite3 \
   --output-dir "$weekly_run/discovery" \
   | tee "$weekly_run/discovery.log"
@@ -411,7 +411,7 @@ print(datetime.now(UTC).isoformat())
 PY
 )"
 
-python track_prices.py \
+python scripts/track_prices.py \
   --store data/history/price_history.sqlite3 \
   --target-master "$weekly_run/inputs/target_master_validated.csv" \
   --source-model-map "$weekly_run/inputs/source_model_map_validated.csv" \
@@ -443,7 +443,7 @@ Add `--search-context "$weekly_run/discovery/collection/match_results.csv"` to t
 **Close alternatives (2026-10-27).** `track_prices.py` also compares each offer of the report week with the selected configurations of the same brand and recognized product family (`config/product_family_registry.csv`) and labels an offer with at most two established differences across model, screen size, CPU, installed RAM, installed storage and GPU as `ALT 1` or `ALT 2` (GPU shares the budget; each dimension counts once). A retailer cell shows a matching configuration first, otherwise the best `ALT 1`, otherwise the best `ALT 2` (lowest price within the level); its status is `SELECTED` (matching) or `ALTERNATIVE_SELECTED`, and `<code>_Comparison_Tag` says `MATCH`, `ALT n · RAM`, or `RECHECK`. `Lowest_Price`, `Lowest_In_Stock_Price`, `Comparable_Retailer_Count` and the series stay matching-only; the alternative-only minimums (`Lowest_Alternative_Price*`, `Lowest_Alternative_In_Stock_Price*`) are taken over every eligible alternative of every retailer, including offers the main display does not show. New files: `weekly_price_alternatives.csv` (one row per target-retailer-offer association, with the differences, unknown fields, limitations, evidence and eligibility) and `alternative_evaluations.csv` (every evaluation, for audit). Contradictions inside a retailer's own evidence, a missing core value or a blocking conflict outside the six dimensions are rechecks, not alternatives. No stored match, target assignment or matching minimum changes; `--no-alternatives` reproduces the matching-only report. Check a run with:
 
 ```bash
-python audit_alternatives.py --report-dir "$weekly_run/reports" \
+python scripts/audit_alternatives.py --report-dir "$weekly_run/reports" \
   --store data/history/price_history.sqlite3 \
   --target-master "$weekly_run/inputs/target_master_validated.csv" \
   --output-dir "$weekly_run/alternative_audit"
@@ -458,7 +458,7 @@ Check week, cutoff, sales label, selections, lowest prices and review. The **low
 Then explain coverage per configuration and retailer (offline; matches the saved collection again with the current rules and imports nothing):
 
 ```bash
-python coverage_report.py \
+python scripts/coverage_report.py \
   --observations "$weekly_run/discovery/collection/observations.csv" \
   --match-results "$weekly_run/discovery/collection/match_results.csv" \
   --target-master "$weekly_run/inputs/target_master_validated.csv" \
@@ -475,7 +475,7 @@ python coverage_report.py \
 **Per-cell diagnostics (2026-10-22).** One row per configuration x retailer, placed at the furthest stage it reached, with the queries and their outcomes, limits hit (`budget_flags`: result cap, query limit, request budget, candidate limit), best candidate, request outcome, observation ID, `observed_listing_price` (any amount a related page showed) and, separately, `owner_policy_comparable_price` (the published price only). `--audit-leads` overlays an external audit's claims (category-only URLs, URLs claimed for several targets, whether search ever returned the URL) without trusting them:
 
 ```bash
-python diagnose_blank_cells.py \
+python scripts/diagnose_blank_cells.py \
   --report-dir "$weekly_run/reports" \
   --discovery-dir "$weekly_run/discovery" \
   --coverage "$weekly_run/coverage/coverage.csv" \
@@ -488,7 +488,7 @@ Stages: `NOT_SEARCHED`, `SEARCH_FAILED`, `ZERO_RESULTS_AFTER_BOUNDED_SEARCH`, `N
 ### Step 8 - Preview the tracker update
 
 ```bash
-python publish_prices.py --preview \
+python scripts/publish_prices.py --preview \
   --report-dir "$weekly_run/reports" \
   --pilot-scope "$weekly_run/pilot_scope.csv" \
   --collection-dir "$weekly_run/discovery/collection" \
@@ -509,7 +509,7 @@ Since publisher `pilot-sheets-3` (2026-10-19), `PILOT_PRICE_COMPARISON` has two 
 ### Step 9 - Publish the reviewed reports
 
 ```bash
-python publish_prices.py --write-sheets \
+python scripts/publish_prices.py --write-sheets \
   --report-dir "$weekly_run/reports" \
   --pilot-scope "$weekly_run/pilot_scope.csv" \
   --collection-dir "$weekly_run/discovery/collection" \
@@ -526,7 +526,7 @@ Finish with `Publication SUCCESS` and zero readback issues. Keep the run folder.
 **Rollback.** To restore the data tabs exactly as they were before a publication (including the owner-built overview's formulas and notes):
 
 ```bash
-python publish_prices.py --rollback "$weekly_run/publications/<timestamp>_write" \
+python scripts/publish_prices.py --rollback "$weekly_run/publications/<timestamp>_write" \
   --output-root "$weekly_run/publications"
 ```
 
@@ -589,7 +589,7 @@ Default sales files in `data/output/` are replaced on refresh. Dated folders pre
 If you also want these tabs refreshed, use this **instead of** Step 1's dry-run command:
 
 ```bash
-python run_phase1.py --write-sheets
+python scripts/run_phase1.py --write-sheets
 ```
 
 It reads `raw`, creates a new sales run and replaces the permitted generated P1 tabs; it also preserves/merges eligibility decisions and appends the P1 run log. Follow the existing P1 writer full-spreadsheet-backup procedure before that write. Then freeze the resulting files and continue Steps 2-9. Running it later as an unrelated extra refresh would create a different sales run from the current weekly files.

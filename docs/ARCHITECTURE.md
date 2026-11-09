@@ -178,7 +178,7 @@ On 2026-09-29, the user reported that all nine approved `P1_*` tabs had been cre
 
 ## Local execution and outputs
 
-From the repository root in WSL, `python smoke_test.py` checks connectivity and raw headers. `python run_phase1.py --dry-run` reads the source and saves local CSV/JSON files under `data/output/`; running without a write flag has the same local-only write behavior. The reports can contain business data and are ignored by Git.
+From the repository root in WSL, `python scripts/smoke_test.py` checks connectivity and raw headers. `python scripts/run_phase1.py --dry-run` reads the source and saves local CSV/JSON files under `data/output/`; running without a write flag has the same local-only write behavior. The reports can contain business data and are ignored by Git.
 
 `duplicate_review.csv` is a redacted local decision template. The other output reports can include model and shop identifiers, names, prices, and GMV, so they should be handled as private business data.
 

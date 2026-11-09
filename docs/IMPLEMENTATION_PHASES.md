@@ -40,7 +40,7 @@ The Python implementation and CLI are named “Phase 1” (`run_phase1.py` and `
 - **Tasks:** Configure the service account and external credential path; install Python dependencies; share the spreadsheet; verify `raw` and `TARGET_MASTER` reads.
 - **Deliverables:** Local `.env`, external service-account JSON, installed environment, and read-only smoke checks.
 - **Dependencies:** Google Cloud project, Sheets API, spreadsheet ID, and service-account sharing.
-- **Validation:** `python smoke_test.py`; read-only `TARGET_MASTER` check; verify headers and string values.
+- **Validation:** `python scripts/smoke_test.py`; read-only `TARGET_MASTER` check; verify headers and string values.
 - **Definition of done:** A documented local setup can read the source and required tabs with no write scope.
 - **Current status:** `COMPLETE`. Read-only access to `raw` and `TARGET_MASTER` worked on 2026-09-28. `TARGET_MASTER` has no header or data rows; its schema and contents are Phase 5 work.
 

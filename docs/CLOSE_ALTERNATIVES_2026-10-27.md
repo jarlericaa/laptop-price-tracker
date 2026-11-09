@@ -155,10 +155,10 @@ mkdir -p $OUT/disposable
 for variant in before after; do
   cp data/history/price_history.sqlite3 $OUT/disposable/store_$variant.sqlite3
   extra=""; [ $variant = before ] && extra="--no-alternatives"
-  python track_prices.py --store $OUT/disposable/store_$variant.sqlite3     --target-master $RUN/inputs/target_master_validated.csv     --source-model-map $RUN/inputs/source_model_map_validated.csv     --match-review $RUN/inputs/match_review_validated.csv     --selected-list $RUN/verified_top_100/top_100_verified_configurations.csv     --contributions $RUN/verified_top_100/verified_configuration_contributions.csv     --sales-ranking $RUN/inputs/eligible_model_ranking.csv     --week-start 2026-10-26 --as-of 2026-10-26T06:33:50.494649+00:00     --discovery-dir $RUN/discovery     --search-context $RUN/discovery/collection/match_results.csv     --output-dir $OUT/replay_$variant $extra       # no --observations: nothing is imported
+  python scripts/track_prices.py --store $OUT/disposable/store_$variant.sqlite3     --target-master $RUN/inputs/target_master_validated.csv     --source-model-map $RUN/inputs/source_model_map_validated.csv     --match-review $RUN/inputs/match_review_validated.csv     --selected-list $RUN/verified_top_100/top_100_verified_configurations.csv     --contributions $RUN/verified_top_100/verified_configuration_contributions.csv     --sales-ranking $RUN/inputs/eligible_model_ranking.csv     --week-start 2026-10-26 --as-of 2026-10-26T06:33:50.494649+00:00     --discovery-dir $RUN/discovery     --search-context $RUN/discovery/collection/match_results.csv     --output-dir $OUT/replay_$variant $extra       # no --observations: nothing is imported
 done
-python compare_alternative_replay.py --before $OUT/replay_before --after $OUT/replay_after   --output-dir $OUT/comparison --discovery-summary $OUT/discovery_reassessment_summary.json
-python audit_alternatives.py --report-dir $OUT/replay_after   --store $OUT/disposable/store_after.sqlite3   --target-master $RUN/inputs/target_master_validated.csv --output-dir $OUT/audit
+python scripts/compare_alternative_replay.py --before $OUT/replay_before --after $OUT/replay_after   --output-dir $OUT/comparison --discovery-summary $OUT/discovery_reassessment_summary.json
+python scripts/audit_alternatives.py --report-dir $OUT/replay_after   --store $OUT/disposable/store_after.sqlite3   --target-master $RUN/inputs/target_master_validated.csv --output-dir $OUT/audit
 python -m pytest -q tests/test_alternatives.py tests/test_alternative_reports.py   tests/test_alternative_discovery.py tests/test_alternative_publication.py
 ```
 
@@ -166,7 +166,7 @@ python -m pytest -q tests/test_alternatives.py tests/test_alternative_reports.py
 reads the destination tabs with the read-only scope:
 
 ```bash
-python publish_prices.py --preview --report-dir $OUT/replay_after   --pilot-scope $RUN/scope_top_100.csv --collection-dir $RUN/discovery/collection   --selected-list $RUN/verified_top_100/top_100_verified_configurations.csv   --output-root $OUT/publication_preview
+python scripts/publish_prices.py --preview --report-dir $OUT/replay_after   --pilot-scope $RUN/scope_top_100.csv --collection-dir $RUN/discovery/collection   --selected-list $RUN/verified_top_100/top_100_verified_configurations.csv   --output-root $OUT/publication_preview
 ```
 
 The preview in `$OUT/publication_preview/` was instead produced offline: the same

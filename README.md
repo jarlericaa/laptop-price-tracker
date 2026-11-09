@@ -56,7 +56,7 @@ flowchart TD
     write --> out["Sheets: dashboard tabs"]
 ```
 
-Steps 1 to 8 are run in order by the driver script [run_variation_week.sh](run_variation_week.sh),
+Steps 1 to 8 are run in order by the driver script [scripts/run_variation_week.sh](scripts/run_variation_week.sh),
 which stops at the publish preview and writes `status.json` (`READY_TO_PUBLISH` or
 `FAILED_AT_<stage>`) into its run folder. **Step 9 is never run automatically.** A person reviews the
 audits and the preview, then runs the publisher.
@@ -76,8 +76,9 @@ laptop-price-tracker/
 ├── src/laptop_tracker/        Application package: schema, eligibility, matching, rate limiting,
 │   └── adapters/              scraping, price tracking, Sheets reader/writer/publisher.
 │                              One adapter per retailer (datablitz, laptop_factory, pcx, pcc, oct).
-├── *.py                       Command-line entry points (36 scripts; see the catalogue below).
-├── run_variation_week.sh      Weekly driver, stops at the publish preview.
+├── scripts/                   Command-line entry points (36 Python scripts, see the catalogue
+│                              below) and run_variation_week.sh, the weekly driver that
+│                              stops at the publish preview.
 ├── config/                    Rules, registries, templates and owner decisions (see Configuration).
 ├── data/                      Runtime state and generated output (mostly Git-ignored):
 │   ├── output/                  generated reports; weekly runs under output/weekly_runs/<UTC time>/
@@ -92,10 +93,9 @@ laptop-price-tracker/
 └── requirements.txt           Runtime plus test/lint dependencies
 ```
 
-The 36 entry-point scripts deliberately stay in the repository root. Each one locates `src/` and
-`data/` relative to its own file, and `run_variation_week.sh`, the tests and the docs call them by
-those paths. Moving them would require editing every script and every documented command, for no
-functional gain.
+Run every command from the repository root, for example `python scripts/run_phase1.py --dry-run`.
+Each script finds `src/`, `config/` and `data/` relative to its own location, but `.env` is read
+from the current directory, so the root is the supported working directory.
 
 ### Script catalogue
 
@@ -111,7 +111,9 @@ functional gain.
 | Replay and benchmarking | `replay_extraction.py`, `compare_alternative_replay.py`, `measure_discovery.py`, `benchmark_catalog_index.py` |
 | Publication (writes Sheets) | `publish_variation_prices.py` (current), `publish_prices.py` (earlier configuration grain; refuses a workbook prepared for the variation grain) |
 
-Run any script with `--help` for its options.
+All names below are files in `scripts/`. Run a script with `--help` for its options, except
+`smoke_test.py`, which takes no arguments: it ignores `--help` and runs its read-only check against the
+configured spreadsheet.
 
 ## Requirements
 
@@ -145,9 +147,9 @@ python -m ruff check .
 
 `pytest` should pass completely. `ruff` currently reports 13 pre-existing style findings
 (line length and import order) in `src/laptop_tracker/catalog_proposals.py`,
-`src/laptop_tracker/page_cache.py`, `collect_and_match.py` and a few tests; none affect behaviour.
+`src/laptop_tracker/page_cache.py`, `scripts/collect_and_match.py` and a few tests; none affect behaviour.
 
-With credentials configured, `python smoke_test.py` reads the `raw` tab with the read-only scope and
+With credentials configured, `python scripts/smoke_test.py` reads the `raw` tab with the read-only scope and
 prints the headers it found.
 
 ## Configuration
@@ -195,9 +197,9 @@ Each command is labelled by what it can touch:
 ### Recommended first-time workflow
 
 1. `python -m pytest -q` (local).
-2. `python smoke_test.py` (reads Sheets) to confirm credentials and the `raw` headers.
-3. `python run_phase1.py --dry-run` (reads Sheets, writes local files under `data/output/`).
-4. `python check_target_tables.py --from-sheets` (reads Sheets, writes validated copies locally).
+2. `python scripts/smoke_test.py` (reads Sheets) to confirm credentials and the `raw` headers.
+3. `python scripts/run_phase1.py --dry-run` (reads Sheets, writes local files under `data/output/`).
+4. `python scripts/check_target_tables.py --from-sheets` (reads Sheets, writes validated copies locally).
 5. Read [docs/WEEKLY_WORKFLOW.md](docs/WEEKLY_WORKFLOW.md) and
    [docs/MAPPED_TOP_100_2026-11-03.md](docs/MAPPED_TOP_100_2026-11-03.md) before the first full run.
 6. Run the weekly driver (below), review its output, and only then consider publishing.
@@ -205,8 +207,8 @@ Each command is labelled by what it can touch:
 ### Sales refresh
 
 ```bash
-python run_phase1.py --dry-run          # default; reads Sheets, writes local files
-python run_phase1.py --write-sheets     # WRITES the nine P1_* output tabs
+python scripts/run_phase1.py --dry-run          # default; reads Sheets, writes local files
+python scripts/run_phase1.py --write-sheets     # WRITES the nine P1_* output tabs
 ```
 
 `--write-sheets` replaces only the allowed `P1_*` tabs (see Google Sheets integration) and can never
@@ -215,7 +217,7 @@ write to `raw`. The write scope is requested only when this flag is given. Do no
 ### Weekly run (stops at the publish preview)
 
 ```bash
-setsid nohup bash run_variation_week.sh > /tmp/run_variation_week.out 2>&1 < /dev/null &
+setsid nohup bash scripts/run_variation_week.sh > /tmp/run_variation_week.out 2>&1 < /dev/null &
 cat "$(cat /tmp/current_weekly_run.txt)/status.json"       # READY_TO_PUBLISH or FAILED_AT_<stage>
 tail -3 "$(cat /tmp/current_weekly_run.txt)/driver.log"
 ```
@@ -241,20 +243,20 @@ retailer 429 responses.
 
 | Command | Touches |
 |---|---|
-| `python check_target_tables.py --from-sheets --output-dir DIR` | Reads Sheets; local writes |
-| `python check_target_tables.py --target-master tm.csv --source-model-map map.csv --match-review review.csv` | Local |
-| `python build_top_shopee_variations.py --help` (see the driver for the full argument set) | Local |
-| `python discover_products.py --preview ...` | Local (plans; no requests) |
-| `python discover_products.py --live --collect ...` | Retailer requests; local writes; updates the SQLite store |
-| `python discover_products.py --live --replay-only --search-cache DIR ...` | Local (sends no request; uses saved responses only) |
-| `python discover_catalog_leads.py --preview ...` / `--live ...` | Local / retailer requests (robots.txt and sitemaps) |
-| `python collect_and_match.py --preview --manifest config/collection_manifest.csv` | Local |
-| `python collect_and_match.py --live --manifest config/collection_manifest.csv` | Retailer requests; updates the SQLite store |
-| `python track_prices.py --store ... --week-start YYYY-MM-DD --as-of ISO8601 ...` | Local (never contacts Sheets or retailers) |
-| `python build_variation_reports.py ...`, `audit_alternatives.py ...`, `build_publication_diagnostics.py ...` | Local |
-| `python publish_variation_prices.py --preview ...` | Reads Sheets; local writes (plan only) |
+| `python scripts/check_target_tables.py --from-sheets --output-dir DIR` | Reads Sheets; local writes |
+| `python scripts/check_target_tables.py --target-master tm.csv --source-model-map map.csv --match-review review.csv` | Local |
+| `python scripts/build_top_shopee_variations.py --help` (see the driver for the full argument set) | Local |
+| `python scripts/discover_products.py --preview ...` | Local (plans; no requests) |
+| `python scripts/discover_products.py --live --collect ...` | Retailer requests; local writes; updates the SQLite store |
+| `python scripts/discover_products.py --live --replay-only --search-cache DIR ...` | Local (sends no request; uses saved responses only) |
+| `python scripts/discover_catalog_leads.py --preview ...` / `--live ...` | Local / retailer requests (robots.txt and sitemaps) |
+| `python scripts/collect_and_match.py --preview --manifest config/collection_manifest.csv` | Local |
+| `python scripts/collect_and_match.py --live --manifest config/collection_manifest.csv` | Retailer requests; updates the SQLite store |
+| `python scripts/track_prices.py --store ... --week-start YYYY-MM-DD --as-of ISO8601 ...` | Local (never contacts Sheets or retailers) |
+| `python scripts/build_variation_reports.py ...`, `audit_alternatives.py ...`, `build_publication_diagnostics.py ...` | Local |
+| `python scripts/publish_variation_prices.py --preview ...` | Reads Sheets; local writes (plan only) |
 
-The exact argument sets used each week are in [run_variation_week.sh](run_variation_week.sh);
+The exact argument sets used each week are in [scripts/run_variation_week.sh](scripts/run_variation_week.sh);
 copy them rather than composing arguments from memory.
 
 ### Publishing to Google Sheets
@@ -265,10 +267,10 @@ Publication is a separate, deliberate step after `READY_TO_PUBLISH`. Review `sho
 ```bash
 source .venv/bin/activate
 W="$(cat /tmp/current_weekly_run.txt)"
-python publish_variation_prices.py --write-sheets --variation-dir "$W/shopee_variations" \
+python scripts/publish_variation_prices.py --write-sheets --variation-dir "$W/shopee_variations" \
   --reports-dir "$W/variation_reports" --context-report-dir "$W/context_reports" \
   --collection-dir "$W/discovery/collection" --output-root "$W/publications"
-# rollback: python publish_variation_prices.py --rollback <publication folder>
+# rollback: python scripts/publish_variation_prices.py --rollback <publication folder>
 ```
 
 **Writes Sheets.** Safeguards: every input is validated before any Sheets access; only the prepared
@@ -280,10 +282,10 @@ Details: [docs/SHEETS_DASHBOARD_2026-11-05.md](docs/SHEETS_DASHBOARD_2026-11-05.
 
 | Command | Touches |
 |---|---|
-| `python apply_latest_row_decisions.py` (preview) / `--write` | Local; `--write` backs up then rewrites `config/duplicate_decisions.csv` |
-| `python migrate_duplicate_decisions.py` (preview) / `--write` | Reads Sheets; `--write` backs up first |
-| `python replay_extraction.py ...`, `compare_alternative_replay.py ...`, `measure_discovery.py ...` | Local |
-| `python build_before_after_report.py ...` | Local (compares two runs' artifacts) |
+| `python scripts/apply_latest_row_decisions.py` (preview) / `--write` | Local; `--write` backs up then rewrites `config/duplicate_decisions.csv` |
+| `python scripts/migrate_duplicate_decisions.py` (preview) / `--write` | Reads Sheets; `--write` backs up first |
+| `python scripts/replay_extraction.py ...`, `compare_alternative_replay.py ...`, `measure_discovery.py ...` | Local |
+| `python scripts/build_before_after_report.py ...` | Local (compares two runs' artifacts) |
 
 ## Google Sheets integration
 
@@ -368,7 +370,7 @@ need to exercise the writer, and use `--preview` first. Verify run outputs with 
 ## Maintenance notes
 
 - **Targets and mappings.** Edit `TARGET_MASTER`, `SOURCE_MODEL_MAP` and `MATCH_REVIEW` in the sheet,
-  then validate with `python check_target_tables.py --from-sheets`. The pipeline never promotes review
+  then validate with `python scripts/check_target_tables.py --from-sheets`. The pipeline never promotes review
   rows. `build_catalog_correction_queue.py` produces an owner review queue of suspicious bindings
   (read-only).
 - **Unmatched products.** Review `PILOT_PRICE_REVIEW` and each run's `catalog_corrections/` and

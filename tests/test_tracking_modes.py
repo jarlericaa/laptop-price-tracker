@@ -379,7 +379,7 @@ def test_matcher_rejects_unknown_tracking_modes() -> None:
 
 
 def load_script(name: str):
-    spec = importlib.util.spec_from_file_location(name, ROOT / f"{name}.py")
+    spec = importlib.util.spec_from_file_location(name, ROOT / "scripts" / f"{name}.py")
     assert spec and spec.loader
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
