@@ -1,121 +1,177 @@
 # GitHub Actions automation: setup and operation
 
-This guide sets up the weekly run **Monday 09:17 Asia/Manila**: refresh sales, collect retailer
-prices, build and validate the reports, publish to Google Sheets, verify, and keep the history.
-The workflow is [.github/workflows/weekly-laptop-tracker.yml](../.github/workflows/weekly-laptop-tracker.yml).
+The weekly tracker runs on GitHub-hosted runners. **Nothing from Google Cloud except the Sheets
+service account is involved: no billing account, no Cloud Storage bucket, no Workload Identity
+Federation, no homelab, no always-on computer.**
 
-> **Status.** The repository side is implemented and tested offline. Nothing in this guide has been
-> run on GitHub or against Google Cloud yet: Workload Identity Federation, the storage bucket, the
-> hosted run and the first production publication all need the hosted test in
-> [First test](#first-test-in-this-order). Do not enable the schedule before that test passes.
+- **Where it runs:** GitHub Actions, workflow
+  [.github/workflows/weekly-laptop-tracker.yml](../.github/workflows/weekly-laptop-tracker.yml).
+- **Where the history lives:** encrypted assets of **private GitHub Releases** of this repository,
+  written with the built-in `GITHUB_TOKEN`.
+- **How it reaches Google Sheets:** the service-account key you already use locally, kept in the
+  GitHub Actions Secret `GOOGLE_SERVICE_ACCOUNT_JSON`.
+- **What it runs:** the unchanged driver `scripts/run_variation_week.sh` and the unchanged publisher
+  `scripts/publish_variation_prices.py`.
+
+> **Status.** Implemented and tested offline (`python -m pytest -q`), and the GitHub Releases calls
+> were probed once against the real API with draft releases (below). **It has not run on GitHub
+> Actions yet**, so it is not production-ready until the first hosted preview, a controlled
+> publication and a second run have passed ([First test](#first-test-in-this-order)).
 
 ## Contents
 
 1. [What was found in the repository](#what-was-found-in-the-repository)
 2. [Architecture](#architecture)
-3. [Modes, schedule and activation](#modes-schedule-and-activation)
-4. [Safety gates and idempotency](#safety-gates-and-idempotency)
-5. [Variables and Secrets](#variables-and-secrets)
-6. [One-time setup](#one-time-setup)
-7. [First test, in this order](#first-test-in-this-order)
-8. [Enable the weekly schedule](#enable-the-weekly-schedule)
-9. [Operating it](#operating-it)
-10. [Runtime and cost](#runtime-and-cost)
-11. [Troubleshooting](#troubleshooting)
+3. [GitHub Releases as storage: facts and limits](#github-releases-as-storage-facts-and-limits)
+4. [Modes, schedule and activation](#modes-schedule-and-activation)
+5. [Safety gates and idempotency](#safety-gates-and-idempotency)
+6. [Secrets and Variables](#secrets-and-variables)
+7. [Prerequisites](#prerequisites)
+8. [One-time setup](#one-time-setup)
+9. [First test, in this order](#first-test-in-this-order)
+10. [Enable the weekly schedule](#enable-the-weekly-schedule)
+11. [Operating it](#operating-it)
+12. [Encryption key: backup and rotation](#encryption-key-backup-and-rotation)
+13. [Storage size and retention](#storage-size-and-retention)
+14. [Runtime and cost](#runtime-and-cost)
+15. [Troubleshooting](#troubleshooting)
+16. [What has and has not been verified](#what-has-and-has-not-been-verified)
 
 ## What was found in the repository
 
 - **Authoritative pipeline command:** `bash scripts/run_variation_week.sh`. It runs 15 stages in
   order (`sales_refresh` to `publish_preview`), logs each to `stages.jsonl`, and writes `status.json`
   in `data/output/weekly_runs/<UTC time>/` (`READY_TO_PUBLISH` or `FAILED_AT_<stage>`). The workflow
-  calls this driver; it does not repeat the stages.
-- **Publication command:** `python scripts/publish_variation_prices.py --write-sheets ...` is still
-  the publisher (`scripts/publish_prices.py` is the earlier configuration grain and refuses this
-  workbook). Automation calls it through `scripts/ci_publish.py`; there is no second publisher.
-- **Authentication:** a service-account key (`GOOGLE_SERVICE_ACCOUNT_FILE` or `_JSON`) read by
-  `src/laptop_tracker/sheets_source.py`. New and opt-in: `GOOGLE_USE_ADC=true` uses Application
-  Default Credentials, which is what Workload Identity Federation provides in Actions. Local use with
-  a key file is unchanged.
-- **Persistent state that is not in Git** (authoritative, not reproducible):
-  `data/history/price_history.sqlite3` (append-only observations, with triggers),
+  calls this driver; it does not repeat the stages. Stage 1 (sales refresh) reads the Shopee sales
+  tab from the workbook, so the workbook is also the data source.
+- **Publication command:** `python scripts/publish_variation_prices.py --write-sheets ...`. Automation
+  calls it through `scripts/ci_publish.py`; there is no second publisher.
+- **Google authentication:** `GOOGLE_SERVICE_ACCOUNT_JSON` (the key's JSON text) or
+  `GOOGLE_SERVICE_ACCOUNT_FILE` (a path), read by `src/laptop_tracker/sheets_source.py`. The workflow
+  uses the JSON variant from a Secret, so **no credentials file is ever written on the runner**.
+  Local use is unchanged.
+- **Persistent state that is not in Git** (authoritative, not reproducible), 40 MB uncompressed and
+  about 4 MB compressed today: `data/history/price_history.sqlite3` (append-only observations),
   `data/history/retailer_rate_limits.json` (429 cooldowns that keep requests respectful),
   `config/duplicate_decisions.csv`, `config/eligibility_decisions.csv`,
   `config/identity_review_register.csv` (owner decisions; a missing file would silently change
   eligibility or duplicates).
-- **Reproducible, not persisted:** everything under `data/output/` (rebuilt each run). The saved
-  search cache is only valid for 24 h, so a weekly run is always a cold run (about 840 requests, 45
-  to 50 minutes of discovery). Retailer HTML evidence is not kept between runs.
-- **Existing publisher guarantees:** the publication ID is derived from the report content, so the
-  same reports always have the same ID; the run log (`PILOT_PRICE_RUN_LOG`) is keyed by it (a rerun
-  replaces its row and counts attempts, it never appends a duplicate); each tab is replaced as a
-  whole; every cell is read back; the previous tabs are snapshotted first and `--rollback` restores
-  them.
+- **Deliberately not persisted:** everything under `data/output/` (rebuilt each run), retailer HTML
+  evidence, and the search cache (only valid for 24 hours, so a weekly run is always cold).
+- **Existing publisher guarantees:** the publication ID is derived from the report content, the run
+  log (`PILOT_PRICE_RUN_LOG`) is keyed by it, each tab is replaced as a whole, every cell is read
+  back, the previous tabs are snapshotted first and `--rollback` restores them.
 
-### Blockers found and what was done about them
-
-| Finding | Action |
-|---|---|
-| **The compact dashboard layout has never been written live.** Sheets merges adjacent column groups of one depth, so collapsing the nine detail groups one by one failed (`no group at depth 1 that spans exactly ...`) on 2026-11-09. The test fake did not model this. | Fixed: `TabLayout.merged_groups()` writes the touching groups as one group (the same columns collapse; the nine separate toggles become one). The test fake now merges groups like Sheets, and 16 tests fail without the fix. **Needs the hosted publication test.** |
-| A read-quota 429 during the final run-log read was reported as `PARTIAL_FAILURE` after a successful write (2026-11-05). | `ci_publish.py` reconciles from the live run-log row and local report: `SUCCEEDED_UNREPORTED` is a success and is not rewritten or rolled back. |
-| `PARTIAL_SUCCESS` (exit 2) from discovery is the **normal** result of a bounded search; every run on record has it, including the published 2026-11-05 run. | Not treated as a failure. Only real request failures (below) block unattended publication. |
-| The throttled 2026-11-09 runs were `READY_TO_PUBLISH` with 30 matching rows instead of 41. | The new gate blocks it: `datablitz`, `pcx` and `pcc` had searches not sent after repeated errors and failed page fetches. |
-| `.env` and a local `.venv` were assumed by the driver. | The driver activates `.venv` only if present; settings come from the environment. |
-| No scheduler, no durable storage, no CI. | This work. |
+Findings that shaped the design (all still true): a read-quota 429 during the final run-log read was
+once reported as a failed publication after a successful write (handled by `SUCCEEDED_UNREPORTED`);
+discovery exit code 2 (`PARTIAL_SUCCESS`) is **normal**, so only real retailer request failures block
+unattended publication; the throttled 2026-11-09 run was `READY_TO_PUBLISH` with 30 instead of 41
+matching rows, which the gate now blocks; the compact dashboard layout has **never been written
+live** (adjacent column groups are written as one merged group, tested only against a fake that
+merges like Sheets).
 
 ## Architecture
 
 ```mermaid
 flowchart TD
     plan["plan: decide mode<br/>(scripts/ci_plan.py)"] --> collect
-    subgraph collect["collect job (up to 180 min)"]
-        auth["Workload Identity Federation"] --> lock["lock state"]
-        lock --> restore["restore latest validated state"]
+    subgraph collect["collect job (up to 180 min, contents: write)"]
+        restore["restore latest validated state<br/>(download, SHA-256, decrypt, integrity)"]
         restore --> driver["run_variation_week.sh<br/>(stops at publish preview)"]
         driver --> gate["readiness gate<br/>(ci_run_gate.py)"]
-        gate --> save["save new state version"]
-        save --> bundle["save run bundle"]
+        gate --> save["save new state version<br/>(draft, verify, publish)"]
+        save --> bundle["save encrypted run bundle"]
     end
     collect --> publish
     subgraph publish["publish job (only when publishing)"]
-        load["load run bundle"] --> regate["gate + live re-preview"]
+        load["load + decrypt run bundle"] --> regate["gate + live re-preview"]
         regate --> write["publish once<br/>(publish_variation_prices.py)"]
-        write --> reconcile["reconcile / roll back /<br/>record attempt"]
+        write --> reconcile["reconcile / roll back /<br/>record attempt + snapshots"]
     end
-    store[("Google Cloud Storage<br/>state/ runs/ publications/")] <--> collect
+    store[("private GitHub Releases<br/>tracker-state-* / tracker-run-* / tracker-pub-*")] <--> collect
     store <--> publish
     publish --> sheet[("Google Sheets")]
 ```
 
-**Two kinds of state are kept apart**, in one private Cloud Storage bucket (`GCS_STATE_BUCKET`):
+### How the Releases are organised
 
-| Prefix | Content | Written when |
-|---|---|---|
-| `state/versions/<time>-<run>/` | **Collection state**: the five files above plus a checksummed `manifest.json`. Immutable. | After every collection run, even a failed one, if the database validates. |
-| `state/latest.json` | Pointer to the latest valid version. | Last, by compare-and-swap. |
-| `locks/state.lock.json` | Lease (6 h) so two runs cannot overlap. | Start and end of a collection. |
-| `runs/<run id>/` | **Run bundle**: the reports and preview of one run (no saved retailer pages). | When the pipeline reached `READY_TO_PUBLISH`. |
-| `publications/<publication id>.json` | **Publication state**: every attempt and its classification. | After each publish attempt. |
-| `publications/<id>/<time>_write/` | The publisher's snapshots of the previous tabs (recovery data). | After each publish attempt, including failures. |
-| `publications/latest_success.json` | Counts of the last successful publication. | After a success. |
+Every object is its **own release with a unique tag that is never reused**, so nothing is ever
+overwritten, whether or not "immutable releases" is enabled.
 
-A failed Sheets publication therefore never needs another scrape: publish the saved bundle again
-(`existing_run_id`, below). GitHub Actions cache is not used for any of this, and no runtime
-database or raw export is stored in Git or in GitHub artifacts. The artifact is limited to
-`status.json`, `stages.jsonl`, `driver.log` and `gate.json`, kept 7 days.
+| Tag | Assets | Holds | Created |
+|---|---|---|---|
+| `tracker-state-000001`, `-000002`, ... | `manifest.json` (public metadata), `state.tar.gz.enc` | **Collection state**: the five files above, in one encrypted, compressed archive | First by `ci_state.py seed`, then after every collection run (even a failed one, if the database validates), and by `rollback` |
+| `tracker-run-<run id>` | `manifest.json`, `bundle.tar.gz.enc` | **Run bundle**: reports and preview of one run (no saved retailer pages) | When the pipeline reached `READY_TO_PUBLISH` |
+| `tracker-pub-<publication id>-a01`, `-a02`, ... | `manifest.json`, `attempt.tar.gz.enc` | **One publication attempt**: classification, counts, and the publisher's snapshots of the tabs it replaced (recovery data) | After each publish attempt that changed or tried to change the Sheet |
 
-### State guarantees
+`manifest.json` is deliberately non-sensitive: sequence number, run ID, timestamps, parent version
+and its manifest hash, SHA-256 and size of the encrypted archive, algorithm and key ID. It holds no
+row counts, prices, sheet names or credentials. Release titles and bodies are fixed, generic text.
+GitHub Actions cache is not used for any of this. The only workflow artifact is a 7-day
+`diagnostics-*` file with `status.json`, `stages.jsonl`, `driver.log` and `gate.json`.
 
-- **Never an empty history.** Restore without a pointer stops with an error. The first state is
-  created only by `ci_state.py seed`, once.
-- **Restore is verified**: manifest hash against the pointer, every file's SHA-256, SQLite
-  `integrity_check`, foreign keys, required tables, schema version; files are replaced only after all
-  pass. Files are copied byte for byte, so restored observations keep their original `retrieved_at`.
-- **Save is verified**: the new database must still contain every restored observation unchanged
-  (id, retrieval time, price, digest) and every batch and context; each upload is downloaded again
-  and hashed; the pointer moves only if nobody else saved meanwhile. A damaged or shrinking history
-  is refused and the previous version stays latest.
-- **Recovery**: `ci_state.py versions`, `restore --version`, and `promote --version` (makes an
-  earlier validated version the latest again; nothing is deleted).
+### How a version is written (and why a half upload is never state)
+
+1. The post-run files are checked: SQLite `integrity_check`, foreign keys, required tables, schema
+   version; CSV and JSON shape; the database must still contain every restored observation unchanged
+   (id, retrieval time, price, digest) and every batch and context.
+2. The files are packed into a reproducible `tar.gz` and encrypted with AES-256-GCM.
+3. A **draft** release for the next sequence number is created. A draft is invisible to every
+   reader, so nothing is state yet. A draft younger than 6 hours with the same tag stops this run
+   (another writer may be active); an older one is treated as abandoned and removed.
+4. If two writers create drafts at the same moment the **lowest release ID wins** and the other stops
+   without saving.
+5. Both assets are uploaded, then **downloaded again, checksummed, decrypted and fully validated**.
+6. Just before publishing, the latest published version is checked once more; if it moved, nothing is
+   published.
+7. The draft is **published**. Only now is it a state version.
+
+Saving the same content for the same run twice returns the existing version instead of a duplicate.
+Any failure deletes the draft and leaves the previous version latest.
+
+**Restore** takes the highest published version, downloads it, verifies the SHA-256, decrypts,
+validates every file and only then replaces local files. If the newest published version is damaged
+it **fails loudly instead of quietly using an older one** (older data would silently drop weeks of
+observations); recover with `rollback` ([Operating it](#operating-it)). Without any state, or with
+a wrong or missing key, it stops. **An empty history is never created automatically.**
+
+## GitHub Releases as storage: facts and limits
+
+**Verified against the real API on 2026-11-10** (read access, plus draft releases created and deleted
+again; the repository ended with no releases and no tags; probe made with the owner's `gh` login, not
+with an Actions token):
+
+- The repository is **private** and **immutable releases are currently off**
+  (`GET /repos/.../immutable-releases` returned `enabled: false`).
+- A token with push access **lists draft releases**, with their assets, and can download draft assets.
+- **Two drafts may share one tag**, so a tag does not work as a lock. The lowest-release-ID rule above
+  exists because of this.
+- Uploading an asset whose name already exists in a release is **refused** (HTTP 422).
+- The release object has an `immutable` field.
+
+**From GitHub's documentation:** a file in a release must be under 2 GiB, a release holds up to 1,000
+assets, and there is no limit on a release's total size or on bandwidth. With immutable releases a
+published release's assets and tag can no longer be changed, uploads to it fail with 422, and
+deleting it does not free its tag name. The recommended flow, which this design uses, is draft, then
+attach assets, then publish. The compressed state (about 4 MB) is far below every limit.
+
+**Limitations you should know about (not hidden):**
+
+- **Releases are not a database and give no atomic compare-and-swap.** One run at a time comes from
+  the workflow's concurrency group; unique sequence numbers, the draft claim rule, the parent check
+  before publishing, and read-back verification are the best achievable equivalent. A second writer
+  outside Actions (for example `ci_state.py save` from a laptop at the same moment) is caught by the
+  same checks, but this is not a transaction.
+- **No lease lock.** The previous design's state lock does not exist; a crashed run leaves at worst a
+  draft, which is ignored and expires.
+- **Tags accumulate** in the repository (`tracker-state-000012` and so on). Releases are published
+  with "latest release" disabled so they do not appear as your product's release.
+- **Draft visibility needs write access.** That is why the `collect` and `publish` jobs request
+  `contents: write`. This was not tested with a real Actions token yet.
+- **Do not delete state releases by hand.** If immutability is on, a deleted release keeps its tag
+  reserved, so that sequence number could never be reused.
+- **Private storage is not permission.** Storing company sales and pricing data in GitHub, even
+  privately and encrypted, may need approval from your organisation: see [Prerequisites](#prerequisites).
 
 ## Modes, schedule and activation
 
@@ -126,15 +182,16 @@ database or raw export is stored in Git or in GitHub artifacts. The artifact is 
 | **B2. Publish a saved run** | `publish` checked and `existing_run_id` set | no | yes, after the gates |
 | **C. Scheduled** | Mondays 09:17 `Asia/Manila` | per `WEEKLY_AUTOMATION` | per `WEEKLY_AUTOMATION` |
 
-The schedule uses GitHub's `timezone: "Asia/Manila"` key (IANA zone, no daylight saving).
-Scheduled runs only start from the default branch, and GitHub may delay them by several minutes.
-`WEEKLY_AUTOMATION` is a repository Variable and is **inert until set**: unset or `off` means the
-scheduled run is skipped before anything happens; `preview` runs mode A weekly; `publish` is the
-full unattended run. Scheduled runs never accept retailer failures.
+The schedule uses GitHub's `timezone: "Asia/Manila"` key (an IANA zone, no daylight saving; I could
+not confirm the key on the official syntax page, so **the first scheduled week must be watched**).
+Scheduled runs only start from the default branch and may be delayed by several minutes.
+`WEEKLY_AUTOMATION` is a repository Variable and is **inert until set**: unset or `off` skips the
+scheduled run before anything happens; `preview` runs mode A weekly; `publish` is the full unattended
+run. Scheduled runs never accept retailer failures.
 
-Every mode saves the validated collection state (new observations are real evidence, and the
-rate-limit cooldowns must carry over). Only the `publish` job writes to Sheets, and only in a run
-that asked for it.
+Every mode saves the validated collection state (new observations are real evidence and the
+rate-limit cooldowns must carry over). Only the `publish` job writes to Sheets, and only in a run that
+asked for it.
 
 ## Safety gates and idempotency
 
@@ -144,250 +201,299 @@ publisher's preview report, never console text. It blocks when:
 - `status.json` is not `READY_TO_PUBLISH`, or any of the 15 stages is missing or exited with a code
   the driver does not accept (the stage list is tested against the driver);
 - a report folder is empty, the discovery summary or preview report is missing, or the preview is not
-  `PREVIEW_ONLY` (the preview itself refuses invalid catalogs, mappings, targets, destinations or
-  schema, and this status is how that reaches the gate);
-- discovery failed outright, or **retailer request failures** occurred: searches with errors,
-  searches not sent after repeated errors, failed page fetches, or targets with provider failures.
-  HTTP 429 counts come from the discovery index and `rate_limit_events.csv`. A person can accept
-  them explicitly (`accept_retailer_failures`) after reading the diagnostics;
-- the run is older than 7 days (superseded by the next weekly run);
+  `PREVIEW_ONLY`;
+- discovery failed outright, or **retailer request failures** occurred (searches with errors,
+  searches not sent after repeated errors, failed page fetches, targets with provider failures). A
+  person can accept them explicitly (`accept_retailer_failures`) after reading the diagnostics;
+- the run is older than 7 days;
 - optionally, `MAX_MATCHING_DROP_PCT` is set and matching rows fell by more than that percentage
   against the last successful publication. **Off by default**: no coverage threshold is invented.
 
-Checked against real artifacts: the published 2026-11-05 run passes; the 2026-11-09 throttled run is
-blocked.
+`scripts/ci_publish.py` then, in the `publish` job: repeats the gate on the downloaded bundle; runs
+the publisher's own `--preview` against the **live** workbook and requires the same publication ID;
+reads the live run log and, if this publication is already `SUCCESS` with readback `PASSED`, stops
+with `ALREADY_PUBLISHED` and **writes nothing and records nothing**; otherwise writes **once** (never
+an automatic second attempt); classifies a failure (`FAILED_BEFORE_WRITE`, `SUCCEEDED_UNREPORTED` =
+written and verified, `PARTIAL_WRITE` = the publisher's own `--rollback` restores the snapshots); then
+stores one attempt record with the snapshots. A record that cannot be stored fails the job even if the
+Sheet was published, so it is never silent.
 
-`scripts/ci_publish.py` then, in the `publish` job:
+The run bundle is stored **before** any publication starts, so a failed publication never needs
+another scrape.
 
-1. repeats the gate on the downloaded bundle;
-2. runs the publisher's own `--preview` against the **live** workbook and requires the same
-   publication ID (schema, ownership and destination checks are the publisher's);
-3. reads the live run log: if this publication ID is already `SUCCESS` with readback `PASSED`, it
-   stops with `ALREADY_PUBLISHED` and writes nothing, so reruns cannot duplicate or reapply it;
-4. writes **once** (never an automatic second attempt);
-5. classifies a failure from the publisher's local report and the live row:
-   `FAILED_BEFORE_WRITE` (nothing touched), `SUCCEEDED_UNREPORTED` (written and verified, only the
-   final log read failed: success, no rewrite), `PARTIAL_WRITE` (some tabs, or readback differences:
-   the publisher's own `--rollback` restores the snapshots, so the dashboard keeps the previous
-   publication);
-6. records the attempt, uploads the snapshots, and exits non-zero for anything but a success.
+## Secrets and Variables
 
-Run-log rows are keyed by publication ID, history is appended with the publisher's retention rules,
-and tabs are replaced as a whole, so a deliberate rerun after a failure is idempotent.
+Secrets are passed **only to the steps that need them** (never workflow-wide or job-wide, never in a
+`run:` line). The scraper step receives the Sheets secret but neither the state key nor a GitHub token.
 
-## Variables and Secrets
+| Name | Kind | Required | Format | Used for |
+|---|---|---|---|---|
+| `GOOGLE_SERVICE_ACCOUNT_JSON` | **Secret** | yes | the whole service-account key file, as text | Sheets read/write (the run log prints only the account's e-mail) |
+| `STATE_ENCRYPTION_KEY` | **Secret** | yes | 32 random bytes, base64url, made by `ci_state.py keygen` | Encrypting and decrypting state, bundles, records |
+| `STATE_ENCRYPTION_KEY_PREVIOUS` | Secret | only during key rotation | same format | Decrypting older versions after a rotation |
+| `GITHUB_TOKEN` | built in | automatic | issued per run, expires with it | Reading and writing the private Releases. **You create nothing.** |
+| `SPREADSHEET_ID` | Variable | yes | the part of the Sheet URL between `/d/` and `/edit` | Which workbook |
+| `WEEKLY_AUTOMATION` | Variable | no, **set last** | `preview` or `publish` | Activates the schedule |
+| `MAX_MATCHING_DROP_PCT` | Variable | no | `30` | Optional coverage-drop gate |
 
-No Secret is required: Workload Identity Federation gives each run a short-lived token and no key
-is stored anywhere. Everything below is a **Variable** (not secret; none is a credential).
+A missing or malformed Secret fails the run in its first step naming **only the setting**, never its
+value (an invalid service-account text or key is rejected without being echoed).
 
-| Name | Required | Example / format | Used for |
-|---|---|---|---|
-| `SPREADSHEET_ID` | yes | `1QPN5vaxv8rNlpnSzsvQh_iX11ppGbKOPmELxSOAnyt0` (the part of the Sheet URL between `/d/` and `/edit`) | Which workbook |
-| `GCS_STATE_BUCKET` | yes | `laptop-tracker-state-yourname` | State bucket name (no `gs://`) |
-| `GCP_WORKLOAD_IDENTITY_PROVIDER` | yes | `projects/123456789012/locations/global/workloadIdentityPools/github-actions/providers/github` | WIF provider (full resource name) |
-| `GCP_SERVICE_ACCOUNT` | yes | `tracker-runner@your-project.iam.gserviceaccount.com` | Service account the run acts as |
-| `GCS_STATE_PREFIX` | no | `laptop-price-tracker` | Folder inside the bucket (lets one bucket serve several projects) |
-| `WEEKLY_AUTOMATION` | no, **set last** | `preview` or `publish` | Activates the schedule |
-| `MAX_MATCHING_DROP_PCT` | no | `30` | Optional coverage-drop gate |
+## Prerequisites
 
-`GOOGLE_USE_ADC=true` is set by the workflow itself. A missing required Variable fails the run in
-its first step with the **names** of the missing ones (never values).
+1. **Authorisation for the data.** The tracker holds Shopee sales and pricing data for your company.
+   Check that storing it, encrypted, in a private GitHub repository's Releases and processing it on
+   GitHub-hosted runners is allowed by your company's policy. Private storage is not approval.
+2. **Keep the repository private.** Never change its visibility; Releases and logs would become
+   public.
+3. **Service-account key creation must be allowed.** You already use a key locally. If your
+   organisation blocks key creation (`iam.disableServiceAccountKeyCreation`), do **not** bypass it;
+   the key you already have can be used, and a different approved method would need a code change.
+4. **GitHub Actions minutes.** A private repository on GitHub Free includes 2,000 minutes a month;
+   see [Runtime and cost](#runtime-and-cost).
 
 ## One-time setup
 
-Do these in order. Replace `PROJECT_ID`, `PROJECT_NUMBER` and the other examples with your values.
+Do these in order. **Never paste a key, token or the JSON file into this chat or any document.**
 
-### 1. Google Cloud project and APIs
+### 1. Check the Google service account and the workbook (no billing needed)
 
-1. Open <https://console.cloud.google.com/> and select the project that already holds your tracker
-   service account (the one whose key is in your local `.env`).
-2. Open **APIs & Services > Library**. Search for and **Enable**: *Google Sheets API*,
-   *IAM Service Account Credentials API*, *Security Token Service API*, *Cloud Storage API*.
-   Verify: each shows "API enabled" in **APIs & Services > Enabled APIs**.
+Service accounts, their keys and the Google Sheets API are free; a Google Cloud project without a
+billing account is enough for this.
 
-### 2. The state bucket
+1. Open <https://docs.google.com/spreadsheets/d/1QPN5vaxv8rNlpnSzsvQh_iX11ppGbKOPmELxSOAnyt0/edit>,
+   click **Share** (top right). In the list, find the service account's address (it ends in
+   `.iam.gserviceaccount.com`) and check its role is **Editor**. **Verify:** it is listed as Editor.
+2. You will use the **same JSON key file** your local `.env` points to with
+   `GOOGLE_SERVICE_ACCOUNT_FILE`. Only if you have lost it: <https://console.cloud.google.com/> >
+   your project > **IAM & Admin > Service Accounts** > click the account > **Keys > Add key > Create
+   new key > JSON > Create**; the file downloads. Keep it outside the repository.
 
-1. **Cloud Storage > Buckets > Create**.
-2. Name: globally unique, for example `laptop-tracker-state-<yourname>`. Location type: *Region*,
-   for example `asia-southeast1`. Storage class: *Standard*.
-3. Access control: *Uniform*. Tick **Enforce public access prevention**.
-4. Data protection: tick **Object versioning** (an extra safety net on top of the app's versions).
-5. **Create**. Verify: the bucket opens and is empty.
+### 2. Add the Sheets Secret
 
-### 3. The service account and its permissions
-
-Reuse the existing tracker service account (it already has editor access to the Sheet, which is what
-publishing needs). To find its email: **IAM & Admin > Service Accounts**, copy the *Email*.
-(If you prefer a new one, create it here and share the Sheet with it as **Editor**.)
-
-1. Open the bucket > **Permissions > Grant access**. New principal: the service account email.
-   Role: **Storage Object Admin**. Save.
-   (Object Admin, scoped to this bucket only, because replacing the pointer needs create and delete.)
-2. Verify the Sheet: open the spreadsheet > **Share**; the service account must be listed as
-   **Editor**.
-
-### 4. Workload Identity Federation (no stored key)
-
-1. **IAM & Admin > Workload Identity Federation > Create pool**. Name `github-actions`. Continue.
-2. **Add provider**: *OpenID Connect (OIDC)*, name `github`, **Issuer URL**
-   `https://token.actions.githubusercontent.com`, audience *Default*.
-3. **Attribute mapping**: `google.subject` = `assertion.sub`; add `attribute.repository` =
-   `assertion.repository`; add `attribute.ref` = `assertion.ref`.
-4. **Attribute condition** (limits who can authenticate at all):
-   `assertion.repository == 'jarlericaa/laptop-price-tracker' && assertion.ref == 'refs/heads/main'`
-   Because of `ref`, only code on `main` can obtain a token, so a feature branch or fork cannot.
-5. **Save**. Open the pool > **Grant access** > *Grant access using service account impersonation* >
-   select the service account > *Only identities matching the filter*: attribute `repository`, value
-   `jarlericaa/laptop-price-tracker`. Save.
-   (This adds the *Workload Identity User* role on the service account for that repository.)
-6. Open the provider and copy its **resource name**
-   (`projects/<number>/locations/global/workloadIdentityPools/github-actions/providers/github`).
-   This is `GCP_WORKLOAD_IDENTITY_PROVIDER`.
-
-The same in the command line (optional):
+Easiest and safest (the key never touches the clipboard), from your Linux/WSL terminal:
 
 ```bash
-gcloud iam workload-identity-pools create github-actions --location=global
-gcloud iam workload-identity-pools providers create-oidc github --location=global \
-  --workload-identity-pool=github-actions --issuer-uri=https://token.actions.githubusercontent.com \
-  --attribute-mapping="google.subject=assertion.sub,attribute.repository=assertion.repository,attribute.ref=assertion.ref" \
-  --attribute-condition="assertion.repository=='jarlericaa/laptop-price-tracker' && assertion.ref=='refs/heads/main'"
-gcloud iam service-accounts add-iam-policy-binding SA_EMAIL \
-  --role=roles/iam.workloadIdentityUser \
-  --member="principalSet://iam.googleapis.com/projects/PROJECT_NUMBER/locations/global/workloadIdentityPools/github-actions/attribute.repository/jarlericaa/laptop-price-tracker"
+gh auth status                       # must show you are logged in to github.com
+gh secret set GOOGLE_SERVICE_ACCOUNT_JSON < /path/to/your-service-account-key.json
 ```
 
-### 5. GitHub: Variables and the production environment
+Or in the browser: <https://github.com/jarlericaa/laptop-price-tracker> > **Settings > Secrets and
+variables > Actions > Secrets tab > New repository secret** > Name `GOOGLE_SERVICE_ACCOUNT_JSON` >
+Secret: open the JSON file in a text editor, **select all**, copy, paste > **Add secret**.
+**Verify:** the secret is listed under *Repository secrets* (its value is never shown again).
 
-1. Open <https://github.com/jarlericaa/laptop-price-tracker> > **Settings > Secrets and variables >
-   Actions > Variables > New repository variable**. Add the four required Variables above, one by
-   one (name, value, **Add variable**). Do **not** add `WEEKLY_AUTOMATION` yet.
-2. **Settings > Environments > New environment**, name exactly `production`. Optional but
-   recommended for the first weeks: tick **Required reviewers** and add yourself; every publish then
-   waits for your click. Remove it later for fully unattended publishing.
-3. **Settings > Actions > General**: *Actions permissions* must allow actions; under *Workflow
-   permissions* leave *Read repository contents* (the workflows ask for nothing more).
-4. If the repository is private and has a spending limit, check **Settings > Billing** (see
-   [Runtime and cost](#runtime-and-cost)).
-
-### 6. Merge the workflow
-
-The "Run workflow" button only appears for workflows on the default branch. Open a pull request from
-`automation/github-actions-weekly` into `main`, check that the *Tests* workflow passes, and merge.
-Merging starts nothing: manual runs need a click and the schedule is inert (`WEEKLY_AUTOMATION` unset).
-
-### 7. Seed the first state (once, from the machine that holds the real history)
-
-This uploads your current `price_history.sqlite3`, rate-limit file and decision files as version 1.
-Make sure no run is in progress and these local files are the ones you want to continue from.
+### 3. Create and store the encryption key
 
 ```bash
 cd ~/laptop-price-tracker && source .venv/bin/activate
 python -m pip install -r requirements.txt
-gcloud auth application-default login      # sign in as a Google user with access to the bucket
-export GCS_STATE_BUCKET=laptop-tracker-state-yourname   # and GCS_STATE_PREFIX if you set one
+python scripts/ci_state.py keygen --out ~/laptop-tracker-state.key   # prints only a key ID
+gh secret set STATE_ENCRYPTION_KEY < ~/laptop-tracker-state.key
+```
+
+**Back the key file up now** (see [Encryption key](#encryption-key-backup-and-rotation)); without it
+the stored history cannot be read. **Verify:** `gh secret list` shows `STATE_ENCRYPTION_KEY` and the
+`keygen` output printed a `key_id`.
+
+### 4. Add the Variable
+
+**Settings > Secrets and variables > Actions > Variables tab > New repository variable**: name
+`SPREADSHEET_ID`, value `1QPN5vaxv8rNlpnSzsvQh_iX11ppGbKOPmELxSOAnyt0` > **Add variable**.
+Do **not** add `WEEKLY_AUTOMATION` yet. **Verify:** it appears under *Repository variables*.
+
+### 5. Confirm Actions may create the state Releases
+
+**Settings > Actions > General > Workflow permissions.** The workflow requests `contents: write` on
+two jobs by itself, so either option normally works. If your organisation restricts it and the first
+run fails with `HTTP 403 ... contents: write`, set *Read and write permissions* here (or ask the
+organisation owner). **Verify:** the first preview run (below) reaches *Save validated state*.
+Optional hardening: **Settings > Environments > New environment** named `production`, enable
+**Required reviewers** (yourself) so every publication waits for your click, and under *Deployment
+branches* choose *Selected branches* = `main`.
+
+### 6. Merge the workflow
+
+Open the pull request from `automation/github-actions-weekly` into `main`, check that the **Tests**
+workflow is green, and merge. The *Run workflow* button only appears for workflows on `main`.
+Merging starts nothing: the schedule is inert and the workflow has no push trigger.
+
+### 7. Seed the first state (once, from the machine that holds the real history)
+
+```bash
+cd ~/laptop-price-tracker && source .venv/bin/activate
+gh auth status                                # needs the default 'repo' scope; gh auth login if not
+export STATE_ENCRYPTION_KEY="$(cat ~/laptop-tracker-state.key)"
 python scripts/ci_state.py seed
 ```
 
-Your own Google user needs the **Storage Object Admin** role on the bucket for this step (grant it as
-in step 3.1, with your email). Verify: the command prints a `version_id`; the bucket shows
-`state/latest.json` and `state/versions/<id>/`. From now on the bucket is the authority; to work
-locally again, run `python scripts/ci_state.py restore --overwrite` first.
+It validates the SQLite history and the three decision files, builds the encrypted archive, uploads
+it as `tracker-state-000001`, downloads it again and proves it restores. **Your local files are only
+read, never changed.** **Verify:** the output shows `"version_id": "tracker-state-000001"` and
+`"restore_check": "ok"`, and <https://github.com/jarlericaa/laptop-price-tracker/releases> lists
+*Tracker state 000001* with the assets `manifest.json` and `state.tar.gz.enc`. `seed` refuses to run
+twice. Afterwards the Releases hold the authoritative copy: run
+`python scripts/ci_state.py restore --overwrite` before using the pipeline locally again.
 
 ## First test, in this order
 
-1. **Preview run (mode A).** GitHub > **Actions > Weekly laptop price tracker > Run workflow**,
-   branch `main`, leave *publish* unchecked, **Run workflow**. The first run exercises Workload
-   Identity Federation, Sheets access (a read-only smoke test in the first minutes), state restore,
-   the full pipeline (about 70 minutes) and the gate.
-2. **Inspect it.** Open the run: the **Summary** page shows run ID, status, duration, verified
-   targets, comparable-price coverage, per-retailer searches/failures/HTTP 429, and the gate result.
-   The log of *Restore the latest validated state* prints the restored `version_id` and row counts;
-   *Save validated state* prints `new_observations`. Download the `diagnostics-...` artifact for
-   `status.json`, `stages.jsonl` and `gate.json`.
-3. **Confirm nothing was written to production.** The *Publish to Google Sheets* job shows
-   *Skipped*; no log line contains `--write-sheets`. In the Sheet, **File > Version history > See
-   version history** shows no new version by the service account, and `PILOT_PRICE_RUN_LOG` has no
-   new row.
-4. **Persistence across two runs.** Run mode A a second time (or let the next scheduled preview
-   run). Its *Restore* step must show the `version_id` the first run saved, and observation counts
-   at least as high. In the bucket, `state/versions/` has one more folder per run.
-5. **Controlled publication (mode B2, no second scrape).** First make a safety copy: in the Sheet,
-   **File > Make a copy**. Then **Run workflow** with *publish* checked and *existing_run_id* set to
-   the run folder name from the preview run's summary (like `20261110T010000Z`). If the gate blocked
-   the run because of retailer failures, read the per-retailer table first; only if you accept that
-   coverage, also tick *accept_retailer_failures*. If you required reviewers on `production`,
-   approve the waiting job.
-6. **Verify the Sheet.** `PILOT_PRICE_RUN_LOG` has a row with the publication ID from the job
-   summary, status `SUCCESS`, readback `PASSED`; `PILOT_PRICE_COMPARISON` shows the compact layout
-   with the detail columns collapsed (one toggle above the visible block); the job summary shows
-   `Publication status: PUBLISHED`. Run step 5 again: the job must end with `ALREADY_PUBLISHED` and
-   change nothing.
+1. **Preview run (mode A).** **Actions > Weekly laptop price tracker > Run workflow**, branch `main`,
+   leave *publish* unchecked. The run checks the Secrets, reads the Sheet (the log of *Check Google
+   Sheets access* prints `Spreadsheet title: ...`), restores state, runs the pipeline (about 70
+   minutes) and the gate.
+2. **Verify that state was restored.** The log of *Restore the latest validated state* prints
+   `"version_id": "tracker-state-000001"` and the row counts matching your local database.
+3. **Verify that a new version was saved.** The log of *Save validated state* prints a new
+   `version_id` (`tracker-state-000002`) and `new_observations`; the Releases page shows it; the
+   *Report stored size* step adds a size table to the run summary.
+4. **Confirm production was not changed.** The *Publish to Google Sheets* job shows *Skipped*. In the
+   Sheet, **File > Version history > See version history** shows no new version by the service
+   account, and `PILOT_PRICE_RUN_LOG` has no new row.
+5. **Test publication against a separate copy.** In the Sheet choose **File > Make a copy** (all
+   tabs), open the copy, **Share** it with the service account as Editor, and copy its ID from the
+   URL. Change the Variable `SPREADSHEET_ID` to the copy's ID. Run the workflow again with *publish*
+   checked and *existing_run_id* = the folder name of the preview run (shown in its summary and in
+   the *Run bundle* step, like `20261110T010000Z`), which avoids another scrape. If the gate blocked
+   the run for retailer failures, read the table first; tick *accept_retailer_failures* only if you
+   accept that coverage. Approve the waiting `production` job if you required reviewers.
+6. **Verify the copy really was the destination.** The publish log prints `Destination spreadsheet:
+   Copy of ...`; the **copy's** `PILOT_PRICE_RUN_LOG` has a row with the publication ID, `SUCCESS` and
+   readback `PASSED`, and its comparison tab shows the compact layout with collapsed detail columns;
+   the **production** workbook's version history is unchanged.
+7. **Test idempotency.** Repeat step 5 with the same `existing_run_id`: the job must end
+   `ALREADY_PUBLISHED`, change nothing and add no new `tracker-pub-...` release.
+8. **Test recovery.** Run `python scripts/ci_state.py verify` (downloads and validates the latest
+   state) and `python scripts/ci_state.py publication-fetch --publication-id PUB-... --dest /tmp/p`
+   (the snapshots needed for a rollback). Optionally rehearse `rollback` ([Operating it](#operating-it))
+   only if you are happy to add a version.
+9. **Persistence across two runs.** Run mode A once more; its *Restore* step must show the version the
+   previous run saved.
+10. **First approved production run.** Set `SPREADSHEET_ID` back to the production ID, make one more
+    safety copy of the workbook, then run *publish* with the same or a new `existing_run_id`, approve
+    it, and verify the production run log and layout as in step 6.
 
 ## Enable the weekly schedule
 
-Only after step 6 above succeeded (and ideally one scheduled week in `preview`):
+Only after the first test above succeeded, ideally after one scheduled week in `preview`:
 
-1. **Settings > Secrets and variables > Actions > Variables > New repository variable**:
-   name `WEEKLY_AUTOMATION`, value `publish` (use `preview` first if you want a dry week).
+1. **Settings > Secrets and variables > Actions > Variables > New repository variable**: name
+   `WEEKLY_AUTOMATION`, value `publish` (`preview` for a dry week).
 2. Verify the next Monday 09:17 Manila run starts (Actions tab; allow a few minutes of delay).
 
-Nothing else changes: the workflow is already on `main`. To switch it off, set the value to `off` or
-delete the Variable. To stop everything, **Actions > Weekly laptop price tracker > ... > Disable
-workflow**.
+Nothing else changes. Switch it off by setting the value to `off` or deleting the Variable; stop
+everything with **Actions > Weekly laptop price tracker > ... > Disable workflow**. If you added
+required reviewers to `production`, a scheduled publication waits for your approval.
+
+The weekly flow is: **Monday 09:17 Asia/Manila, restore state, scrape, reports, validate, publish
+to Google Sheets, verify, save state**.
 
 ## Operating it
 
 | Task | How |
 |---|---|
-| See what happened | Actions > the run > Summary; artifact `diagnostics-*`; the Sheet's `PILOT_PRICE_RUN_LOG`. |
-| Retry a failed **publication** without scraping | Run workflow: *publish* checked, *existing_run_id* = the run folder name. A bundle is kept for runs that reached `READY_TO_PUBLISH`. |
-| Retry a failed **collection** | Run workflow again (mode A or B). State from the failed run was saved if its database validated, so no evidence is lost; do not rerun repeatedly, retailers answer 429. |
-| List / restore / roll back state | `python scripts/ci_state.py versions`; `restore --version V --overwrite` (a local copy); `promote --version V` (makes it latest for CI). |
-| Release a stuck state lock | Normally expires after 6 hours; or `python scripts/ci_state.py unlock --force`. |
-| Roll back a publication | The publisher keeps snapshots: download `publications/<id>/<time>_write/` from the bucket into a local run folder and run `python scripts/publish_variation_prices.py --rollback <folder>`. |
-| Safely stop automatic publication | `WEEKLY_AUTOMATION` = `preview` or `off`. |
+| See what happened | Actions > the run > Summary; artifact `diagnostics-*`; the Sheet's `PILOT_PRICE_RUN_LOG`; the Releases page. |
+| Retry a failed **publication** without scraping | Run workflow: *publish* checked, *existing_run_id* = the run folder name. A bundle exists for runs that reached `READY_TO_PUBLISH`. A previous `PARTIAL_WRITE` was already rolled back by the job; read its record first (`publication-fetch`). |
+| Retry a failed **collection** | Run workflow again. State from the failed run was saved if its database validated, so no evidence is lost; do not rerun repeatedly, retailers answer 429. |
+| List stored versions | `python scripts/ci_state.py versions` (shows `complete: false` for a damaged one). |
+| Check a version end to end | `python scripts/ci_state.py verify [--version N]` |
+| Restore a version locally | `python scripts/ci_state.py restore --version N --overwrite` |
+| **Roll state back** | `python scripts/ci_state.py rollback --to N` validates version N and publishes it as a **new** latest version; the bad one stays for inspection (releases are never edited or deleted). |
+| Roll back a publication | `python scripts/ci_state.py publication-fetch --publication-id PUB-... --dest /tmp/pub`, then `python scripts/publish_variation_prices.py --rollback /tmp/pub/snapshots` |
+| Stop automatic publication | `WEEKLY_AUTOMATION` = `preview` or `off`. |
+
+Local commands need `gh auth login`, `STATE_ENCRYPTION_KEY` in the environment, and (if
+`STATE_ENCRYPTION_KEY_PREVIOUS` was used) that too. They never print key material.
+
+## Encryption key: backup and rotation
+
+The key is generated **on your machine** (`ci_state.py keygen`), never inside a runner, and lives in
+two places only: the GitHub Secret and **your own backup**. A key that exists only in GitHub cannot
+be retrieved again, and **without it the stored history is unreadable**.
+
+- **Back up:** keep `~/laptop-tracker-state.key` in your password manager (paste the file's single
+  line as a secure note) and, if your company has one, in its approved secret vault. Do not email it,
+  commit it or paste it into chat.
+- **Rotate** (for example once a year, or if it may have leaked):
+  1. `python scripts/ci_state.py keygen --out ~/laptop-tracker-state-new.key`
+  2. Move the current value to `STATE_ENCRYPTION_KEY_PREVIOUS`
+     (`gh secret set STATE_ENCRYPTION_KEY_PREVIOUS < ~/laptop-tracker-state.key`), then set
+     `STATE_ENCRYPTION_KEY` from the new file.
+  3. The next run restores with the old key and saves with the new one (each manifest records its
+     key ID). Keep the old key until every version you may still need is newer than the rotation, and
+     back both up.
+- **A wrong or missing key stops the run.** It never falls back to plaintext or to an empty history.
+- If the key is truly lost, older versions cannot be recovered. Your local files are still the
+  source for a fresh start, but because sequence numbers and tags are never reused this needs a
+  deliberate manual reset: do not delete releases without a plan.
+
+## Storage size and retention
+
+- A state version is about 4 MB compressed today (40 MB database); weekly bundles and records are
+  small. Expect roughly 5 to 15 MB a week, so a few hundred MB a year, far below GitHub's limits.
+- Every run adds a *Stored tracker data* table to its summary (with a warning above 1,024 MB in
+  total) and lists unfinished drafts. `python scripts/ci_state.py report [--warn-mb N]` prints the
+  same locally.
+- **Nothing is deleted automatically.** Immutable releases cannot be safely pruned by a program: a
+  deleted release keeps its tag reserved and its sequence number could not be reused. Safe manual
+  approach if size ever matters: keep at least the newest 8 state versions, every publication record
+  from the last 3 months, and bundles you may still need to publish; delete older `tracker-run-*`
+  and `tracker-pub-*` releases from the Releases page, and **never** delete a state version that is
+  the latest or that a newer one lists as its parent.
 
 ## Runtime and cost
 
-- Latest complete run: about 70 minutes (sales refresh and offline stages 5, discovery 44, reports and
-  preview under 1, publication and checks about 20). A weekly run has no usable search cache, so
-  expect 50 to 90 minutes for `collect` and 5 to 25 for `publish`. The 180-minute timeout leaves room
-  for the retailer pacing and 429 cooldowns, which are unchanged.
-- Cost: GitHub-hosted Ubuntu runners bill 1 minute per minute. Roughly 4.3 runs a month at 75 to 120
-  minutes is 320 to 520 minutes a month, plus Cloud Storage for a few hundred MB (versions of a 40 MB
-  database and small bundles; cents per month). Public repositories run free; private repositories
-  consume the plan's included minutes (2,000 per month on GitHub Free) before any charge. Check your
-  plan before enabling.
-- Retailers see requests from a GitHub datacenter address instead of your own. If they answer 429
-  more often, the gate holds the publication and the sheet keeps its previous data.
+- Latest complete run: about 70 minutes. A weekly run has no usable search cache, so expect 50 to 90
+  minutes for `collect` and 5 to 25 for `publish`. The 180-minute timeout leaves room for the
+  retailer pacing and 429 cooldowns, which are unchanged.
+- Cost: nothing for storage (GitHub Releases) and nothing for Google. GitHub-hosted Ubuntu runners
+  bill 1 minute per minute; about 4.3 runs a month at 75 to 120 minutes is 320 to 520 minutes. Public
+  repositories run free; private ones consume the plan's included minutes (2,000 per month on GitHub
+  Free). Check your plan before enabling.
+- Retailers see requests from a GitHub datacenter address instead of your own; if they answer 429
+  more often, the gate holds the publication and the Sheet keeps its previous data.
 
 ## Troubleshooting
 
 | Symptom | Cause and fix |
 |---|---|
-| First step fails: `Missing or empty repository Variables/Secrets: ...` | Add the named Variables (Settings > Secrets and variables > Actions > Variables). |
-| Authentication step: `could not generate credentials` / `Permission 'iam.serviceAccounts.getAccessToken' denied` | Step 4.5 not done, wrong `GCP_SERVICE_ACCOUNT`, or the attribute condition does not match (run from `main`, repository name exact). |
-| `Check Google Sheets access` fails | The service account is not an Editor of the Sheet, or `SPREADSHEET_ID` is wrong. |
-| `No saved state exists ... seed` | Step 7 not done, or `GCS_STATE_PREFIX` differs from the one used at seeding. |
-| `Another run holds the state lock` | A run is active. If none is, wait for the lease (6 h) or `unlock --force`. |
-| `The price history is no longer append-only` | The pipeline changed or lost stored observations; the state was **not** saved. Investigate the run's logs; the previous state is intact. |
-| `state ... changed since it was read` | Another process saved state during this run; nothing was overwritten. Rerun. |
-| `BLOCKED: Retailer request failures ...` | Read the summary table. Wait and rerun collection, or accept explicitly with `accept_retailer_failures` for a run you reviewed. |
+| First step fails: `Missing or empty repository Variables/Secrets: ...` | Add the named Secret or Variable (setup steps 2 to 4). |
+| `Invalid configuration: GOOGLE_SERVICE_ACCOUNT_JSON is not valid JSON` | The secret was pasted partly. Set it again with `gh secret set ... < file.json`. |
+| `STATE_ENCRYPTION_KEY must decode to 32 bytes` | The secret was not made by `keygen` or was truncated; set it again from the key file. |
+| `Check Google Sheets access` fails | The service account is not an Editor of the workbook, or `SPREADSHEET_ID` is wrong. |
+| `No saved state exists ... seed` | Setup step 7 not done. |
+| `... could not be decrypted` / `encrypted with key ... which is not available` | Wrong key, or a rotated key is missing: put the old one in `STATE_ENCRYPTION_KEY_PREVIOUS`. Nothing was restored. |
+| `HTTP 403 ... contents: write` | Setup step 5: the token may not create Releases. |
+| `... is incomplete: its archive is missing or truncated` / `fails its checksum` | The newest version is damaged. `ci_state.py rollback --to N` (N = last good from `versions`). |
+| `Another writer is working on tracker-state-...` | A run is active, or a draft is younger than 6 hours. Wait; an older draft is removed automatically. |
+| `Another writer claimed ... first` / `The saved state moved from version N to M` | Two writers overlapped; nothing was overwritten. Rerun. |
+| `The price history is no longer append-only` | The pipeline changed or lost stored observations; the state was **not** saved. The previous state is intact. |
+| `BLOCKED: Retailer request failures ...` | Read the summary table. Wait and rerun collection, or accept explicitly for a run you reviewed. |
 | `BLOCKED: ... superseded` | The run is over 7 days old; run a new collection. |
-| Publication `PARTIAL_WRITE` | The job rolled back from the snapshots; read the error in the summary, fix, rerun the publication. Do not re-run blindly more than once. |
+| Publication `PARTIAL_WRITE` | The job rolled back from the snapshots; read the error in the summary, fix, publish again. |
 | Publication `SUCCEEDED_UNREPORTED` | Written and verified; only the final run-log read hit a Sheets read quota. No action. |
-| Scheduled run did not start | `WEEKLY_AUTOMATION` is not `preview`/`publish`; the workflow is not on `main`; the repository had no activity for 60 days (GitHub disables schedules; re-enable in the Actions tab). |
+| `Published but not recorded durably` | The Sheet changed; only the record failed. Check the Releases permission, then do not republish: the Sheet shows `SUCCESS`. |
+| Scheduled run did not start | `WEEKLY_AUTOMATION` is not `preview`/`publish`; the workflow is not on `main`; GitHub disables schedules after 60 days without repository activity (re-enable in the Actions tab). |
 
 ## What has and has not been verified
 
-Verified offline (`python -m pytest -q`): workflow structure, pinned actions, permissions, modes,
-missing-Variable handling, ADC scope selection, state restore/save/corruption/append-only/lock/promote
-(local and a scripted Cloud Storage client), gate decisions on synthetic and real run artifacts,
-publication idempotency, partial-write rollback, reconciliation and retries (scripted publisher), and
-the column-group fix (Sheets-like fake).
+**Verified offline** (`python -m pytest -q`, `ruff`, `actionlint`): workflow structure, pinned actions,
+least-privilege permissions, secrets only in step environments, no Google Cloud dependency left, mode
+decisions, missing and malformed configuration, Sheets authentication from the JSON Secret (a
+generated key, no network), encryption (round trip, tampering, wrong key, rotation, key file),
+state seed, restore, save, corruption, truncation, wrong key, append-only history, timestamps,
+idempotent saves, abandoned drafts, concurrent writers, lost tag races, interrupted uploads,
+rollback, immutable-release behaviour of the local stand-in, bundles, publication records and
+snapshots, the GitHub client against a scripted HTTP session (pagination, retries, rate limits,
+422 cases, token never in errors), gate decisions on synthetic and real run artifacts,
+publication idempotency, partial-write rollback and reconciliation, three end-to-end mode flows over
+a local store.
 
-**Requires a hosted integration test:** that GitHub accepts the workflow and the `timezone` schedule
-key; Workload Identity Federation and bucket permissions; the real Cloud Storage client; a full
-hosted run (runner network, datacenter-IP rate limiting, timing); the Sheets write of the compact
-layout (never run live); the live readback after the column-group fix.
+**Verified once against the real GitHub API** (draft releases only, on 2026-11-10): listing drafts,
+upload, duplicate-name refusal, download, deletion, and the facts under *GitHub Releases as storage*.
+
+**Requires a hosted integration test (not claimed):** GitHub accepting the workflow and the
+`timezone` schedule key; the built-in `GITHUB_TOKEN` creating, publishing and listing releases from a
+runner; **publishing** a release and the asset-upload path with a real Actions token; behaviour
+with immutable releases enabled; Google accepting the Secret from a runner; a full hosted run
+(runner network, datacenter-IP rate limiting, timing); the Sheets write of the compact layout (never
+run live); persistence across two real runs.

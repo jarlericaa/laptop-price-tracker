@@ -120,8 +120,8 @@ configured spreadsheet.
 ## Requirements
 
 - Python 3.11 or newer (`pyproject.toml`). The maintained environment is a Linux (WSL) virtualenv.
-- Packages: `pandas`, `gspread`, `google-auth`, `google-cloud-storage`, `python-dotenv`; `pytest`, `pyyaml` and `ruff` for development
-  (all in `requirements.txt`). No other dependency manager is used.
+- Packages: `pandas`, `gspread`, `google-auth`, `python-dotenv`, `cryptography`, `requests`; `pytest`,
+  `pyyaml` and `ruff` for development (all in `requirements.txt`). No other dependency manager is used.
 - A Google Cloud **service account** with a JSON key, and the spreadsheet shared with the
   service account's email address. Reading needs access to the spreadsheet; publishing needs edit
   access.
@@ -165,7 +165,6 @@ Loaded by `src/laptop_tracker/config.py`. `.env` is Git-ignored.
 | `SPREADSHEET_ID` | for any Sheets access | ID of the tracker spreadsheet. |
 | `GOOGLE_SERVICE_ACCOUNT_FILE` | one of the two credential variables | Path to the service-account JSON key. |
 | `GOOGLE_SERVICE_ACCOUNT_JSON` | one of the two credential variables | The key's JSON content, as an alternative to the file. Takes precedence over the file. |
-| `GOOGLE_USE_ADC` | alternative to both | `true` uses Application Default Credentials (Workload Identity Federation in GitHub Actions). Ignored if a key file or JSON is set. |
 | `RAW_TAB_NAME` | optional, default `raw` | Name of the sales tab. |
 | `MAX_VALIDATION_ERRORS` | optional, default `1000` | Cap on validation errors reported per run. |
 | `SKIP_FRESHNESS_CHECK` | optional, default `false` | Set `true` only to deliberately process an older sales snapshot. |
@@ -334,11 +333,13 @@ target in the sheet and rerun the stage; do not edit published tabs. Schemas:
 
 A GitHub Actions workflow ([.github/workflows/weekly-laptop-tracker.yml](.github/workflows/weekly-laptop-tracker.yml))
 runs the same pipeline unattended: **Mondays 09:17 Asia/Manila**, or on demand. It restores the
-persistent state from a private Cloud Storage bucket, runs `scripts/run_variation_week.sh`, checks
-readiness from the run's own metadata, saves a new versioned state, and (only when asked) publishes
-once through `publish_variation_prices.py` with verification, rollback of a partial write and a
-durable record of every attempt. It authenticates with Workload Identity Federation, so no key is
-stored. Modes:
+persistent state from **encrypted assets of private GitHub Releases** of this repository (written
+with the built-in `GITHUB_TOKEN`; no Google Cloud project, bucket or billing account), runs
+`scripts/run_variation_week.sh`, checks readiness from the run's own metadata, saves a new versioned
+state, and (only when asked) publishes once through `publish_variation_prices.py` with verification,
+rollback of a partial write and a durable record of every attempt. Google Sheets access uses the
+service-account key in the Secret `GOOGLE_SERVICE_ACCOUNT_JSON`; archives are encrypted with the
+Secret `STATE_ENCRYPTION_KEY`. Modes:
 
 | Mode | Writes Sheets |
 |---|---|
@@ -346,7 +347,7 @@ stored. Modes:
 | Manual production (`publish` ticked), or `existing_run_id` to publish a saved run without scraping | yes, after the gates |
 | Scheduled | only when the repository Variable `WEEKLY_AUTOMATION` is `publish` (inert until set) |
 
-The automation is **implemented and tested offline but not yet run on GitHub or Google Cloud**.
+The automation is **implemented and tested offline but not yet run on GitHub Actions**.
 Setup, the first hosted test, activation, recovery and troubleshooting:
 [docs/GITHUB_ACTIONS_SETUP.md](docs/GITHUB_ACTIONS_SETUP.md). Locally nothing changes: the driver is
 still started by hand and publication is still a separate command. To see how a run went, read
@@ -355,9 +356,9 @@ unaccepted code stops the driver and records `FAILED_AT_<stage>` (the discovery 
 code 2, partial success).
 
 CI helper scripts (all in `scripts/`): `ci_plan.py` (mode and configuration check), `ci_state.py`
-(seed, restore, save, lock, promote, run bundles), `ci_run_gate.py` (readiness gate and job summary),
-`ci_publish.py` (gated, idempotent publication). `GOOGLE_USE_ADC=true` makes the Sheets client use
-Application Default Credentials instead of a key file.
+(keygen, seed, restore, save, versions, verify, rollback, report, publication-fetch, run bundles),
+`ci_run_gate.py` (readiness gate and job summary), `ci_publish.py` (gated, idempotent publication).
+First-time seeding of the history: `python scripts/ci_state.py seed` (see the setup guide).
 
 ## Testing and validation
 
@@ -410,7 +411,8 @@ need to exercise the writer, and use `--preview` first. Verify run outputs with 
   and `audit_variation_selection.py` for selection and catalog differences.
 - **Persistent state.** Back up `data/history/price_history.sqlite3` and `config/*decisions.csv`
   before risky operations; they are not in Git. Once the GitHub Actions automation is in use, the
-  bucket holds the authoritative copy: `python scripts/ci_state.py restore --overwrite` before working locally.
+  private Releases hold the authoritative copy: `python scripts/ci_state.py restore --overwrite` before
+  working locally. Back up the encryption key too; without it the stored history cannot be read.
 
 ## Documentation
 
