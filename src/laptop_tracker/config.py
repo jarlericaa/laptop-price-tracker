@@ -23,6 +23,9 @@ class Settings:
     service_account_json: str | None
     max_validation_errors: int
     skip_freshness_check: bool
+    # Application Default Credentials (Workload Identity Federation in GitHub Actions) instead of
+    # a service-account key. Opt-in, so local runs that use a key file are unaffected.
+    use_adc: bool = False
 
     @classmethod
     def from_env(cls, env_file: str | Path | None = ".env") -> Settings:
@@ -36,6 +39,7 @@ class Settings:
             service_account_json=os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON") or None,
             max_validation_errors=int(os.getenv("MAX_VALIDATION_ERRORS", "1000")),
             skip_freshness_check=_as_bool(os.getenv("SKIP_FRESHNESS_CHECK")),
+            use_adc=_as_bool(os.getenv("GOOGLE_USE_ADC")),
         )
 
     def require_sheet_access(self) -> None:
@@ -43,10 +47,13 @@ class Settings:
             raise ValueError("SPREADSHEET_ID is required; set it in .env or the environment.")
         if self.service_account_json:
             return
+        if not self.service_account_file and self.use_adc:
+            return
         if not self.service_account_file:
             raise ValueError(
                 "Google credentials are required. Set GOOGLE_SERVICE_ACCOUNT_FILE or "
-                "GOOGLE_SERVICE_ACCOUNT_JSON."
+                "GOOGLE_SERVICE_ACCOUNT_JSON (or GOOGLE_USE_ADC=true with Application Default "
+                "Credentials)."
             )
         if not self.service_account_file.is_file():
             raise FileNotFoundError(

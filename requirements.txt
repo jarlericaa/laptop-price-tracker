@@ -4,3 +4,5 @@ google-auth
 python-dotenv
 pytest
 ruff
+google-cloud-storage
+pyyaml
