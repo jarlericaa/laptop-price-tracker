@@ -3015,9 +3015,22 @@ class TabLayout:
     def header_row(self) -> int:
         return len(self.preface_heights)
 
+    def merged_groups(self) -> list[tuple[int, int]]:
+        """``groups`` with touching ranges joined. Google Sheets merges adjacent column groups of
+        the same depth into one, so a request that names one of them alone (for example to
+        collapse it) is rejected with "no group ... spans exactly ..." and fails the whole batch.
+        The merged group collapses the same columns."""
+        merged: list[list[int]] = []
+        for first, end in sorted(self.groups):
+            if merged and first <= merged[-1][1]:
+                merged[-1][1] = max(merged[-1][1], end)
+            else:
+                merged.append([first, end])
+        return [(first, end) for first, end in merged]
+
     def planned_groups(self) -> list[dict]:
         return [{"range": {"dimension": "COLUMNS", "startIndex": first, "endIndex": end},
-                 "depth": 1, "collapsed": True} for first, end in self.groups]
+                 "depth": 1, "collapsed": True} for first, end in self.merged_groups()]
 
 
 _NUMBER = {"align": "RIGHT", "mono": True}

@@ -58,8 +58,9 @@ flowchart TD
 
 Steps 1 to 8 are run in order by the driver script [scripts/run_variation_week.sh](scripts/run_variation_week.sh),
 which stops at the publish preview and writes `status.json` (`READY_TO_PUBLISH` or
-`FAILED_AT_<stage>`) into its run folder. **Step 9 is never run automatically.** A person reviews the
-audits and the preview, then runs the publisher.
+`FAILED_AT_<stage>`) into its run folder. **The driver never runs step 9.** A person reviews the
+audits and the preview, then runs the publisher, or the GitHub Actions workflow does after its
+readiness gate (see Automation and scheduling).
 
 Two stages need human attention outside the driver:
 
@@ -76,7 +77,7 @@ laptop-price-tracker/
 ├── src/laptop_tracker/        Application package: schema, eligibility, matching, rate limiting,
 │   └── adapters/              scraping, price tracking, Sheets reader/writer/publisher.
 │                              One adapter per retailer (datablitz, laptop_factory, pcx, pcc, oct).
-├── scripts/                   Command-line entry points (36 Python scripts, see the catalogue
+├── scripts/                   Command-line entry points (40 Python scripts, see the catalogue
 │                              below) and run_variation_week.sh, the weekly driver that
 │                              stops at the publish preview.
 ├── config/                    Rules, registries, templates and owner decisions (see Configuration).
@@ -110,6 +111,7 @@ from the current directory, so the root is the supported working directory.
 | Reports and diagnostics | `build_variation_reports.py`, `build_publication_diagnostics.py`, `build_before_after_report.py`, `coverage_report.py`, `diagnose_blank_cells.py` |
 | Replay and benchmarking | `replay_extraction.py`, `compare_alternative_replay.py`, `measure_discovery.py`, `benchmark_catalog_index.py` |
 | Publication (writes Sheets) | `publish_variation_prices.py` (current), `publish_prices.py` (earlier configuration grain; refuses a workbook prepared for the variation grain) |
+| GitHub Actions helpers | `ci_plan.py`, `ci_state.py`, `ci_run_gate.py`, `ci_publish.py` (see Automation and scheduling) |
 
 All names below are files in `scripts/`. Run a script with `--help` for its options, except
 `smoke_test.py`, which takes no arguments: it ignores `--help` and runs its read-only check against the
@@ -118,8 +120,8 @@ configured spreadsheet.
 ## Requirements
 
 - Python 3.11 or newer (`pyproject.toml`). The maintained environment is a Linux (WSL) virtualenv.
-- Packages: `pandas`, `gspread`, `google-auth`, `python-dotenv`; `pytest` and `ruff` for development
-  (all in `requirements.txt`). No other dependency manager is used.
+- Packages: `pandas`, `gspread`, `google-auth`, `python-dotenv`, `cryptography`, `requests`; `pytest`,
+  `pyyaml` and `ruff` for development (all in `requirements.txt`). No other dependency manager is used.
 - A Google Cloud **service account** with a JSON key, and the spreadsheet shared with the
   service account's email address. Reading needs access to the spreadsheet; publishing needs edit
   access.
@@ -329,12 +331,34 @@ target in the sheet and rerun the stage; do not edit published tabs. Schemas:
 
 ## Automation and scheduling
 
-There is **no GitHub Actions workflow** (no `.github/` directory) and no scheduler in this repository.
-A weekly run is started by hand with `run_variation_week.sh`, in the environment that holds the
-`.env` and the persistent `data/history/` store. Publication is always a separate manual command.
-To see how a run went, read `status.json`, `driver.log` and `stages.jsonl` in its run folder; a stage
-that exits with an unaccepted code stops the driver and records `FAILED_AT_<stage>` (the discovery
-stage accepts exit code 2, partial success).
+A GitHub Actions workflow ([.github/workflows/weekly-laptop-tracker.yml](.github/workflows/weekly-laptop-tracker.yml))
+runs the same pipeline unattended: **Mondays 09:17 Asia/Manila**, or on demand. It restores the
+persistent state from **encrypted assets of private GitHub Releases** of this repository (written
+with the built-in `GITHUB_TOKEN`; no Google Cloud project, bucket or billing account), runs
+`scripts/run_variation_week.sh`, checks readiness from the run's own metadata, saves a new versioned
+state, and (only when asked) publishes once through `publish_variation_prices.py` with verification,
+rollback of a partial write and a durable record of every attempt. Google Sheets access uses the
+service-account key in the Secret `GOOGLE_SERVICE_ACCOUNT_JSON`; archives are encrypted with the
+Secret `STATE_ENCRYPTION_KEY`. Modes:
+
+| Mode | Writes Sheets |
+|---|---|
+| Manual preview (default) | no |
+| Manual production (`publish` ticked), or `existing_run_id` to publish a saved run without scraping | yes, after the gates |
+| Scheduled | only when the repository Variable `WEEKLY_AUTOMATION` is `publish` (inert until set) |
+
+The automation is **implemented and tested offline but not yet run on GitHub Actions**.
+Setup, the first hosted test, activation, recovery and troubleshooting:
+[docs/GITHUB_ACTIONS_SETUP.md](docs/GITHUB_ACTIONS_SETUP.md). Locally nothing changes: the driver is
+still started by hand and publication is still a separate command. To see how a run went, read
+`status.json`, `driver.log` and `stages.jsonl` in its run folder; a stage that exits with an
+unaccepted code stops the driver and records `FAILED_AT_<stage>` (the discovery stage accepts exit
+code 2, partial success).
+
+CI helper scripts (all in `scripts/`): `ci_plan.py` (mode and configuration check), `ci_state.py`
+(keygen, seed, restore, save, versions, verify, rollback, report, publication-fetch, run bundles),
+`ci_run_gate.py` (readiness gate and job summary), `ci_publish.py` (gated, idempotent publication).
+First-time seeding of the history: `python scripts/ci_state.py seed` (see the setup guide).
 
 ## Testing and validation
 
@@ -386,12 +410,15 @@ need to exercise the writer, and use `--preview` first. Verify run outputs with 
 - **Unexpected report changes.** Use `build_before_after_report.py` to compare two runs' own artifacts,
   and `audit_variation_selection.py` for selection and catalog differences.
 - **Persistent state.** Back up `data/history/price_history.sqlite3` and `config/*decisions.csv`
-  before risky operations; they are not in Git.
+  before risky operations; they are not in Git. Once the GitHub Actions automation is in use, the
+  private Releases hold the authoritative copy: `python scripts/ci_state.py restore --overwrite` before
+  working locally. Back up the encryption key too; without it the stored history cannot be read.
 
 ## Documentation
 
 Start here:
 
+- [GitHub Actions automation: setup and operation](docs/GITHUB_ACTIONS_SETUP.md)
 - [Weekly workflow, dataflow and commands](docs/WEEKLY_WORKFLOW.md)
 - [Setup and operations](docs/SETUP_AND_OPERATIONS.md)
 - [Top 100 eligible mapped variations and the next-run commands](docs/MAPPED_TOP_100_2026-11-03.md)

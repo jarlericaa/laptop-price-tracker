@@ -11,7 +11,8 @@
 #   CACHE_HOURS   replay only responses retrieved within this many hours (default 24).
 #   PREV_RUN      earlier run folder: its catalog is diffed in the selection audit.
 cd "$(dirname "$0")/.." || exit 1
-source .venv/bin/activate
+# A local checkout uses its .venv; CI (GitHub Actions) has no .venv and uses the runner's Python.
+if [ -f .venv/bin/activate ]; then source .venv/bin/activate; fi
 
 weekly_run="data/output/weekly_runs/$(date -u +%Y%m%dT%H%M%SZ)"
 mkdir -p "$weekly_run/inputs"
