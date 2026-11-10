@@ -472,7 +472,11 @@ def cli(args, storage, root=None):
     return ci_state.main([*(["--root", str(root)] if root else []), *args], store=store, ring=ring)
 
 
-def test_state_script_seed_restore_save_verify_rollback_cycle(tmp_path, storage, capsys) -> None:
+def test_state_script_seed_restore_save_verify_rollback_cycle(
+    tmp_path, storage, capsys, monkeypatch
+) -> None:
+    # GitHub runners set this, which sends the report summary to a file instead of stdout.
+    monkeypatch.delenv("GITHUB_STEP_SUMMARY", raising=False)
     source = make_root(tmp_path)
     assert cli(["seed"], storage, source) == 0
     runner = tmp_path / "runner"
