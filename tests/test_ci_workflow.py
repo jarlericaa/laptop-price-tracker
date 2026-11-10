@@ -16,6 +16,8 @@ import pytest
 import yaml
 
 from laptop_tracker import ci_config
+from laptop_tracker import release_store as rs
+from laptop_tracker import state_crypto as sc
 from laptop_tracker import state_store as ss
 from laptop_tracker.config import Settings
 from laptop_tracker.run_gate import EXPECTED_STAGES
@@ -25,9 +27,11 @@ ROOT = Path(__file__).resolve().parents[1]
 WORKFLOW = ROOT / ".github/workflows/weekly-laptop-tracker.yml"
 sys.path.insert(0, str(ROOT / "scripts"))
 from test_ci_gate import make_run  # noqa: E402
+from test_ci_publish import PUB, FakeSheet, Publisher, good_report  # noqa: E402
 from test_ci_state import add_observation, make_root  # noqa: E402
 
 import ci_plan  # noqa: E402
+import ci_publish as publish_script  # noqa: E402
 import ci_run_gate  # noqa: E402
 import ci_state  # noqa: E402
 
@@ -66,10 +70,30 @@ def test_manual_runs_preview_by_default(workflow) -> None:
 
 def test_permissions_are_least_privilege(workflow) -> None:
     assert workflow["permissions"] == {"contents": "read"}
-    for name, job in workflow["jobs"].items():
-        perms = job["permissions"]
-        assert perms["contents"] == "read" and set(perms) <= {"contents", "id-token"}, name
-    assert "id-token" not in workflow["jobs"]["plan"]["permissions"]
+    jobs = workflow["jobs"]
+    assert jobs["plan"]["permissions"] == {"contents": "read"}
+    # Only the two jobs that store state / publication records may write, and only contents.
+    assert jobs["collect"]["permissions"] == {"contents": "write"}
+    assert jobs["publish"]["permissions"] == {"contents": "write"}
+    assert "id-token" not in WORKFLOW.read_text()  # no cloud federation any more
+
+
+def test_no_google_cloud_dependency_remains() -> None:
+    text = WORKFLOW.read_text()
+    for forbidden in (
+        "google-github-actions",
+        "workload",
+        "Workload",
+        "GCS_",
+        "GCP_",
+        "gcloud",
+        "GOOGLE_USE_ADC",
+    ):
+        assert forbidden not in text, forbidden
+    assert "google-cloud" not in (ROOT / "requirements.txt").read_text()
+    assert "google-cloud" not in (ROOT / "pyproject.toml").read_text()
+    for path in list((ROOT / "src").rglob("*.py")) + list((ROOT / "scripts").glob("*.py")):
+        assert "google.cloud" not in path.read_text(), path
 
 
 def test_long_jobs_have_a_three_hour_timeout_and_runs_never_overlap(workflow) -> None:
@@ -111,10 +135,43 @@ def test_inputs_reach_shell_only_through_environment_variables(workflow) -> None
         assert "${{ secrets" not in script
 
 
-def test_secrets_are_never_echoed_and_none_are_required(workflow) -> None:
+ALLOWED_SECRETS = {
+    "GITHUB_TOKEN",
+    "GOOGLE_SERVICE_ACCOUNT_JSON",
+    "STATE_ENCRYPTION_KEY",
+    "STATE_ENCRYPTION_KEY_PREVIOUS",
+}
+
+
+def test_only_the_expected_secrets_are_used_and_only_in_step_environments(workflow) -> None:
     text = WORKFLOW.read_text()
-    assert "secrets." not in text  # Workload Identity Federation: no stored key at all
-    assert not re.search(r"echo[^\n]*(GOOGLE_APPLICATION_CREDENTIALS|CREDENTIALS_JSON)", text)
+    assert set(re.findall(r"secrets\.(\w+)", text)) == ALLOWED_SECRETS
+    assert "secrets." not in str(workflow.get("env", {}))  # never workflow-wide
+    for name, job in workflow["jobs"].items():
+        assert "secrets." not in str(job.get("env", {})), name  # never job-wide
+        assert "secrets." not in str(job.get("outputs", {})), name
+        for step in job["steps"]:
+            assert "secrets." not in str(step.get("with", {}))
+            assert "secrets." not in step.get("run", "")
+    assert not re.search(r"echo[^\n]*(SERVICE_ACCOUNT_JSON|ENCRYPTION_KEY|GITHUB_TOKEN)", text)
+
+
+def test_each_step_receives_only_the_secrets_it_needs(workflow) -> None:
+    driver = next(s for s in workflow["jobs"]["collect"]["steps"] if s.get("id") == "driver")
+    # The scraper handles untrusted web content: it gets Sheets access but neither the state key
+    # nor a GitHub token.
+    assert set(driver["env"]) == {"SPREADSHEET_ID", "GOOGLE_SERVICE_ACCOUNT_JSON"}
+    for _, step in all_steps(workflow):
+        env = step.get("env", {})
+        if "ci_state.py" in step.get("run", ""):
+            assert "GITHUB_TOKEN" in env and "STATE_ENCRYPTION_KEY" in env
+            assert "GOOGLE_SERVICE_ACCOUNT_JSON" not in env  # storage never needs Sheets access
+
+
+def test_no_step_installs_or_logs_in_to_a_cloud_cli(workflow) -> None:
+    for _, step in all_steps(workflow):
+        assert "gcloud" not in step.get("run", "")
+        assert not step.get("uses", "").startswith("google-github-actions")
 
 
 def test_publication_happens_only_in_the_gated_publish_job(workflow) -> None:
@@ -129,16 +186,15 @@ def test_publication_happens_only_in_the_gated_publish_job(workflow) -> None:
     assert not any("ci_publish" in s.get("run", "") for s in collect["steps"])
 
 
-def test_state_is_locked_restored_saved_and_unlocked_even_on_failure(workflow) -> None:
+def test_state_is_restored_before_the_run_and_saved_even_on_failure(workflow) -> None:
     steps = {s.get("id"): s for s in workflow["jobs"]["collect"]["steps"] if s.get("id")}
     order = [s.get("id") or s.get("name") for s in workflow["jobs"]["collect"]["steps"]]
-    assert (
-        order.index("lock") < order.index("restore") < order.index("driver") < order.index("save")
-    )
+    assert order.index("restore") < order.index("driver") < order.index("save")
     assert "always()" in steps["save"]["if"] and "restore.outcome" in steps["save"]["if"]
-    unlock = next(s for s in workflow["jobs"]["collect"]["steps"] if "unlock" in s.get("run", ""))
-    assert "always()" in unlock["if"]
-    assert steps["driver"]["continue-on-error"] is True  # so save/unlock run, then the job fails
+    assert steps["driver"]["continue-on-error"] is True  # so save runs, then the job fails
+    # Releases have no lease: one run at a time comes from the concurrency group, and saving
+    # re-checks that the state did not move (see tests/test_ci_state.py).
+    assert not any("lock" in str(s.get("run", "")) for s in workflow["jobs"]["collect"]["steps"])
     final = workflow["jobs"]["collect"]["steps"][-1]
     assert final["if"] == "always()" and "exit 1" in final["run"]
 
@@ -173,7 +229,7 @@ def test_every_cli_subcommand_and_flag_the_workflow_uses_exists() -> None:
             for flag in re.findall(r"(?<![\w-])--[a-z][a-z-]+", command):
                 sub_help = help_text
                 match = re.search(
-                    r"\b(seed|save|versions|lock|restore|unlock|bundle-save|bundle-load|plan|check)\b",
+                    r"\b(seed|save|versions|verify|rollback|report|restore|publication-fetch|bundle-save|bundle-load|plan|check)\b",
                     command,
                 )
                 if match:
@@ -277,38 +333,118 @@ def test_plan_script_writes_github_outputs(tmp_path) -> None:
     assert values["publish"] == "true" and values["skip"] == "false" and values["collect"] == "true"
 
 
-# missing Variables and Secrets ----------------------------------------------------------------
+# missing and invalid Variables and Secrets ----------------------------------------------------
+
+
+def service_account_json(email: str = "tracker@example-project.iam.gserviceaccount.com") -> str:
+    """A syntactically valid service-account key made on the fly (never a real credential)."""
+    from cryptography.hazmat.primitives import serialization
+    from cryptography.hazmat.primitives.asymmetric import rsa
+
+    key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    pem = key.private_bytes(
+        serialization.Encoding.PEM,
+        serialization.PrivateFormat.PKCS8,
+        serialization.NoEncryption(),
+    ).decode()
+    return json.dumps(
+        {
+            "type": "service_account",
+            "project_id": "example-project",
+            "private_key_id": "abc",
+            "private_key": pem,
+            "client_email": email,
+            "token_uri": "https://oauth2.googleapis.com/token",
+        }
+    )
+
+
+VALID_ENV = {"SPREADSHEET_ID": "sheet-123", "STATE_ENCRYPTION_KEY": sc.generate_key()}
 
 
 def test_missing_configuration_is_named_but_never_valued(capsys) -> None:
-    code = ci_plan.main(["check", "--auth"], {"SPREADSHEET_ID": "sheet-123"})
+    code = ci_plan.main(["check"], {"SPREADSHEET_ID": "sheet-123"})
     err = capsys.readouterr().err
     assert code == 1
-    for name in (
-        "GCS_STATE_BUCKET",
-        "GCP_WORKLOAD_IDENTITY_PROVIDER",
-        "GCP_SERVICE_ACCOUNT",
-        "GOOGLE_USE_ADC",
-    ):
-        assert name in err
+    assert "GOOGLE_SERVICE_ACCOUNT_JSON" in err and "STATE_ENCRYPTION_KEY" in err
     assert "sheet-123" not in err
+    assert "GCS" not in err and "WORKLOAD" not in err  # nothing from the old design is required
 
 
-def test_complete_configuration_passes() -> None:
-    env = {
-        "SPREADSHEET_ID": "s",
-        "GOOGLE_USE_ADC": "true",
-        "GCS_STATE_BUCKET": "b",
-        "GCP_WORKLOAD_IDENTITY_PROVIDER": "p",
-        "GCP_SERVICE_ACCOUNT": "a@b.iam",
-    }
-    assert ci_plan.main(["check", "--auth"], env) == 0
-    assert ci_config.missing_settings({**env, "GOOGLE_USE_ADC": "false"}) == [
-        "GOOGLE_USE_ADC (must be true)"
-    ]
+def test_complete_configuration_passes_and_names_the_service_account(capsys) -> None:
+    sa = service_account_json()
+    env = {**VALID_ENV, "GOOGLE_SERVICE_ACCOUNT_JSON": sa}
+    assert ci_plan.main(["check"], env) == 0
+    out = capsys.readouterr().out
+    assert "tracker@example-project.iam.gserviceaccount.com" in out
+    assert json.loads(sa)["private_key"] not in out and VALID_ENV["STATE_ENCRYPTION_KEY"] not in out
 
 
-# authentication -------------------------------------------------------------------------------
+@pytest.mark.parametrize(
+    "secret,expect",
+    [
+        ("not json at all", "not valid JSON"),
+        ('{"type": "authorized_user"}', "not a service-account key"),
+        ('{"type": "service_account", "client_email": "a@b"}', "lacks"),
+    ],
+)
+def test_a_malformed_service_account_secret_is_rejected_without_echoing_it(
+    secret, expect, capsys
+) -> None:
+    assert ci_plan.main(["check"], {**VALID_ENV, "GOOGLE_SERVICE_ACCOUNT_JSON": secret}) == 1
+    err = capsys.readouterr().err
+    assert expect in err and secret not in err
+
+
+def test_a_malformed_encryption_key_is_rejected_without_echoing_it(capsys) -> None:
+    env = {**VALID_ENV, "GOOGLE_SERVICE_ACCOUNT_JSON": service_account_json()}
+    env["STATE_ENCRYPTION_KEY"] = "short-key"
+    assert ci_plan.main(["check"], env) == 1
+    err = capsys.readouterr().err
+    assert "STATE_ENCRYPTION_KEY" in err and "short-key" not in err
+
+
+# Google Sheets authentication through the Secret ----------------------------------------------
+
+
+def test_the_json_secret_authenticates_with_least_privilege_scopes(monkeypatch) -> None:
+    monkeypatch.setenv("GOOGLE_SERVICE_ACCOUNT_JSON", service_account_json())
+    monkeypatch.delenv("GOOGLE_SERVICE_ACCOUNT_FILE", raising=False)
+    monkeypatch.setenv("SPREADSHEET_ID", "sheet-123")
+    loaded = Settings.from_env(None)
+    settings_ok = loaded.service_account_file is None and loaded.service_account_json
+    assert settings_ok
+    loaded.require_sheet_access()
+    read_only = load_credentials(loaded, read_only=True)
+    writer = load_credentials(loaded, read_only=False)
+    assert list(read_only.scopes) == READ_ONLY_SCOPES
+    assert list(writer.scopes) == READ_WRITE_SCOPES
+    assert read_only.service_account_email == "tracker@example-project.iam.gserviceaccount.com"
+
+
+def test_no_credentials_file_is_written_by_the_secret_path(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("GOOGLE_SERVICE_ACCOUNT_JSON", service_account_json())
+    monkeypatch.chdir(tmp_path)
+    load_credentials(Settings.from_env(None), read_only=True)
+    assert list(tmp_path.iterdir()) == []  # nothing to protect or clean up on the runner
+
+
+def test_a_broken_secret_fails_with_a_safe_message(monkeypatch) -> None:
+    monkeypatch.setenv("GOOGLE_SERVICE_ACCOUNT_JSON", '{"type": "service_account", "x": 1}')
+    with pytest.raises(Exception) as caught:  # SheetsSourceError, never the secret text
+        load_credentials(Settings.from_env(None), read_only=True)
+    assert "private_key" not in str(caught.value) and '"x"' not in str(caught.value)
+
+
+def test_missing_credentials_still_fail_loudly() -> None:
+    with pytest.raises(ValueError, match="GOOGLE_SERVICE_ACCOUNT"):
+        settings().require_sheet_access()
+
+
+def test_local_key_file_configuration_is_unchanged(tmp_path) -> None:
+    key = tmp_path / "key.json"
+    key.write_text("{}")
+    settings(service_account_file=key).require_sheet_access()  # no secret needed locally
 
 
 def settings(**kw) -> Settings:
@@ -323,75 +459,68 @@ def settings(**kw) -> Settings:
     return Settings(**{**base, **kw})
 
 
-def test_workload_identity_credentials_use_adc_with_least_privilege_scopes(monkeypatch) -> None:
-    seen = []
-
-    def fake_default(scopes=None):
-        seen.append(list(scopes))
-        return "adc-credentials", "project"
-
-    monkeypatch.setattr("google.auth.default", fake_default)
-    assert load_credentials(settings(use_adc=True), read_only=True) == "adc-credentials"
-    assert load_credentials(settings(use_adc=True), read_only=False) == "adc-credentials"
-    assert seen == [READ_ONLY_SCOPES, READ_WRITE_SCOPES]
-
-
-def test_without_the_adc_opt_in_missing_credentials_still_fail_loudly() -> None:
-    with pytest.raises(ValueError, match="GOOGLE_USE_ADC"):
-        settings().require_sheet_access()
-
-
-def test_local_key_file_configuration_is_unchanged(tmp_path) -> None:
-    key = tmp_path / "key.json"
-    key.write_text("{}")
-    s = Settings.from_env(None)  # reads the real environment without .env
-    assert s.use_adc is False
-    settings(service_account_file=key).require_sheet_access()  # no ADC needed or used
-
-
-def test_adc_is_opt_in_through_the_environment(monkeypatch) -> None:
-    monkeypatch.setenv("GOOGLE_USE_ADC", "true")
-    assert Settings.from_env(None).use_adc is True
-    monkeypatch.setenv("GOOGLE_USE_ADC", "false")
-    assert Settings.from_env(None).use_adc is False
-
-
 # the scripts end to end on a local store ------------------------------------------------------
 
 
-def test_state_script_seed_restore_save_lock_cycle(tmp_path) -> None:
-    backend = ss.LocalBackend(tmp_path / "bucket")
+@pytest.fixture
+def storage(tmp_path):
+    return rs.LocalReleaseStore(tmp_path / "releases"), sc.KeyRing(sc.parse_key(sc.generate_key()))
+
+
+def cli(args, storage, root=None):
+    store, ring = storage
+    return ci_state.main([*(["--root", str(root)] if root else []), *args], store=store, ring=ring)
+
+
+def test_state_script_seed_restore_save_verify_rollback_cycle(tmp_path, storage, capsys) -> None:
     source = make_root(tmp_path)
-    assert ci_state.main(["--root", str(source), "seed"], backend=backend) == 0
+    assert cli(["seed"], storage, source) == 0
     runner = tmp_path / "runner"
-    assert ci_state.main(["--root", str(runner), "restore"], backend=backend) == 0
-    assert ci_state.main(["--root", str(runner), "lock", "--owner", "me"], backend=backend) == 0
-    assert ci_state.main(["lock", "--owner", "you"], backend=backend) == 1  # held
+    assert cli(["restore"], storage, runner) == 0
     add_observation(runner / ss.STORE_REL, 77)
-    assert ci_state.main(["--root", str(runner), "save", "--run-id", "r1"], backend=backend) == 0
-    assert ci_state.main(["unlock", "--owner", "me"], backend=backend) == 0
-    assert ci_state.main(["versions"], backend=backend) == 0
-    assert len(ss.list_versions(backend)) == 2
+    assert cli(["save", "--run-id", "20261109T010000Z"], storage, runner) == 0
+    assert cli(["versions"], storage) == 0 and cli(["verify"], storage) == 0
+    assert cli(["report"], storage) == 0
+    assert "Stored tracker data" in capsys.readouterr().out
+    assert cli(["rollback", "--to", "1"], storage) == 0
+    assert [v["seq"] for v in ss.list_versions(storage[0])] == [1, 2, 3]
 
 
-def test_state_script_restore_without_seed_fails_with_a_clear_message(tmp_path, capsys) -> None:
-    code = ci_state.main(
-        ["--root", str(tmp_path / "r"), "restore"], backend=ss.LocalBackend(tmp_path / "bucket")
-    )
-    assert code == 1 and "seed" in capsys.readouterr().err
+def test_state_script_restore_without_seed_fails_with_a_clear_message(
+    tmp_path, storage, capsys
+) -> None:
+    assert cli(["restore"], storage, tmp_path / "r") == 1
+    assert "seed" in capsys.readouterr().err
 
 
-def test_second_run_starts_from_what_the_first_saved(tmp_path) -> None:
-    backend = ss.LocalBackend(tmp_path / "bucket")
-    ci_state.main(["--root", str(make_root(tmp_path)), "seed"], backend=backend)
-    for n, name in enumerate(("run1", "run2"), start=1):
-        runner = tmp_path / name
-        assert ci_state.main(["--root", str(runner), "restore"], backend=backend) == 0
+def test_state_script_without_a_key_fails_and_never_creates_state(
+    tmp_path, monkeypatch, capsys
+) -> None:
+    monkeypatch.setenv("STATE_LOCAL_DIR", str(tmp_path / "s"))
+    monkeypatch.delenv("STATE_ENCRYPTION_KEY", raising=False)
+    assert ci_state.main(["--root", str(make_root(tmp_path)), "seed"]) == 1
+    assert "STATE_ENCRYPTION_KEY" in capsys.readouterr().err
+    assert not list((tmp_path / "s").glob("*/release.json"))
+
+
+def test_keygen_writes_a_private_file_and_prints_only_the_key_id(tmp_path, capsys) -> None:
+    out = tmp_path / "state.key"
+    assert ci_state.main(["keygen", "--out", str(out)]) == 0
+    key = out.read_text().strip()
+    printed = capsys.readouterr().out
+    assert key not in printed and json.loads(printed)["key_id"] == sc.key_id(sc.parse_key(key))
+    assert ci_state.main(["keygen", "--out", str(out)]) == 1  # never overwrites a key
+    assert out.read_text().strip() == key
+
+
+def test_second_run_starts_from_what_the_first_saved(tmp_path, storage) -> None:
+    cli(["seed"], storage, make_root(tmp_path))
+    for n, name in enumerate(("20261102T010000Z", "20261109T010000Z"), start=1):
+        runner = tmp_path / f"run{n}"
+        assert cli(["restore"], storage, runner) == 0
         add_observation(runner / ss.STORE_REL, 100 + n)
-        assert (
-            ci_state.main(["--root", str(runner), "save", "--run-id", name], backend=backend) == 0
-        )
-    final = ss.restore(backend, tmp_path / "final")
+        assert cli(["save", "--run-id", name], storage, runner) == 0
+    final = ss.restore(*storage, tmp_path / "final")
     assert final["rows"]["observations"] == 4  # 2 seeded + one per run, none lost
 
 
@@ -407,3 +536,87 @@ def test_gate_script_exit_codes_and_output_file(tmp_path) -> None:
         ci_run_gate.main(["--run-dir", str(blocked), "--no-summary", "--max-age-hours", "100000"])
         == 1
     )
+
+
+# the three modes, end to end over the local store ----------------------------------------------
+
+
+def publish_args(run, *extra):
+    return ["--run-dir", str(run), "--max-age-hours", "100000", *extra]
+
+
+def test_scheduled_production_flow_restore_collect_save_publish_verify_next_week(
+    tmp_path, storage
+) -> None:
+    """Mode C: restore, a collected run, state save, bundle, publish from the bundle in a fresh
+    workspace (as the separate publish job does), the record, and the next week's restore."""
+    cli(["seed"], storage, make_root(tmp_path))
+    plan = ci_config.decide_mode("schedule", {}, {"WEEKLY_AUTOMATION": "publish"})
+    assert plan.collect and plan.publish and not plan.skip
+
+    runner = tmp_path / "collect_job"
+    assert cli(["restore"], storage, runner) == 0
+    run = make_run(tmp_path)  # stands in for the driver's output folder
+    add_observation(runner / ss.STORE_REL, 55)
+    assert (
+        ci_run_gate.main(["--run-dir", str(run), "--no-summary", "--max-age-hours", "100000"]) == 0
+    )
+    assert cli(["save", "--run-id", run.name], storage, runner) == 0
+    assert cli(["bundle-save", "--run-dir", str(run)], storage) == 0
+
+    publish_workspace = tmp_path / "publish_job" / run.name  # a different, empty machine
+    assert (
+        cli(["bundle-load", "--run-id", run.name, "--dest", str(publish_workspace)], storage) == 0
+    )
+    publisher = Publisher(tmp_path, report=good_report())
+    sheet = FakeSheet()
+    code = publish_script.main(
+        publish_args(publish_workspace, "--write"),
+        store=storage[0],
+        ring=storage[1],
+        publisher=publisher,
+        open_spreadsheet=lambda read_only: sheet,
+        sleep=lambda s: None,
+    )
+    assert code == 0 and len(publisher.writes()) == 1
+    assert [r["status"] for r in ss.read_publication_attempts(*storage, PUB)] == ["PUBLISHED"]
+
+    nextweek = ss.restore(*storage, tmp_path / "next_week")
+    assert nextweek["rows"]["observations"] == 3 and nextweek["seq"] == 2
+
+
+def test_manual_preview_mode_saves_state_but_never_publishes(tmp_path, storage) -> None:
+    plan = ci_config.decide_mode("workflow_dispatch", {}, {})
+    assert plan.collect and not plan.publish
+    cli(["seed"], storage, make_root(tmp_path))
+    runner = tmp_path / "collect_job"
+    cli(["restore"], storage, runner)
+    add_observation(runner / ss.STORE_REL, 55)
+    assert cli(["save", "--run-id", "20261109T010000Z"], storage, runner) == 0
+    assert ss.restore(*storage, tmp_path / "again")["rows"]["observations"] == 3
+    assert storage[0].list_releases("tracker-pub-") == []  # no publication record exists
+
+
+def test_manual_production_can_publish_an_existing_run_without_collecting(
+    tmp_path, storage
+) -> None:
+    run = make_run(tmp_path)
+    ss.save_bundle(*storage, run, run.name, {})
+    plan = ci_config.decide_mode(
+        "workflow_dispatch", {"publish": "true", "existing_run_id": run.name}, {}
+    )
+    assert not plan.collect and plan.publish and plan.existing_run_id == run.name
+    out = tmp_path / "fresh" / run.name
+    ss.load_bundle(*storage, run.name, out)
+    publisher = Publisher(tmp_path, report=good_report())
+    code = publish_script.main(
+        publish_args(out, "--write"),
+        store=storage[0],
+        ring=storage[1],
+        publisher=publisher,
+        open_spreadsheet=lambda read_only: FakeSheet(),
+        sleep=lambda s: None,
+    )
+    assert (
+        code == 0 and ss.published_versions(storage[0]) == []
+    )  # collected nothing, saved no state

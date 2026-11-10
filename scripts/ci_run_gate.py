@@ -41,17 +41,24 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def previous_counts(backend: ss.Backend) -> dict | None:
-    found = backend.get("publications/latest_success.json")
-    return json.loads(found[0]).get("counts") if found else None
+def previous_counts(store: ss.rs.ReleaseStore, ring: ss.sc.KeyRing) -> dict | None:
+    found = ss.latest_successful_publication(store, ring)
+    return found.get("counts") if found else None
 
 
-def main(argv: list[str] | None = None, *, backend: ss.Backend | None = None) -> int:
+def main(
+    argv: list[str] | None = None,
+    *,
+    store: ss.rs.ReleaseStore | None = None,
+    ring: ss.sc.KeyRing | None = None,
+) -> int:
     args = build_parser().parse_args(argv)
     previous = None
     if args.max_matching_drop_pct is not None:
         try:
-            previous = previous_counts(backend or ss.backend_from_env())
+            if store is None or ring is None:
+                store, ring = ss.store_and_keys()
+            previous = previous_counts(store, ring)
         except ss.StateError as exc:
             print(f"State error: {exc}", file=sys.stderr)
             return 1

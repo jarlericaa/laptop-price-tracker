@@ -6,13 +6,17 @@ here it is replaced by a scripted stand-in so every failure mode can be produced
 
 from __future__ import annotations
 
+import io
 import json
 import sys
+import tarfile
 from pathlib import Path
 
 import pytest
 
 from laptop_tracker import ci_publish as cp
+from laptop_tracker import release_store as rs
+from laptop_tracker import state_crypto as sc
 from laptop_tracker import state_store as ss
 from laptop_tracker.variation_publication import DATA_TABS, RUN_LOG_TAB
 
@@ -292,9 +296,9 @@ def test_a_publisher_that_builds_another_publication_is_refused(tmp_path) -> Non
 
 
 @pytest.fixture
-def backend(tmp_path):
-    store = ss.LocalBackend(tmp_path / "bucket")
-    return store
+def storage(tmp_path):
+    ring = sc.KeyRing(sc.parse_key(sc.generate_key()))
+    return rs.LocalReleaseStore(tmp_path / "releases"), ring
 
 
 def prepare(tmp_path, **kw):
@@ -303,97 +307,152 @@ def prepare(tmp_path, **kw):
     return run
 
 
-def invoke(tmp_path, run, publisher, sheet, backend, *extra, write=True):
+def invoke(tmp_path, run, publisher, sheet, storage, *extra, write=True):
+    store, ring = storage
     argv = ["--run-dir", str(run), "--max-age-hours", "100000", *extra]
     if write:
         argv.append("--write")
     return script.main(
         argv,
-        backend=backend,
+        store=store,
+        ring=ring,
         publisher=publisher,
         open_spreadsheet=lambda read_only: sheet,
         sleep=lambda s: None,
     )
 
 
-def test_preview_mode_never_writes(tmp_path, backend) -> None:
+def attempt_archive_names(storage, tag) -> list[str]:
+    """Decrypt a stored publication attempt and list what it holds."""
+    store, ring = storage
+    release = next(r for r in store.list_releases(tag) if r.tag == tag)
+    root = store.root / str(release.id) / "assets"
+    manifest = json.loads((root / ss.MANIFEST_ASSET).read_text())
+    plain = sc.decrypt_bytes(
+        (root / ss.ATTEMPT_ASSET).read_bytes(),
+        ring,
+        manifest["encryption"]["key_id"],
+        purpose="attempt",
+        name=tag,
+    )
+    with tarfile.open(fileobj=io.BytesIO(plain), mode="r:gz") as archive:
+        return archive.getnames()
+
+
+def test_preview_mode_never_writes(tmp_path, storage) -> None:
     run = prepare(tmp_path)
     publisher = Publisher(tmp_path, report=good_report())
-    assert invoke(tmp_path, run, publisher, FakeSheet(), backend, write=False) == 0
+    assert invoke(tmp_path, run, publisher, FakeSheet(), storage, write=False) == 0
     assert publisher.writes() == [] and any("--preview" in c for c in publisher.calls)
+    assert storage[0].list_releases("") == []  # nothing recorded for a preview
 
 
-def test_production_mode_publishes_and_records_everything_durably(tmp_path, backend) -> None:
+def test_production_mode_publishes_and_records_everything_durably(tmp_path, storage) -> None:
     run = prepare(tmp_path)
-    ss.save_bundle(backend, run, run.name, {})
+    ss.save_bundle(*storage, run, run.name, {})
     publisher = Publisher(tmp_path, report=good_report())
-    assert invoke(tmp_path, run, publisher, FakeSheet(), backend) == 0
-    record, _ = ss.read_publication_record(backend, PUB)
-    assert record["last_status"] == cp.PUBLISHED and len(record["attempts"]) == 1
-    names = backend.list(f"publications/{PUB}/")
+    assert invoke(tmp_path, run, publisher, FakeSheet(), storage) == 0
+    store, ring = storage
+    records = ss.read_publication_attempts(store, ring, PUB)
+    assert [r["status"] for r in records] == [cp.PUBLISHED] and records[0]["run_id"] == run.name
+    names = attempt_archive_names(storage, f"tracker-pub-{PUB}-a01")
     assert any(n.endswith("backup_PILOT_PRICE_COMPARISON.json") for n in names)  # recovery data
-    latest = json.loads(backend.get("publications/latest_success.json")[0])
+    latest = ss.latest_successful_publication(store, ring)
     assert latest["publication_id"] == PUB and latest["counts"]["selected_variations"] == 100
-    manifest = json.loads(backend.get(f"runs/{run.name}/run_manifest.json")[0])
-    assert manifest["publication_status"] == cp.PUBLISHED
 
 
-def test_a_blocked_gate_stops_before_the_publisher_is_even_called(tmp_path, backend) -> None:
+def test_a_blocked_gate_stops_before_the_publisher_is_even_called(tmp_path, storage) -> None:
     run = prepare(tmp_path, discovery_code=2, run_status="PARTIAL_SUCCESS", failures=True)
     publisher = Publisher(tmp_path, report=good_report())
-    assert invoke(tmp_path, run, publisher, FakeSheet(), backend) == 1
+    assert invoke(tmp_path, run, publisher, FakeSheet(), storage) == 1
     assert publisher.calls == []
 
 
-def test_accepting_retailer_failures_is_an_explicit_choice(tmp_path, backend) -> None:
+def test_accepting_retailer_failures_is_an_explicit_choice(tmp_path, storage) -> None:
     run = prepare(tmp_path, discovery_code=2, run_status="PARTIAL_SUCCESS", failures=True)
-    ss.save_bundle(backend, run, run.name, {})
+    ss.save_bundle(*storage, run, run.name, {})
     publisher = Publisher(tmp_path, report=good_report())
-    assert invoke(tmp_path, run, publisher, FakeSheet(), backend, "--accept-retailer-failures") == 0
+    assert invoke(tmp_path, run, publisher, FakeSheet(), storage, "--accept-retailer-failures") == 0
 
 
-def test_a_live_preview_refusal_blocks_the_write(tmp_path, backend) -> None:
+def test_a_live_preview_refusal_blocks_the_write(tmp_path, storage) -> None:
     run = prepare(tmp_path)
     publisher = Publisher(tmp_path, report=good_report(), preview_status="DESTINATION_REFUSED")
-    assert invoke(tmp_path, run, publisher, FakeSheet(), backend) == 1
+    assert invoke(tmp_path, run, publisher, FakeSheet(), storage) == 1
     assert publisher.writes() == []
 
 
-def test_a_changed_publication_id_between_collection_and_publish_blocks(tmp_path, backend) -> None:
+def test_a_changed_publication_id_between_collection_and_publish_blocks(tmp_path, storage) -> None:
     run = prepare(tmp_path)
     publisher = Publisher(tmp_path, report=good_report(), preview_id="PUB-different")
-    assert invoke(tmp_path, run, publisher, FakeSheet(), backend) == 1
+    assert invoke(tmp_path, run, publisher, FakeSheet(), storage) == 1
     assert publisher.writes() == []
 
 
-def test_rerunning_after_success_is_a_no_op_and_adds_no_duplicate_record(tmp_path, backend) -> None:
+def test_rerunning_after_success_is_a_no_op_and_adds_no_duplicate_record(tmp_path, storage) -> None:
     run = prepare(tmp_path)
-    ss.save_bundle(backend, run, run.name, {})
+    ss.save_bundle(*storage, run, run.name, {})
     sheet = FakeSheet()
     publisher = Publisher(tmp_path, report=good_report())
-    assert invoke(tmp_path, run, publisher, sheet, backend) == 0
+    assert invoke(tmp_path, run, publisher, sheet, storage) == 0
     sheet.rows.append(row())  # the Sheet now shows the publication as done
-    assert invoke(tmp_path, run, publisher, sheet, backend) == 0
+    assert invoke(tmp_path, run, publisher, sheet, storage) == 0
     assert len(publisher.writes()) == 1  # the second invocation wrote nothing
-    record, _ = ss.read_publication_record(backend, PUB)
-    assert [a["status"] for a in record["attempts"]] == [cp.PUBLISHED, cp.ALREADY_PUBLISHED]
+    records = ss.read_publication_attempts(*storage, PUB)
+    assert [r["status"] for r in records] == [cp.PUBLISHED]  # the no-op added no record
 
 
-def test_a_failed_publication_exits_nonzero_and_still_keeps_the_backups(tmp_path, backend) -> None:
+def test_a_failed_publication_exits_nonzero_and_still_keeps_the_backups(tmp_path, storage) -> None:
     run = prepare(tmp_path)
-    ss.save_bundle(backend, run, run.name, {})
+    ss.save_bundle(*storage, run, run.name, {})
     report = {"status": "PARTIAL_FAILURE", "publication_id": PUB, "tabs_written": ["x"]}
     publisher = Publisher(tmp_path, report=report, code=1)
-    assert invoke(tmp_path, run, publisher, FakeSheet(), backend) == 1
-    record, _ = ss.read_publication_record(backend, PUB)
-    assert record["last_status"] == cp.PARTIAL_WRITE
-    assert backend.list(f"publications/{PUB}/")
-    assert not backend.exists("publications/latest_success.json")
+    assert invoke(tmp_path, run, publisher, FakeSheet(), storage) == 1
+    records = ss.read_publication_attempts(*storage, PUB)
+    assert records[-1]["status"] == cp.PARTIAL_WRITE
+    assert attempt_archive_names(storage, f"tracker-pub-{PUB}-a01")
+    assert ss.latest_successful_publication(*storage) is None
 
 
-def test_storage_must_be_configured_for_production_publication(tmp_path, monkeypatch) -> None:
-    monkeypatch.delenv("GCS_STATE_BUCKET", raising=False)
-    monkeypatch.delenv("STATE_LOCAL_DIR", raising=False)
+def test_the_bundle_survives_a_failed_publication_so_it_can_be_published_again(
+    tmp_path, storage
+) -> None:
+    run = prepare(tmp_path)
+    ss.save_bundle(*storage, run, run.name, {})
+    failing = Publisher(
+        tmp_path, report={"status": "PARTIAL_FAILURE", "publication_id": PUB}, code=1
+    )
+    assert invoke(tmp_path, run, failing, FakeSheet(), storage) == 1
+    out = tmp_path / "again" / run.name
+    assert ss.load_bundle(*storage, run.name, out)["run_id"] == run.name  # no new scrape needed
+    healthy = Publisher(tmp_path, report=good_report())
+    assert invoke(tmp_path, out, healthy, FakeSheet(), storage) == 0
+    statuses = [r["status"] for r in ss.read_publication_attempts(*storage, PUB)]
+    assert statuses == [cp.PARTIAL_WRITE, cp.PUBLISHED]
+
+
+def test_a_record_that_cannot_be_stored_fails_the_job_even_though_the_sheet_changed(
+    tmp_path, storage
+) -> None:
+    run = prepare(tmp_path)
+    store, ring = storage
+
+    class NoWrites:
+        def __getattr__(self, name):
+            if name in ("create_draft", "upload_asset"):
+                raise rs.ReleaseStoreError("HTTP 403")
+            return getattr(store, name)
+
+    publisher = Publisher(tmp_path, report=good_report())
+    code = invoke(tmp_path, run, publisher, FakeSheet(), (NoWrites(), ring))
+    assert code == 1 and len(publisher.writes()) == 1  # published, but loudly not recorded
+
+
+def test_storage_and_key_must_be_configured_for_production_publication(
+    tmp_path, monkeypatch
+) -> None:
+    for name in ("STATE_ENCRYPTION_KEY", "STATE_LOCAL_DIR", "GITHUB_REPOSITORY", "GITHUB_TOKEN"):
+        monkeypatch.delenv(name, raising=False)
     run = prepare(tmp_path)
     publisher = Publisher(tmp_path, report=good_report())
     code = script.main(

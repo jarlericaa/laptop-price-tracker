@@ -8,6 +8,9 @@ name: Weekly laptop price tracker
 #   C. Scheduled          Mondays 09:17 Asia/Manila, governed by the repository Variable
 #                         WEEKLY_AUTOMATION: unset/off = skipped, preview = no write,
 #                         publish = unattended production run.
+# Durable state lives in encrypted assets of private GitHub Releases of this repository, written
+# with the built-in GITHUB_TOKEN. Google Sheets uses a service-account key kept in a Secret.
+# No Google Cloud project, bucket or billing account is involved.
 # No pull_request or pull_request_target trigger exists, so untrusted code never sees credentials.
 # Setup: docs/GITHUB_ACTIONS_SETUP.md
 
@@ -39,15 +42,10 @@ concurrency:
   group: laptop-price-tracker-production
   cancel-in-progress: false
 
+# Secrets are never set here: each step receives only the ones it needs.
 env:
   PYTHON_VERSION: "3.14"
   PYTHONUNBUFFERED: "1"
-  SPREADSHEET_ID: ${{ vars.SPREADSHEET_ID }}
-  GOOGLE_USE_ADC: "true"
-  GCS_STATE_BUCKET: ${{ vars.GCS_STATE_BUCKET }}
-  GCS_STATE_PREFIX: ${{ vars.GCS_STATE_PREFIX }}
-  GCP_WORKLOAD_IDENTITY_PROVIDER: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
-  GCP_SERVICE_ACCOUNT: ${{ vars.GCP_SERVICE_ACCOUNT }}
 
 jobs:
   plan:
@@ -83,8 +81,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 180
     permissions:
-      contents: read
-      id-token: write # Workload Identity Federation: a short-lived Google token, no stored key
+      contents: write # create the private state Releases (the built-in token, no other credential)
     outputs:
       run_id: ${{ steps.locate.outputs.run_id }}
     steps:
@@ -97,24 +94,30 @@ jobs:
           cache: pip
       - name: Install dependencies
         run: python -m pip install -r requirements.txt
-      - name: Check required Variables
-        run: python scripts/ci_plan.py check --auth
-      - name: Authenticate to Google (Workload Identity Federation)
-        uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3
-        with:
-          workload_identity_provider: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
-          service_account: ${{ vars.GCP_SERVICE_ACCOUNT }}
+      - name: Check required Variables and Secrets (names only, never values)
+        env:
+          SPREADSHEET_ID: ${{ vars.SPREADSHEET_ID }}
+          GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+          STATE_ENCRYPTION_KEY: ${{ secrets.STATE_ENCRYPTION_KEY }}
+        run: python scripts/ci_plan.py check
       - name: Check Google Sheets access (read-only)
+        env:
+          SPREADSHEET_ID: ${{ vars.SPREADSHEET_ID }}
+          GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
         run: python scripts/smoke_test.py
-      - name: Take the state lock
-        id: lock
-        run: python scripts/ci_state.py lock --owner "gha-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" --ttl-minutes 300
-      - name: Restore the latest validated state
+      - name: Restore the latest validated state (private Releases, decrypted, verified)
         id: restore
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          STATE_ENCRYPTION_KEY: ${{ secrets.STATE_ENCRYPTION_KEY }}
+          STATE_ENCRYPTION_KEY_PREVIOUS: ${{ secrets.STATE_ENCRYPTION_KEY_PREVIOUS }}
         run: python scripts/ci_state.py restore
       - name: Run the weekly pipeline (stops at the publication preview)
         id: driver
         continue-on-error: true
+        env:
+          SPREADSHEET_ID: ${{ vars.SPREADSHEET_ID }}
+          GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
         run: bash scripts/run_variation_week.sh
       - name: Locate the run folder
         id: locate
@@ -130,22 +133,40 @@ jobs:
         env:
           ACCEPT_PARTIAL: ${{ needs.plan.outputs.accept_partial }}
           MAX_MATCHING_DROP_PCT: ${{ vars.MAX_MATCHING_DROP_PCT }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          STATE_ENCRYPTION_KEY: ${{ secrets.STATE_ENCRYPTION_KEY }}
+          STATE_ENCRYPTION_KEY_PREVIOUS: ${{ secrets.STATE_ENCRYPTION_KEY_PREVIOUS }}
         run: |
           args=()
           if [ "$ACCEPT_PARTIAL" = "true" ]; then args+=(--accept-retailer-failures); fi
           if [ -n "$MAX_MATCHING_DROP_PCT" ]; then args+=(--max-matching-drop-pct "$MAX_MATCHING_DROP_PCT"); fi
           python scripts/ci_run_gate.py --run-dir "$RUN_DIR" --output "$RUN_DIR/gate.json" \
             --title "Collection result" "${args[@]}"
-      - name: Save validated state (versioned, append-only checked)
+      - name: Save validated state (new version, append-only checked, verified before publishing)
         id: save
         if: always() && steps.restore.outcome == 'success'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          STATE_ENCRYPTION_KEY: ${{ secrets.STATE_ENCRYPTION_KEY }}
+          STATE_ENCRYPTION_KEY_PREVIOUS: ${{ secrets.STATE_ENCRYPTION_KEY_PREVIOUS }}
         run: |
           python scripts/ci_state.py save --run-id "$(basename "${RUN_DIR:-run-${GITHUB_RUN_ID}}")" \
             --note "github run ${GITHUB_RUN_ID} attempt ${GITHUB_RUN_ATTEMPT}"
       - name: Save the run bundle for publication
         id: bundle
         if: steps.driver.outcome == 'success'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          STATE_ENCRYPTION_KEY: ${{ secrets.STATE_ENCRYPTION_KEY }}
+          STATE_ENCRYPTION_KEY_PREVIOUS: ${{ secrets.STATE_ENCRYPTION_KEY_PREVIOUS }}
         run: python scripts/ci_state.py bundle-save --run-dir "$RUN_DIR"
+      - name: Report stored size and unfinished drafts
+        if: always() && steps.restore.outcome == 'success'
+        continue-on-error: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          STATE_ENCRYPTION_KEY: ${{ secrets.STATE_ENCRYPTION_KEY }}
+        run: python scripts/ci_state.py report
       - name: Upload sanitized diagnostics (no sales data, no databases)
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
@@ -158,9 +179,6 @@ jobs:
             data/output/weekly_runs/*/gate.json
           retention-days: 7
           if-no-files-found: ignore
-      - name: Release the state lock
-        if: always() && steps.lock.outcome == 'success'
-        run: python scripts/ci_state.py unlock --owner "gha-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
       - name: Fail the job if any critical step failed
         if: always()
         env:
@@ -193,8 +211,7 @@ jobs:
     timeout-minutes: 60
     environment: production # add required reviewers here if you want a click before each publish
     permissions:
-      contents: read
-      id-token: write
+      contents: write # records of the publication attempt are stored as private Releases
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -205,16 +222,18 @@ jobs:
           cache: pip
       - name: Install dependencies
         run: python -m pip install -r requirements.txt
-      - name: Check required Variables
-        run: python scripts/ci_plan.py check --auth
-      - name: Authenticate to Google (Workload Identity Federation)
-        uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3
-        with:
-          workload_identity_provider: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
-          service_account: ${{ vars.GCP_SERVICE_ACCOUNT }}
+      - name: Check required Variables and Secrets (names only, never values)
+        env:
+          SPREADSHEET_ID: ${{ vars.SPREADSHEET_ID }}
+          GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+          STATE_ENCRYPTION_KEY: ${{ secrets.STATE_ENCRYPTION_KEY }}
+        run: python scripts/ci_plan.py check
       - name: Load the validated run bundle
         env:
           RUN_ID: ${{ needs.collect.outputs.run_id || needs.plan.outputs.existing_run_id }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          STATE_ENCRYPTION_KEY: ${{ secrets.STATE_ENCRYPTION_KEY }}
+          STATE_ENCRYPTION_KEY_PREVIOUS: ${{ secrets.STATE_ENCRYPTION_KEY_PREVIOUS }}
         run: |
           if ! printf '%s' "$RUN_ID" | grep -Eq '^[0-9]{8}T[0-9]{6}Z$'; then
             echo "Run ID '$RUN_ID' is not a run folder name (expected like 20261109T065857Z)." >&2
@@ -227,6 +246,11 @@ jobs:
         env:
           ACCEPT_PARTIAL: ${{ needs.plan.outputs.accept_partial }}
           MAX_MATCHING_DROP_PCT: ${{ vars.MAX_MATCHING_DROP_PCT }}
+          SPREADSHEET_ID: ${{ vars.SPREADSHEET_ID }}
+          GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          STATE_ENCRYPTION_KEY: ${{ secrets.STATE_ENCRYPTION_KEY }}
+          STATE_ENCRYPTION_KEY_PREVIOUS: ${{ secrets.STATE_ENCRYPTION_KEY_PREVIOUS }}
         run: |
           args=()
           if [ "$ACCEPT_PARTIAL" = "true" ]; then args+=(--accept-retailer-failures); fi

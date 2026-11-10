@@ -12,7 +12,8 @@ dependencies = [
   "gspread",
   "google-auth",
   "python-dotenv",
-  "google-cloud-storage",
+  "cryptography",
+  "requests",
 ]
 
 [tool.pytest.ini_options]

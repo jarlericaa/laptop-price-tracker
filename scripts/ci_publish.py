@@ -61,7 +61,8 @@ def publisher_inputs(run_dir: Path) -> list[str]:
 def main(
     argv: list[str] | None = None,
     *,
-    backend: ss.Backend | None = None,
+    store: ss.rs.ReleaseStore | None = None,
+    ring: ss.sc.KeyRing | None = None,
     publisher=None,
     open_spreadsheet=None,
     sleep=None,
@@ -77,11 +78,15 @@ def main(
     from laptop_tracker.variation_publication import DATA_TABS
 
     try:
-        store = None if args.no_state else (backend or ss.backend_from_env())
+        if args.no_state:
+            store = ring = None
+        elif store is None or ring is None:
+            default_store, default_ring = ss.store_and_keys()
+            store, ring = store or default_store, ring or default_ring
         previous = None
         if store is not None and args.max_matching_drop_pct is not None:
-            found = store.get("publications/latest_success.json")
-            previous = json.loads(found[0]).get("counts") if found else None
+            found = ss.latest_successful_publication(store, ring)
+            previous = found.get("counts") if found else None
     except ss.StateError as exc:
         print(f"State error: {exc}", file=sys.stderr)
         return 1
@@ -143,35 +148,18 @@ def main(
         "finished_at_utc": datetime.now(UTC).isoformat(timespec="seconds"),
         **outcome.as_dict(),
     }
-    if store is not None:
+    if store is not None and outcome.classification != cp.ALREADY_PUBLISHED:
         try:
-            ss.append_publication_attempt(store, publication_id, record)
-            if outcome.write_dir:
-                # The publisher's snapshots of the previous tabs: durable recovery data.
-                stamp = Path(outcome.write_dir).name
-                ss.upload_tree(
-                    store, Path(outcome.write_dir), f"publications/{publication_id}/{stamp}"
-                )
-            if outcome.ok:
-                if outcome.classification != cp.ALREADY_PUBLISHED:
-                    store.put(
-                        "publications/latest_success.json",
-                        json.dumps(
-                            {
-                                "publication_id": publication_id,
-                                "run_id": run_id,
-                                "published_at_utc": record["finished_at_utc"],
-                                "counts": gate.metrics.get("counts", {}),
-                            },
-                            indent=2,
-                        ).encode(),
-                    )
-                ss.update_run_manifest(
-                    store,
-                    run_id,
-                    publication_id=publication_id,
-                    publication_status=outcome.classification,
-                )
+            # An already published run changes nothing, so it adds no record. Otherwise one
+            # immutable record per attempt, with the publisher's snapshots of the previous tabs
+            # (durable recovery data) stored encrypted beside it.
+            ss.append_publication_attempt(
+                store,
+                ring,
+                publication_id,
+                {**record, "counts": gate.metrics.get("counts", {})},
+                Path(outcome.write_dir) if outcome.write_dir else None,
+            )
         except ss.StateError as exc:
             print(
                 f"WARNING: could not record the publication in durable storage: {exc}",

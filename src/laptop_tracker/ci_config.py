@@ -6,13 +6,15 @@ missing settings are ever reported, never values.
 
 from __future__ import annotations
 
+import base64
+import binascii
+import json
 from collections.abc import Mapping
 from dataclasses import dataclass
 
 # Repository Variables / Secrets the workflow passes to the pipeline as environment variables.
-SHEETS_SETTINGS = ("SPREADSHEET_ID", "GOOGLE_USE_ADC")
-STATE_SETTINGS = ("GCS_STATE_BUCKET",)
-AUTH_SETTINGS = ("GCP_WORKLOAD_IDENTITY_PROVIDER", "GCP_SERVICE_ACCOUNT")
+SHEETS_SETTINGS = ("SPREADSHEET_ID", "GOOGLE_SERVICE_ACCOUNT_JSON")
+STATE_SETTINGS = ("STATE_ENCRYPTION_KEY",)
 
 AUTOMATION_OFF = "off"
 AUTOMATION_PREVIEW = "preview"
@@ -78,18 +80,41 @@ def decide_mode(event: str, inputs: Mapping[str, str], variables: Mapping[str, s
     return RunPlan(True, False, False, "", False, f"event {event!r} does not run the pipeline.")
 
 
+def google_credentials_problem(value: str) -> tuple[str | None, str]:
+    """Check the service-account JSON Secret without ever echoing it. Returns (problem, email);
+    the service account's e-mail address is not a secret and helps the owner confirm which
+    account must be shared on the workbook."""
+    try:
+        info = json.loads(value)
+    except (json.JSONDecodeError, TypeError):
+        return "GOOGLE_SERVICE_ACCOUNT_JSON is not valid JSON (paste the whole key file).", ""
+    if not isinstance(info, dict) or info.get("type") != "service_account":
+        return "GOOGLE_SERVICE_ACCOUNT_JSON is not a service-account key file.", ""
+    absent = [k for k in ("client_email", "private_key", "token_uri") if not info.get(k)]
+    if absent:
+        return f"GOOGLE_SERVICE_ACCOUNT_JSON lacks: {', '.join(absent)}.", ""
+    return None, str(info["client_email"])
+
+
+def encryption_key_problem(value: str) -> str | None:
+    """STATE_ENCRYPTION_KEY must be 32 random bytes, base64url encoded."""
+    text = (value or "").strip()
+    try:
+        raw = base64.urlsafe_b64decode(text + "=" * (-len(text) % 4))
+    except (binascii.Error, ValueError):
+        return "STATE_ENCRYPTION_KEY is not base64url text."
+    if len(raw) != 32:
+        return "STATE_ENCRYPTION_KEY must decode to 32 bytes (use 'ci_state.py keygen')."
+    return None
+
+
 def missing_settings(
-    env: Mapping[str, str], *, sheets: bool = True, state: bool = True, auth: bool = False
+    env: Mapping[str, str], *, sheets: bool = True, state: bool = True
 ) -> list[str]:
-    """Names of required settings that are empty. ``GOOGLE_USE_ADC`` must be true."""
+    """Names of required settings that are empty (never their values)."""
     needed: list[str] = []
     if sheets:
         needed += list(SHEETS_SETTINGS)
     if state:
         needed += list(STATE_SETTINGS)
-    if auth:
-        needed += list(AUTH_SETTINGS)
-    missing = [name for name in needed if not (env.get(name) or "").strip()]
-    if sheets and "GOOGLE_USE_ADC" not in missing and not _truthy(env.get("GOOGLE_USE_ADC")):
-        missing.append("GOOGLE_USE_ADC (must be true)")
-    return missing
+    return [name for name in needed if not (env.get(name) or "").strip()]

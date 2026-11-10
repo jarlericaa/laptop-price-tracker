@@ -31,7 +31,6 @@ def main(argv: list[str] | None = None, env: dict[str, str] | None = None) -> in
     check = sub.add_parser("check")
     check.add_argument("--no-sheets", action="store_true")
     check.add_argument("--no-state", action="store_true")
-    check.add_argument("--auth", action="store_true", help="Also require the WIF settings.")
     args = parser.parse_args(argv)
     env = dict(os.environ) if env is None else env
 
@@ -65,14 +64,26 @@ def main(argv: list[str] | None = None, env: dict[str, str] | None = None) -> in
                 handle.write(f"**Mode:** {plan.reason}\n")
         return 0
 
-    missing = missing_settings(
-        env, sheets=not args.no_sheets, state=not args.no_state, auth=args.auth
-    )
+    missing = missing_settings(env, sheets=not args.no_sheets, state=not args.no_state)
     if missing:
         print(
             "Missing or empty repository Variables/Secrets: " + ", ".join(missing), file=sys.stderr
         )
         print("See docs/GITHUB_ACTIONS_SETUP.md, section 'Variables and Secrets'.", file=sys.stderr)
+        return 1
+    problems = []
+    if not args.no_sheets:
+        problem, email = ci_config.google_credentials_problem(env["GOOGLE_SERVICE_ACCOUNT_JSON"])
+        if problem:
+            problems.append(problem)
+        else:
+            print(f"Google service account: {email} (this account must be Editor on the workbook).")
+    if not args.no_state:
+        key_problem = ci_config.encryption_key_problem(env["STATE_ENCRYPTION_KEY"])
+        if key_problem:
+            problems.append(key_problem)
+    if problems:
+        print("Invalid configuration: " + " ".join(problems), file=sys.stderr)
         return 1
     print("Required configuration is present.")
     return 0
