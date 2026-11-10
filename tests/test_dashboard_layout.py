@@ -169,8 +169,9 @@ def test_publication_collapses_the_groups_and_uses_no_merged_cells(world) -> Non
 
     sheet = fake.sheets[COMPARISON_TAB]
     layout = comparison_layout(comparison_header())
+    # Sheets merges touching groups of one depth, so the publisher writes the merged spans.
     assert [(g["range"]["startIndex"], g["range"]["endIndex"]) for g in sheet["groups"]] == list(
-        layout.groups
+        layout.merged_groups()
     )
     assert all(g["collapsed"] and g["depth"] == 1 for g in sheet["groups"])
     assert sheet["hidden"] == set(range(comparison_visible_width(), len(comparison_header())))
@@ -178,6 +179,17 @@ def test_publication_collapses_the_groups_and_uses_no_merged_cells(world) -> Non
     # Header and two identity columns frozen; banner rows sit above the sortable table.
     assert (sheet["frozen"], sheet["frozen_columns"]) == (3, 3)
     assert sheet["filter"]["startRowIndex"] == 2
+
+
+def test_planned_groups_never_touch_so_sheets_cannot_merge_them() -> None:
+    layout = comparison_layout(comparison_header())
+    spans = layout.merged_groups()
+    gaps = zip(spans, spans[1:], strict=False)
+    assert spans and all(a_end < b_start for (_, a_end), (b_start, _) in gaps)
+    covered = {c for first, end in layout.groups for c in range(first, end)}
+    assert covered == {c for first, end in spans for c in range(first, end)}
+    planned = layout.planned_groups()
+    assert [(g["range"]["startIndex"], g["range"]["endIndex"]) for g in planned] == spans
 
 
 def test_banner_rows_show_the_week_cutoff_and_legend_once(world) -> None:  # noqa: F811
@@ -477,7 +489,9 @@ def test_a_repeated_publication_leaves_exactly_the_same_groups_notes_rules_and_g
     assert snapshot_of(fake) == first
     assert fake.values(GUIDE_TAB) == first_guide  # appended rows are found, not appended again
     assert fake.sheets[GUIDE_TAB]["merges"] == guide_merges
-    assert len(fake.sheets[COMPARISON_TAB]["groups"]) == len(comparison_groups())
+    assert len(fake.sheets[COMPARISON_TAB]["groups"]) == len(
+        comparison_layout(comparison_header()).merged_groups()
+    )
     assert fake.sheets[COMPARISON_TAB]["cf"] == []
 
 

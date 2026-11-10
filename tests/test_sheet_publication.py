@@ -211,8 +211,20 @@ class FakeSpreadsheet:
                     inside = [g for g in sheet["groups"]
                               if g["range"]["startIndex"] <= span[0]
                               and g["range"]["endIndex"] >= span[1]]
-                    sheet["groups"].append({"range": dict(rng), "depth": len(inside) + 1,
-                                            "collapsed": False})
+                    depth = len(inside) + 1
+                    # Like Google Sheets, join groups of one depth that touch or overlap, so a
+                    # request naming only one of them later finds no group spanning exactly it.
+                    touching = [g for g in sheet["groups"] if g["depth"] == depth
+                                and g["range"]["dimension"] == rng["dimension"]
+                                and g["range"]["startIndex"] <= span[1]
+                                and g["range"]["endIndex"] >= span[0]]
+                    for g in touching:
+                        sheet["groups"].remove(g)
+                        span = (min(span[0], g["range"]["startIndex"]),
+                                max(span[1], g["range"]["endIndex"]))
+                    sheet["groups"].append({
+                        "range": {**rng, "startIndex": span[0], "endIndex": span[1]},
+                        "depth": depth, "collapsed": False})
                 else:
                     if not same:
                         raise AssertionError("no such column group to delete")

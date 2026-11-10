@@ -48,6 +48,13 @@ moves the banner. No merged cells anywhere in the table.
 Nothing was dropped: all earlier columns remain, and the detail fields below were added. Each group is a
 native Sheets column group, collapsed, one level deep (click `+` above the column letters).
 
+**Correction (2026-11-10).** The groups below tile the columns without a gap, and Google Sheets
+joins adjacent groups of one depth into a single group, so the nine groups cannot be collapsed one by
+one (the 2026-11-09 write failed with `no group at depth 1 that spans exactly ...`). The publisher
+now writes the touching spans as **one** collapsed group (`TabLayout.merged_groups()`); the same
+columns are hidden and one `+` expands all of them. The group list below describes the column blocks,
+not separate toggles.
+
 1. **Expanded specifications**: Shopee item, brand, series, model, screen, CPU family and model, RAM, storage, GPU.
 2. **Shopee details**: listing link, full price status, observed date, date basis.
 3. **`<R> details`**, one group per retailer, 15 columns: full status text, machine status (price status,
