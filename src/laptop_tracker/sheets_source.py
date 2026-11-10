@@ -6,7 +6,6 @@ import json
 from collections.abc import Sequence
 
 import gspread
-from google.auth import exceptions as google_exceptions
 from google.oauth2.service_account import Credentials
 
 from .config import Settings
@@ -30,13 +29,9 @@ def load_credentials(settings: Settings, *, read_only: bool = True) -> Credentia
             info = json.loads(settings.service_account_json)
             return Credentials.from_service_account_info(info, scopes=scopes)
         settings.require_sheet_access()
-        if settings.service_account_file is None:  # GOOGLE_USE_ADC: Workload Identity Federation
-            import google.auth
-
-            credentials, _ = google.auth.default(scopes=scopes)
-            return credentials
+        assert settings.service_account_file is not None
         return Credentials.from_service_account_file(settings.service_account_file, scopes=scopes)
-    except (json.JSONDecodeError, OSError, ValueError, google_exceptions.GoogleAuthError) as exc:
+    except (json.JSONDecodeError, OSError, ValueError) as exc:
         raise SheetsSourceError(
             "Unable to load Google service-account credentials. Check the configured source."
         ) from exc
