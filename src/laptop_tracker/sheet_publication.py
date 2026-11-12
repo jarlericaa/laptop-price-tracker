@@ -2634,7 +2634,7 @@ def destination_problems(
 # user-entered format, column widths, row heights, frozen panes, gridlines, the basic filter and
 # (for information) conditional formats and merges. Taken before any write and used by rollback.
 SNAPSHOT_FIELDS = (
-    "sheets(properties(sheetId,title,gridProperties),basicFilter,conditionalFormats,merges,"
+    "sheets(properties(sheetId,title,hidden,gridProperties),basicFilter,conditionalFormats,merges,"
     "columnGroups,"
     "data(startRow,startColumn,rowMetadata(pixelSize),columnMetadata(pixelSize,hiddenByUser),"
     "rowData(values(userEnteredValue,formattedValue,hyperlink,note,userEnteredFormat))))"
@@ -2651,7 +2651,17 @@ def snapshot_tab(
         return None
     metadata = spreadsheet.fetch_sheet_metadata(
         params={"ranges": f"'{title}'", "includeGridData": "true", "fields": SNAPSHOT_FIELDS})
-    return next(s for s in metadata["sheets"] if s["properties"]["title"] == title)
+    found = next(s for s in metadata["sheets"] if s["properties"]["title"] == title)
+    # The API omits ``hidden`` for a visible tab, so "absent" alone cannot tell a visible tab
+    # from a snapshot taken before visibility was recorded; this marker can.
+    found["visibility_recorded"] = True
+    return found
+
+
+def visibility_request(sheet_id: int, hidden: bool) -> dict:
+    """Show or hide one tab (its own sheet ID, the one field)."""
+    return {"updateSheetProperties": {
+        "properties": {"sheetId": sheet_id, "hidden": hidden}, "fields": "hidden"}}
 
 
 def snapshot_rows(snapshot: Mapping) -> list[list[dict]]:
@@ -2740,6 +2750,9 @@ def restore_requests(snapshot: Mapping, sheet_id: int,
     requests.append({"updateSheetProperties": {
         "properties": {"sheetId": sheet_id, "gridProperties": restored},
         "fields": ",".join(f"gridProperties.{name}" for name in restored)}})
+    if snapshot.get("visibility_recorded"):
+        requests.append(visibility_request(
+            sheet_id, bool(snapshot.get("properties", {}).get("hidden"))))
     data = (snapshot.get("data") or [{}])[0]
     requests += _dimension_requests(sheet_id, "COLUMNS", data.get("columnMetadata", []))
     requests += _dimension_requests(sheet_id, "ROWS", data.get("rowMetadata", []))
@@ -2942,7 +2955,9 @@ def tab_requests(
                     }
                 }
             }
-        },
+        }
+        if layout is None or layout.basic_filter
+        else {"clearBasicFilter": {"sheetId": sheet_id}},
     ]
     if layout is not None:
         requests += layout_requests(sheet_id, rows, layout)
@@ -2978,7 +2993,12 @@ STATUS_FILLS = {"match": _rgb("#D5EFDB"), "alt1": _rgb("#FFF2A8"), "alt2": _rgb(
                 "recheck": _rgb("#DADDE3"),
                 # Variation dashboard (2026-11-05): review/conflict is a distinct violet; results
                 # without a price are a quiet neutral; a stale Shopee snapshot is a soft amber.
-                "review": _rgb("#E4DAF4"), "missing": _rgb("#EEF1F5"), "stale": _rgb("#FFE3B8")}
+                "review": _rgb("#E4DAF4"), "missing": _rgb("#EEF1F5"), "stale": _rgb("#FFE3B8"),
+                # PRICE COMPARISON (2026-11-12): the competitiveness result (restrained green and
+                # red tints, a neutral and a grey) and the two section-label tints.
+                "cmp_green": _rgb("#D5EFDB"), "cmp_red": _rgb("#F8D7D4"),
+                "cmp_neutral": _rgb("#E6EAF0"), "cmp_gray": _rgb("#EEF1F5"),
+                "section_a": _rgb("#DCE4F1"), "section_b": _rgb("#EAEFF7")}
 PADDING = {"top": 6, "right": 8, "bottom": 6, "left": 8}
 LAYOUT_FIELDS = ",".join(f"userEnteredFormat.{name}" for name in (
     "backgroundColor", "backgroundColorStyle", "horizontalAlignment", "verticalAlignment",
@@ -3011,6 +3031,10 @@ class TabLayout:
     # The publisher owns this tab's column positions: rules and groups left by an earlier layout
     # would point at the wrong columns, so it removes them all and writes only its own.
     manage_columns: bool = False
+    # A business-facing tab carries no filter controls: the basic filter is cleared, not set.
+    basic_filter: bool = True
+    # Font size of the first banner row (the sheet title); 0 keeps the banner size.
+    title_size: int = 0
 
     @property
     def header_row(self) -> int:
@@ -3170,6 +3194,10 @@ def layout_requests(sheet_id: int | None, rows: int, layout: TabLayout) -> list[
         # Banner text overflows into the empty cells beside it; chips are filled by the plan.
         requests.append(style(area(0, top, 0, width), _format(
             background=WHITE, text_color=INK, wrap="OVERFLOW_CELL")))
+        if layout.title_size:
+            requests.append(style(
+                area(0, 1, 0, width), {"textFormat": {"fontSize": layout.title_size}},
+                "userEnteredFormat.textFormat.fontSize"))
     for left, right, header in groups(lambda c: c.header):
         requests.append(style(area(top, top + 1, left, right), _format(
             background=HEADER_FILLS[header], border=True,

@@ -359,8 +359,10 @@ twice. Afterwards the Releases hold the authoritative copy: run
    accept that coverage. Approve the waiting `production` job if you required reviewers.
 6. **Verify the copy really was the destination.** The publish log prints `Destination spreadsheet:
    Copy of ...`; the **copy's** `PILOT_PRICE_RUN_LOG` has a row with the publication ID, `SUCCESS` and
-   readback `PASSED`, and its comparison tab shows the compact layout with collapsed detail columns;
-   the **production** workbook's version history is unchanged.
+   readback `PASSED`, and the copy has one visible `PRICE COMPARISON` tab (19 columns, one row per
+   Top 100 variation) with the `PILOT_PRICE_*` tabs hidden (unhide `PILOT_PRICE_COMPARISON` to see the
+   compact technical layout with collapsed detail columns); the **production** workbook's version
+   history is unchanged.
 7. **Test idempotency.** Repeat step 5 with the same `existing_run_id`: the job must end
    `ALREADY_PUBLISHED`, change nothing and add no new `tracker-pub-...` release.
 8. **Test recovery.** Run `python scripts/ci_state.py verify` (downloads and validates the latest

@@ -571,7 +571,7 @@ def test_preview_reads_the_earlier_layout_and_changes_nothing(world) -> None:  #
     assert code == 0 and opened == [True] and fake.mutations == []
     folder = sorted(world["out"].iterdir())[-1]
     assert (folder / f"plan_{COMPARISON_TAB}_notes.csv").is_file()
-    assert latest_report(world)["layout_version"] == "variation-compact-1"
+    assert latest_report(world)["layout_version"] == "variation-business-1"
 
 
 def test_a_tab_with_unrecognised_content_is_still_refused(world, capsys) -> None:  # noqa: F811

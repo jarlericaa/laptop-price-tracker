@@ -67,11 +67,12 @@ CANDIDATE_SLUG = "ex04-candidate"
 
 
 class FakeWorksheet:
-    def __init__(self, sheet: dict) -> None:
+    def __init__(self, sheet: dict, index: int = 0) -> None:
         self.title = sheet["title"]
         self.id = sheet["id"]
         self.row_count = sheet["rows"]
         self.col_count = sheet["cols"]
+        self.index = index
 
 
 class FakeSpreadsheet:
@@ -101,18 +102,31 @@ class FakeSpreadsheet:
                  "heights": {}, "layout": {}, "gridlines_hidden": False,
                  # column groups ({range, depth, collapsed}), conditional-format rules, merged
                  # ranges and hidden columns (a collapsed group hides its columns)
-                 "groups": [], "cf": [], "merges": [], "hidden": set()}
+                 "groups": [], "cf": [], "merges": [], "hidden": set(),
+                 # the tab itself hidden from the sheet list (not a hidden column)
+                 "tab_hidden": False}
         self.sheets[title] = sheet
         return sheet
 
     def worksheets(self):
-        return [FakeWorksheet(sheet) for sheet in self.sheets.values()]
+        return [FakeWorksheet(sheet, i) for i, sheet in enumerate(self.sheets.values())]
 
-    def add_worksheet(self, title, rows, cols):
+    def add_worksheet(self, title, rows, cols, index=None):
         if self.read_only:
             raise PermissionError("read-only scope")
         self.mutations.append(f"add_worksheet:{title}")
-        return FakeWorksheet(self._new(title, rows, cols))
+        sheet = self._new(title, rows, cols)
+        if index is not None:  # inserted at that position, as Sheets does
+            order = [t for t in self.sheets if t != title]
+            order.insert(index, title)
+            self.sheets = {t: self.sheets[t] for t in order}
+        return FakeWorksheet(sheet, list(self.sheets).index(title))
+
+    def hide_tab(self, title: str) -> None:
+        self.sheets[title]["tab_hidden"] = True
+
+    def visible_tabs(self) -> list[str]:
+        return [t for t, s in self.sheets.items() if not s["tab_hidden"]]
 
     def batch_update(self, body):
         if self.read_only:
@@ -133,6 +147,8 @@ class FakeSpreadsheet:
                 sheet["frozen"] = grid.get("frozenRowCount", sheet["frozen"])
                 sheet["frozen_columns"] = grid.get("frozenColumnCount", sheet["frozen_columns"])
                 sheet["gridlines_hidden"] = grid.get("hideGridlines", sheet["gridlines_hidden"])
+                if "hidden" in props:
+                    sheet["tab_hidden"] = props["hidden"]
             elif kind == "setBasicFilter":
                 rng = payload["filter"]["range"]
                 by_id[rng["sheetId"]]["filter"] = rng
@@ -258,6 +274,11 @@ class FakeSpreadsheet:
             self.after_batch(self)
 
     def fetch_sheet_metadata(self, params=None):
+        if "ranges" not in params:  # properties of every tab (no grid data)
+            return {"sheets": [
+                {"properties": {"sheetId": s["id"], "title": t,
+                                **({"hidden": True} if s["tab_hidden"] else {})}}
+                for t, s in self.sheets.items()]}
         title = params["ranges"].strip("'")
         sheet = self.sheets[title]
         cells = sheet["grid"]
@@ -286,6 +307,7 @@ class FakeSpreadsheet:
                     "properties": {
                         "sheetId": sheet["id"],
                         "title": title,
+                        **({"hidden": True} if sheet["tab_hidden"] else {}),
                         "gridProperties": {"rowCount": sheet["rows"],
                                            "columnCount": sheet["cols"],
                                            "frozenRowCount": sheet["frozen"],

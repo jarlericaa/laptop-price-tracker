@@ -16,6 +16,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
+from laptop_tracker.price_comparison_view import PRICE_TAB, write_display_csv
 from laptop_tracker.sheet_guide import GUIDE_TAB, plan_guide
 from laptop_tracker.sheet_publication import (
     RETIRED_TABS,
@@ -158,6 +159,8 @@ def main(
         write_plan_csv(run_dir / f"plan_{title}.csv", tab)
         if any(cell.note or cell.italic for row in tab.grid() for cell in row):
             notes[title] = write_plan_notes_csv(run_dir / f"plan_{title}_notes.csv", tab)
+    # What a reader will see in PRICE COMPARISON (amounts with their (OOS) / Stale words).
+    write_display_csv(run_dir / "preview_PRICE_COMPARISON.csv", plan.tabs[PRICE_TAB])
     week = report.summary["report_week"]
     counts = report.counts
     local_report: dict = {
@@ -273,7 +276,13 @@ def main(
     print(f"Destination spreadsheet: {getattr(spreadsheet, 'title', '(configured)')}.")
     for title in PUBLISHER_TABS:
         state = states[title]
-        before = f"exists, {state.used_rows} used rows" if state.exists else "MISSING"
+        before = (
+            f"exists, {state.used_rows} used rows"
+            if state.exists
+            else "does not exist yet; will be created"
+            if title == PRICE_TAB
+            else "MISSING"
+        )
         planned = plan.tabs.get(title)
         banner = f"{planned.header_row} banner rows + " if planned and planned.header_row else ""
         rows = (

@@ -25,6 +25,7 @@ from test_verified_top import load_script
 
 from laptop_tracker import ci_publish as cp
 from laptop_tracker import sheets_quota as q
+from laptop_tracker.price_comparison_view import PRICE_TAB
 from laptop_tracker.sheet_publication import SNAPSHOT_FIELDS
 from laptop_tracker.variation_publication import (
     CONTRACT_PATH,
@@ -36,6 +37,11 @@ from laptop_tracker.variation_publication import (
     load_contract,
     load_variation_report,
 )
+
+# The workbook before a first publication has no PRICE COMPARISON tab (the publisher creates it),
+# so "as before" comparisons cover the tabs that already existed.
+EXISTING_TABS = tuple(t for t in PUBLISHER_TABS if t != PRICE_TAB)
+EXISTING_DATA_TABS = tuple(t for t in DATA_TABS if t != PRICE_TAB)
 
 
 def exhausted() -> q.SheetsRetryExhausted:
@@ -92,9 +98,10 @@ def test_a_publication_lists_the_worksheets_once_per_phase_not_once_per_tab(worl
     fake = CountingSpreadsheet(template_tabs())
     code, fake, _ = run(world, fake=fake)
     assert code == 0 and latest_report(world)["status"] == "SUCCESS"
-    # preview/inspection, the publisher's own inspection and backups, the readback: three phases.
-    # Before the fix this was one listing per tab read and per snapshot (about 50 per publication).
-    assert fake.listings <= 3
+    # preview/inspection, the publisher's own inspection and backups, the readback, and the run
+    # log after the tab visibility changed: four phases. Before the fix this was one listing per
+    # tab read and per snapshot (about 50 per publication).
+    assert fake.listings <= 4
     # Tab contents are still read every time they are needed: nothing was cached or skipped.
     assert len(fake.read_titles) >= 4 * len(PUBLISHER_TABS)
     assert fake.snapshot_reads >= len(PUBLISHER_TABS)
@@ -134,7 +141,7 @@ def template_tabs_grid(title: str) -> dict:
 def test_quota_exhaustion_while_taking_backups_changes_nothing_and_says_so(world, capsys) -> None:  # noqa: F811
     fake = CountingSpreadsheet(seeded_tabs())
     fake.fail_snapshots = True
-    before = {t: fake.values(t) for t in PUBLISHER_TABS}
+    before = {t: fake.values(t) for t in EXISTING_TABS}
     code, fake, _ = run(world, fake=fake)
 
     report = latest_report(world)
@@ -142,7 +149,8 @@ def test_quota_exhaustion_while_taking_backups_changes_nothing_and_says_so(world
     assert report["status"] == "FAILED_BEFORE_WRITE" and report["tabs_written"] == []
     assert "SheetsRetryExhausted" in report["error"] and "HTTP 429" in report["error"]
     assert "stopped before any write" in capsys.readouterr().err
-    assert {t: fake.values(t) for t in PUBLISHER_TABS} == before
+    assert {t: fake.values(t) for t in EXISTING_TABS} == before
+    assert PRICE_TAB not in fake.sheets  # not even the new tab was created
 
     # Once the quota clears, the same publication goes through and the history is intact.
     fake.fail_snapshots = False
@@ -168,7 +176,7 @@ def test_the_ci_wrapper_classifies_that_failure_as_before_write_and_does_not_rol
 def test_quota_exhaustion_during_readback_is_recorded_not_left_in_progress(world) -> None:  # noqa: F811
     fake = CountingSpreadsheet(seeded_tabs())
     fake.fail_reads_after_batches = 1 + len(DATA_TABS)  # every data tab is written, then reads fail
-    before = {t: fake.values(t) for t in DATA_TABS}
+    before = {t: fake.values(t) for t in EXISTING_DATA_TABS}
     code, fake, _ = run(world, fake=fake)
     fake.fail_reads_after_batches = None  # the quota has cleared by the time a person looks
 
@@ -183,7 +191,7 @@ def test_quota_exhaustion_during_readback_is_recorded_not_left_in_progress(world
     # The local snapshots restore every data tab exactly as before the attempt.
     folder = sorted(world["out"].iterdir())[-1]
     assert sorted(p.name for p in folder.glob("backup_*.json")) == sorted(
-        f"backup_{t}.json" for t in PUBLISHER_TABS
+        f"backup_{t}.json" for t in EXISTING_TABS
     )
     code = load_script("publish_variation_prices").main(
         ["--rollback", str(folder), "--output-root", str(world["out"])],
@@ -191,7 +199,11 @@ def test_quota_exhaustion_during_readback_is_recorded_not_left_in_progress(world
         now=NOW + timedelta(minutes=9),
     )
     assert code == 0
-    assert {t: fake.values(t) for t in DATA_TABS} == before
+    assert {t: fake.values(t) for t in EXISTING_DATA_TABS} == before
+    # Visibility was never switched: the readback did not complete, so the tabs people use stay
+    # and the new, unverified business tab stays hidden.
+    assert PRICE_TAB not in fake.visible_tabs()
+    assert "PILOT_PRICE_COMPARISON" in fake.visible_tabs()
 
 
 @pytest.mark.parametrize("failing_batch", [1, 2, 4, 7])
@@ -201,7 +213,7 @@ def test_a_write_failure_at_any_point_keeps_history_and_backups_and_can_be_rolle
 ) -> None:
     fake = CountingSpreadsheet(seeded_tabs())
     fake.fail_on_batch = failing_batch
-    before = {t: fake.values(t) for t in PUBLISHER_TABS}
+    before = {t: fake.values(t) for t in EXISTING_TABS}
     code, fake, _ = run(world, fake=fake)
 
     report = latest_report(world)
@@ -211,7 +223,7 @@ def test_a_write_failure_at_any_point_keeps_history_and_backups_and_can_be_rolle
     mine = [r for r in rows if r["Publication ID"] != "PUB-OLD"]
     assert len(mine) == 1 and mine[0]["Publication status"] == "PARTIAL_FAILURE"
     folder = sorted(world["out"].iterdir())[-1]
-    assert len(list(folder.glob("backup_*.json"))) == len(PUBLISHER_TABS)
+    assert len(list(folder.glob("backup_*.json"))) == len(EXISTING_TABS)
 
     code = load_script("publish_variation_prices").main(
         ["--rollback", str(folder), "--output-root", str(world["out"])],
@@ -219,7 +231,9 @@ def test_a_write_failure_at_any_point_keeps_history_and_backups_and_can_be_rolle
         now=NOW + timedelta(minutes=9),
     )
     assert code == 0
-    assert {t: fake.values(t) for t in DATA_TABS} == {t: before[t] for t in DATA_TABS}
+    assert {t: fake.values(t) for t in EXISTING_DATA_TABS} == {
+        t: before[t] for t in EXISTING_DATA_TABS
+    }
     after = run_log_rows(fake)  # the run log is a record: rollback never rewrites it
     assert [r["Publication ID"] for r in after] == [r["Publication ID"] for r in rows]
 
@@ -302,11 +316,11 @@ def test_after_a_partial_attempt_nothing_is_written_until_a_person_confirms(
 ) -> None:  # noqa: F811
     fake = CountingSpreadsheet(seeded_tabs())
     fake.fail_on_batch = 4
-    before = {t: fake.values(t) for t in DATA_TABS}
+    before = {t: fake.values(t) for t in EXISTING_DATA_TABS}
     first = publish_through_ci(world, tmp_path, fake)
     # The wrapper rolled the data tabs back; the run log still records the failed attempt.
     assert first.classification == cp.PARTIAL_WRITE and first.rollback["status"] == "SUCCESS"
-    assert {t: fake.values(t) for t in DATA_TABS} == before
+    assert {t: fake.values(t) for t in EXISTING_DATA_TABS} == before
     assert run_log_rows(fake)[-1]["Publication status"] == "PARTIAL_FAILURE"
 
     fake.fail_on_batch = None
