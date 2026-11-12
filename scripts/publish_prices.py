@@ -37,6 +37,7 @@ from laptop_tracker.sheet_publication import (
     write_plan_csv,
     write_plan_notes_csv,
 )
+from laptop_tracker.sheets_quota import cached
 
 ROOT = Path(__file__).resolve().parents[1]
 OUTPUT = ROOT / "data" / "output"
@@ -246,7 +247,7 @@ def main(
     # 2. Open the configured spreadsheet: read-only scope for preview, write scope to publish.
     factory = spreadsheet_factory or open_configured_spreadsheet
     try:
-        spreadsheet = factory(not args.write_sheets)
+        spreadsheet = cached(factory(not args.write_sheets))  # one worksheet listing per phase
         refuse_variation_workbook(spreadsheet)
         states = {title: read_tab(spreadsheet, title) for title in PUBLISHER_TABS}
     except DestinationError as exc:

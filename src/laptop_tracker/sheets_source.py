@@ -9,6 +9,7 @@ import gspread
 from google.oauth2.service_account import Credentials
 
 from .config import Settings
+from .sheets_quota import CachedSpreadsheet, QuotaAwareHTTPClient
 
 READ_ONLY_SCOPES = ["https://www.googleapis.com/auth/spreadsheets.readonly"]
 READ_WRITE_SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
@@ -39,14 +40,17 @@ def load_credentials(settings: Settings, *, read_only: bool = True) -> Credentia
 
 def connect(settings: Settings, *, read_only: bool = True) -> gspread.Client:
     settings.require_sheet_access()
-    return gspread.authorize(load_credentials(settings, read_only=read_only))
+    # Every request goes through the shared throttle and bounded retry (sheets_quota.py).
+    return gspread.authorize(
+        load_credentials(settings, read_only=read_only), http_client=QuotaAwareHTTPClient
+    )
 
 
 def open_spreadsheet(client: gspread.Client, spreadsheet_id: str):
     if not spreadsheet_id:
         raise SheetsSourceError("SPREADSHEET_ID is required.")
     try:
-        return client.open_by_key(spreadsheet_id)
+        return CachedSpreadsheet(client.open_by_key(spreadsheet_id))
     except gspread.exceptions.APIError as exc:
         raise SheetsSourceError(
             "Unable to open the spreadsheet. Check SPREADSHEET_ID and service-account sharing."

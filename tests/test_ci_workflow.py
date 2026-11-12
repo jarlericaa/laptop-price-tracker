@@ -103,6 +103,51 @@ def test_long_jobs_have_a_three_hour_timeout_and_runs_never_overlap(workflow) ->
     assert workflow["concurrency"]["group"]
 
 
+def test_a_rerun_after_a_partial_attempt_is_an_explicit_default_off_manual_choice(workflow) -> None:
+    inputs = workflow["on"]["workflow_dispatch"]["inputs"]
+    assert inputs["rerun_after_partial"]["type"] == "boolean"
+    assert inputs["rerun_after_partial"]["default"] is False
+    assert "schedule" in workflow["on"] and "inputs" not in workflow["on"]["schedule"][0]
+    step = next(s for _, s in all_steps(workflow) if "scripts/ci_publish.py" in s.get("run", ""))
+    # Reaches the shell only through the environment, and only the literal "true" confirms it.
+    assert step["env"]["RERUN_AFTER_PARTIAL"] == "${{ inputs.rerun_after_partial }}"
+    assert '[ "$RERUN_AFTER_PARTIAL" = "true" ]' in step["run"]
+    assert "--allow-rerun-after-partial" in step["run"]
+    assert "inputs." not in step["run"]
+
+
+def test_the_publish_job_stays_gated_and_has_time_for_throttled_quota_waits(workflow) -> None:
+    publish = workflow["jobs"]["publish"]
+    assert publish["environment"] == "production" and publish["runs-on"] == "ubuntu-24.04"
+    assert 30 <= publish["timeout-minutes"] <= 180  # bounded, and room for ~2 min of waiting
+    assert publish["permissions"] == {"contents": "write"}
+    assert workflow["env"]["PYTHON_VERSION"] == "3.14"
+
+
+def test_the_quota_layer_needs_only_packages_the_hosted_runner_installs() -> None:
+    import ast
+
+    tree = ast.parse((ROOT / "src/laptop_tracker/sheets_quota.py").read_text())
+    imported = {
+        (node.module or "").split(".")[0] if isinstance(node, ast.ImportFrom) else alias.name
+        for node in ast.walk(tree)
+        if isinstance(node, (ast.Import, ast.ImportFrom))
+        for alias in (node.names if isinstance(node, ast.Import) else [None])
+    }
+    third_party = {m.split(".")[0] for m in imported if m} & {"requests", "google", "gspread"}
+    installed = (ROOT / "requirements.txt").read_text()
+    assert {"requests", "gspread", "google-auth"} <= set(re.findall(r"^[a-z-]+", installed, re.M))
+    assert third_party == {"requests", "google", "gspread"}
+    # Nothing outside the standard library and requirements.txt (no new service, no extra step).
+    stdlib_only = imported - third_party - {"laptop_tracker", "__future__"}
+    assert all(m in sys.stdlib_module_names for m in stdlib_only if m), stdlib_only
+
+
+def test_automation_stays_off_unless_the_variable_says_otherwise() -> None:
+    assert ci_config.decide_mode("schedule", {}, {}).skip
+    assert ci_config.decide_mode("schedule", {}, {"WEEKLY_AUTOMATION": "off"}).skip
+
+
 def test_every_action_is_pinned_to_a_full_commit_sha(workflow) -> None:
     uses = [s["uses"] for _, s in all_steps(workflow) if "uses" in s]
     assert uses

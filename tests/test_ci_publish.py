@@ -22,6 +22,7 @@ from laptop_tracker.variation_publication import DATA_TABS, RUN_LOG_TAB
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 from test_ci_gate import make_run  # noqa: E402
+from test_sheets_quota import QUOTA_429, api_error  # noqa: E402
 
 import ci_publish as script  # noqa: E402
 
@@ -50,7 +51,7 @@ class FakeSheet:
                 outer.reads += 1
                 if outer.quota_errors:
                     outer.quota_errors -= 1
-                    raise RuntimeError("APIError [429]: Quota exceeded for quota metric 'Read'")
+                    raise api_error(429, QUOTA_429)
                 return [HEADER, *outer.rows]
 
         return Tab()
@@ -121,13 +122,16 @@ def good_report(**over):
     }
 
 
-def run_publish(tmp_path, publisher, sheet, **kw):
+def run_publish(tmp_path, publisher, sheet, *, after=None, **kw):
+    """``after``: the sheet the run log is read from once the publisher has run (default: the
+    same ``sheet``), so a row written by the attempt itself is not seen as an earlier one."""
+    sheets = iter([sheet, after if after is not None else sheet, sheet, sheet])
     return cp.publish_run(
         publication_id=PUB,
         publisher_args=["--variation-dir", "v"],
         output_root=tmp_path / "pubs",
         run_dir=tmp_path,
-        open_spreadsheet=lambda read_only: sheet,
+        open_spreadsheet=lambda read_only: next(sheets),
         publisher_main=publisher,
         data_tabs=DATA_TABS,
         sleep=lambda s: None,
@@ -161,11 +165,29 @@ def test_an_already_published_run_is_never_written_again(tmp_path) -> None:
         ("READBACK_FAILED", "FAILED (2 issue(s))"),
     ],
 )
-def test_an_earlier_unsuccessful_attempt_does_not_count_as_published(
+def test_an_earlier_unresolved_attempt_blocks_the_write_until_a_person_confirms(
     tmp_path, status, readback
 ) -> None:
+    # The Sheet may be half written: a new attempt would snapshot that state as "the previous
+    # publication". Nothing is written and nothing is even previewed.
     publisher = Publisher(tmp_path, report=good_report())
     outcome = run_publish(tmp_path, publisher, FakeSheet([row(status, readback)]))
+    assert outcome.classification == cp.BLOCKED_PRIOR_ATTEMPT and not outcome.ok
+    assert outcome.live_row["status"] == status and "rerun_after_partial" in outcome.note
+    assert publisher.calls == []
+
+
+@pytest.mark.parametrize("status", ["IN_PROGRESS", "PARTIAL_FAILURE", "READBACK_FAILED"])
+def test_a_confirmed_rerun_after_a_partial_attempt_publishes_once(tmp_path, status) -> None:
+    publisher = Publisher(tmp_path, report=good_report())
+    sheet = FakeSheet([row(status, "NOT_RUN")])
+    outcome = run_publish(tmp_path, publisher, sheet, allow_rerun_after_partial=True)
+    assert outcome.classification == cp.PUBLISHED and len(publisher.writes()) == 1
+
+
+def test_an_earlier_record_that_is_not_a_partial_state_does_not_block(tmp_path) -> None:
+    publisher = Publisher(tmp_path, report=good_report())
+    outcome = run_publish(tmp_path, publisher, FakeSheet([row("SUCCESS", "NOT_RUN")]))
     assert outcome.classification == cp.PUBLISHED and len(publisher.writes()) == 1
 
 
@@ -185,6 +207,67 @@ def test_a_failure_before_any_write_is_reported_and_not_retried_or_rolled_back(t
     )  # one attempt, nothing to undo
 
 
+def test_a_quota_failure_before_the_first_write_is_a_failure_before_write(tmp_path) -> None:
+    # 2026-11-12: the quota outlasted the retry policy while the backups were being taken.
+    report = {
+        "status": "FAILED_BEFORE_WRITE",
+        "publication_id": PUB,
+        "error": "SheetsRetryExhausted: ... HTTP 429 ...",
+        "tabs_written": [],
+    }
+    publisher = Publisher(tmp_path, report=report, code=1)
+    outcome = run_publish(tmp_path, publisher, FakeSheet())
+    assert outcome.classification == cp.FAILED_BEFORE_WRITE and not outcome.ok
+    assert len(publisher.writes()) == 1 and not publisher.rollbacks()
+
+
+class CrashingPublisher(Publisher):
+    """Raises instead of returning, as the publisher did on 2026-11-12 (an uncaught API error)."""
+
+    def __call__(self, argv):
+        if "--write-sheets" in argv:
+            super().__call__(argv)
+            raise RuntimeError("unexpected crash")
+        return super().__call__(argv)
+
+
+def test_a_publisher_crash_is_classified_from_the_live_run_log_not_left_as_a_traceback(
+    tmp_path,
+) -> None:
+    publisher = CrashingPublisher(tmp_path, report=None)
+    outcome = run_publish(tmp_path, publisher, FakeSheet())  # run log has no row for this run
+    assert outcome.classification == cp.FAILED_BEFORE_WRITE and not outcome.ok
+    assert "unexpected crash" in outcome.note and not publisher.rollbacks()
+
+
+def test_a_crash_after_the_write_began_is_rolled_back(tmp_path) -> None:
+    publisher = CrashingPublisher(tmp_path, report=None)
+    after = FakeSheet([row("IN_PROGRESS", "NOT_RUN")])
+    outcome = run_publish(tmp_path, publisher, FakeSheet(), after=after)
+    assert outcome.classification == cp.PARTIAL_WRITE and len(publisher.rollbacks()) == 1
+
+
+def test_a_crash_with_an_unreadable_run_log_is_not_called_a_clean_failure(tmp_path) -> None:
+    class Down:
+        def worksheet(self, title):
+            raise PermissionError("403")
+
+    publisher = CrashingPublisher(tmp_path, report=None)
+    sheets = iter([FakeSheet(), Down(), Down()])
+    outcome = cp.publish_run(
+        publication_id=PUB,
+        publisher_args=[],
+        output_root=tmp_path / "pubs",
+        run_dir=tmp_path,
+        open_spreadsheet=lambda read_only: next(sheets),
+        publisher_main=publisher,
+        data_tabs=DATA_TABS,
+        sleep=lambda s: None,
+        log=lambda m: None,
+    )
+    assert outcome.classification == cp.PARTIAL_WRITE and "cannot be excluded" in outcome.note
+
+
 def test_a_refused_destination_is_a_failure_before_write(tmp_path) -> None:
     report = {"status": "DESTINATION_REFUSED", "publication_id": PUB}
     outcome = run_publish(tmp_path, Publisher(tmp_path, report=report, code=1), FakeSheet())
@@ -200,8 +283,8 @@ def test_a_partial_write_is_rolled_back_once_and_never_retried(tmp_path) -> None
         "error": "APIError: 500",
     }
     publisher = Publisher(tmp_path, report=report, code=1)
-    sheet = FakeSheet([row("PARTIAL_FAILURE", "NOT_RUN")])
-    outcome = run_publish(tmp_path, publisher, sheet)
+    after = FakeSheet([row("PARTIAL_FAILURE", "NOT_RUN")])  # the row this attempt left behind
+    outcome = run_publish(tmp_path, publisher, FakeSheet(), after=after)
     assert outcome.classification == cp.PARTIAL_WRITE and not outcome.ok
     assert len(publisher.writes()) == 1 and len(publisher.rollbacks()) == 1
     assert outcome.rollback["status"] == "SUCCESS"
@@ -218,8 +301,8 @@ def test_a_failed_readback_is_rolled_back_so_the_sheet_never_keeps_unverified_da
         "readback_issues": ["PILOT_PRICE_COMPARISON row 4 differs"],
     }
     publisher = Publisher(tmp_path, report=report, code=1)
-    sheet = FakeSheet([row("READBACK_FAILED", "FAILED (1 issue(s))")])
-    outcome = run_publish(tmp_path, publisher, sheet)
+    after = FakeSheet([row("READBACK_FAILED", "FAILED (1 issue(s))")])
+    outcome = run_publish(tmp_path, publisher, FakeSheet(), after=after)
     assert outcome.classification == cp.PARTIAL_WRITE and outcome.readback_issues == 1
     assert len(publisher.rollbacks()) == 1
 
@@ -265,6 +348,15 @@ def test_read_quota_errors_are_waited_out_not_treated_as_failures(tmp_path) -> N
     sheet = FakeSheet([row()], quota_errors=2)
     found = cp.read_live_log_row(sheet, PUB, sleep=sleeps.append)
     assert found.status == "SUCCESS" and len(sleeps) == 2
+
+
+def test_a_read_quota_that_never_clears_stops_the_publication_before_any_write(tmp_path) -> None:
+    publisher = Publisher(tmp_path, report=good_report())
+    sheet = FakeSheet([row()], quota_errors=99)
+    outcome = run_publish(tmp_path, publisher, sheet)
+    assert outcome.classification == cp.FAILED_BEFORE_WRITE and publisher.calls == []
+    assert "SheetsRetryExhausted" in outcome.note
+    assert sheet.reads == 6  # bounded: the first try plus five retries
 
 
 def test_other_read_errors_are_not_swallowed(tmp_path) -> None:
@@ -400,6 +492,20 @@ def test_rerunning_after_success_is_a_no_op_and_adds_no_duplicate_record(tmp_pat
     assert len(publisher.writes()) == 1  # the second invocation wrote nothing
     records = ss.read_publication_attempts(*storage, PUB)
     assert [r["status"] for r in records] == [cp.PUBLISHED]  # the no-op added no record
+
+
+def test_a_prior_partial_attempt_blocks_the_script_until_it_is_confirmed(tmp_path, storage) -> None:
+    run = prepare(tmp_path)
+    ss.save_bundle(*storage, run, run.name, {})
+    sheet = FakeSheet([row("IN_PROGRESS", "NOT_RUN")])  # a crashed earlier attempt of this run
+    publisher = Publisher(tmp_path, report=good_report())
+    assert invoke(tmp_path, run, publisher, sheet, storage) == 1
+    assert publisher.writes() == []  # only the read-only preview ran
+    assert ss.read_publication_attempts(*storage, PUB) == []  # nothing changed, nothing recorded
+
+    assert invoke(tmp_path, run, publisher, sheet, storage, "--allow-rerun-after-partial") == 0
+    assert len(publisher.writes()) == 1
+    assert [r["status"] for r in ss.read_publication_attempts(*storage, PUB)] == [cp.PUBLISHED]
 
 
 def test_a_failed_publication_exits_nonzero_and_still_keeps_the_backups(tmp_path, storage) -> None:

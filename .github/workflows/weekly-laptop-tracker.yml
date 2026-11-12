@@ -29,6 +29,10 @@ on:
         description: "I reviewed the diagnostics and accept a run that had retailer request failures"
         type: boolean
         default: false
+      rerun_after_partial:
+        description: "Publish although the run log shows an earlier attempt of this same run as IN_PROGRESS, PARTIAL_FAILURE or READBACK_FAILED. Only after inspecting the data tabs (or restoring them from that attempt's snapshots)."
+        type: boolean
+        default: false
   schedule:
     - cron: "17 9 * * 1"
       timezone: "Asia/Manila"
@@ -245,6 +249,7 @@ jobs:
       - name: Gate, re-preview against the live workbook, publish once, verify
         env:
           ACCEPT_PARTIAL: ${{ needs.plan.outputs.accept_partial }}
+          RERUN_AFTER_PARTIAL: ${{ inputs.rerun_after_partial }}
           MAX_MATCHING_DROP_PCT: ${{ vars.MAX_MATCHING_DROP_PCT }}
           SPREADSHEET_ID: ${{ vars.SPREADSHEET_ID }}
           GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
@@ -254,5 +259,6 @@ jobs:
         run: |
           args=()
           if [ "$ACCEPT_PARTIAL" = "true" ]; then args+=(--accept-retailer-failures); fi
+          if [ "$RERUN_AFTER_PARTIAL" = "true" ]; then args+=(--allow-rerun-after-partial); fi
           if [ -n "$MAX_MATCHING_DROP_PCT" ]; then args+=(--max-matching-drop-pct "$MAX_MATCHING_DROP_PCT"); fi
           python scripts/ci_publish.py --run-dir "$RUN_DIR" --write "${args[@]}"

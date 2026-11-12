@@ -106,6 +106,7 @@ from .sheet_publication import (
     verify_tab,
     write_backup,
 )
+from .sheets_quota import cached, call_with_retry
 from .variation_ranking import (
     CONTEXT_COLUMNS,
     LEGACY_ROW_GRAIN,
@@ -2483,22 +2484,21 @@ class PublicationOutcome:
     guide: str = ""  # TRACKER_GUIDE: UPDATED, UNCHANGED, SKIPPED (reason) or FAILED (reason)
 
 
-# Sheets answers a burst of reads with HTTP 429 ("Read requests per minute"). The six-tab readback
-# uses most of the quota, so a read that is refused for that reason is retried after the minute
-# has moved on instead of reporting the publication as a partial failure (2026-11-05 runs).
-READ_RETRY_SECONDS = (20, 30, 45, 60)
+class PreWriteFailure(RuntimeError):
+    """The publication stopped while inspecting the destination or taking the backups: no tab was
+    changed. Distinct from a failed write so the caller never rolls back or records a partial."""
 
 
 def read_tab_with_retry(spreadsheet, title: str, *, sleep=time.sleep) -> TabState:
-    for delay in (*READ_RETRY_SECONDS, None):
-        try:
-            return read_tab(spreadsheet, title, PUBLISHER_TABS)
-        except Exception as exc:
-            message = str(exc)
-            if delay is None or not ("429" in message or "Quota exceeded" in message):
-                raise
-            sleep(delay)
-    raise AssertionError("unreachable")  # pragma: no cover
+    """``read_tab`` under the central retry policy (reads are always safe to repeat). Every real
+    Sheets request is already protected by ``QuotaAwareHTTPClient``; this wrapper covers a
+    spreadsheet object that is not (and an exhausted policy is never retried a second time)."""
+    return call_with_retry(
+        lambda: read_tab(spreadsheet, title, PUBLISHER_TABS),
+        description=f"read back {title}",
+        idempotent=True,
+        sleep=sleep,
+    )
 
 
 def guide_entries_for(
@@ -2552,16 +2552,22 @@ def publish_variation(
         if progress is not None:
             progress(message)
 
+    spreadsheet = cached(spreadsheet, new_phase=True)  # one worksheet listing for this phase
     step("inspecting destination tabs")
-    states = {title: read_tab(spreadsheet, title, PUBLISHER_TABS) for title in PUBLISHER_TABS}
-    problems, _ = check_destinations(states, plan)
-    if problems:
-        raise DestinationError("; ".join(problems))
-    plan = apply_navigation(apply_live_retention(plan, states), states)
-    backup_dir.mkdir(parents=True, exist_ok=True)
-    for title, state in states.items():
-        if state.used_rows:
-            write_backup(backup_dir, state, snapshot_tab(spreadsheet, title, PUBLISHER_TABS))
+    try:
+        states = {title: read_tab(spreadsheet, title, PUBLISHER_TABS) for title in PUBLISHER_TABS}
+        problems, _ = check_destinations(states, plan)
+        if problems:
+            raise DestinationError("; ".join(problems))
+        plan = apply_navigation(apply_live_retention(plan, states), states)
+        backup_dir.mkdir(parents=True, exist_ok=True)
+        for title, state in states.items():
+            if state.used_rows:
+                write_backup(backup_dir, state, snapshot_tab(spreadsheet, title, PUBLISHER_TABS))
+    except DestinationError:
+        raise
+    except Exception as exc:  # nothing has been written yet: report it as such
+        raise PreWriteFailure(f"{type(exc).__name__}: {exc}") from exc
     allowed = {states[t].sheet_id for t in PUBLISHER_TABS}
     tab_ids = {t: states[t].sheet_id for t in PUBLISHER_TABS}
     header = plan.run_log_header
@@ -2629,16 +2635,37 @@ def publish_variation(
         return PublicationOutcome("PARTIAL_FAILURE", written, [], tab_ids, error)
 
     issues: list[str] = []
-    for title in DATA_TABS:
-        step(f"reading back {title}")
-        issues += verify_tab(
-            read_tab_with_retry(spreadsheet, title),
-            plan.tabs[title].grid(),
-            notes=title in VARIATION_NOTE_TABS,
-        )
-        issues += verify_layout(
-            spreadsheet, plan.tabs[title], layout_fn=variation_tab_layout, allowed=PUBLISHER_TABS
-        )
+    spreadsheet.invalidate()  # phase boundary: the writes are done, list the worksheets afresh
+    try:
+        for title in DATA_TABS:
+            step(f"reading back {title}")
+            issues += verify_tab(
+                read_tab_with_retry(spreadsheet, title),
+                plan.tabs[title].grid(),
+                notes=title in VARIATION_NOTE_TABS,
+            )
+            issues += verify_layout(
+                spreadsheet,
+                plan.tabs[title],
+                layout_fn=variation_tab_layout,
+                allowed=PUBLISHER_TABS,
+            )
+    except Exception as exc:
+        # Every data tab is written but could not be verified (for example the Sheets quota
+        # outlasted the retry policy). Never leave the run log at IN_PROGRESS: record it so the
+        # caller rolls back instead of keeping unverified data.
+        error = f"Readback could not be completed: {type(exc).__name__}: {exc}"
+        try:
+            log(
+                "PARTIAL_FAILURE",
+                written,
+                "NOT_RUN",
+                "Data tabs written but not verified; restore the previous publication with "
+                "--rollback, then rerun.",
+            )
+        except Exception as log_exc:
+            error += f"; run-log update also failed ({type(log_exc).__name__})"
+        return PublicationOutcome("PARTIAL_FAILURE", written, issues, tab_ids, error)
     # The TRACKER_GUIDE text that goes with this layout (advisory: a problem with it is reported
     # but never undoes the data tabs; its snapshot is saved first and --rollback restores it).
     guide = ""
