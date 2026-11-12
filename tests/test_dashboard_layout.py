@@ -16,6 +16,7 @@ from datetime import UTC, datetime
 import pytest
 from scraping_fakes import no_network  # noqa: F401
 from test_sheet_publication import FakeSpreadsheet
+from test_sheets_quota import QUOTA_429, api_error
 from test_variation_publication import (
     CONTRACT,
     NOW,
@@ -807,13 +808,15 @@ def test_a_read_refused_for_the_per_minute_quota_is_retried_not_reported_as_a_fa
     def flaky(params=None):
         calls.append(1)
         if len(calls) < 3:
-            raise RuntimeError("APIError [429]: Quota exceeded for 'Read requests per minute'")
+            raise api_error(429, QUOTA_429)
         return real(params)
 
     fake.fetch_sheet_metadata = flaky
-    slept: list[int] = []
+    slept: list[float] = []
     state = read_tab_with_retry(fake, COMPARISON_TAB, sleep=slept.append)
-    assert state.exists and slept == [20, 30]
+    # The central policy: exponential backoff (4 s, 8 s) plus at most 25 % jitter.
+    assert state.exists and len(slept) == 2
+    assert 4 <= slept[0] <= 5 and 8 <= slept[1] <= 10
     fake.fetch_sheet_metadata = lambda params=None: (_ for _ in ()).throw(RuntimeError("boom"))
     with pytest.raises(RuntimeError, match="boom"):
         read_tab_with_retry(fake, COMPARISON_TAB, sleep=slept.append)  # other errors are raised

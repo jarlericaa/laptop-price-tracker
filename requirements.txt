@@ -1,5 +1,5 @@
 pandas>=3.0.6,<3.1
-gspread
+gspread>=6.1,<7
 google-auth
 python-dotenv
 pytest

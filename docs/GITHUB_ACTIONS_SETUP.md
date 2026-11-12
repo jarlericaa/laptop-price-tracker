@@ -31,11 +31,12 @@ Federation, no homelab, no always-on computer.**
 9. [First test, in this order](#first-test-in-this-order)
 10. [Enable the weekly schedule](#enable-the-weekly-schedule)
 11. [Operating it](#operating-it)
-12. [Encryption key: backup and rotation](#encryption-key-backup-and-rotation)
-13. [Storage size and retention](#storage-size-and-retention)
-14. [Runtime and cost](#runtime-and-cost)
-15. [Troubleshooting](#troubleshooting)
-16. [What has and has not been verified](#what-has-and-has-not-been-verified)
+12. [Sheets quota handling](#sheets-quota-handling)
+13. [Encryption key: backup and rotation](#encryption-key-backup-and-rotation)
+14. [Storage size and retention](#storage-size-and-retention)
+15. [Runtime and cost](#runtime-and-cost)
+16. [Troubleshooting](#troubleshooting)
+17. [What has and has not been verified](#what-has-and-has-not-been-verified)
 
 ## What was found in the repository
 
@@ -392,7 +393,7 @@ to Google Sheets, verify, save state**.
 | Task | How |
 |---|---|
 | See what happened | Actions > the run > Summary; artifact `diagnostics-*`; the Sheet's `PILOT_PRICE_RUN_LOG`; the Releases page. |
-| Retry a failed **publication** without scraping | Run workflow: *publish* checked, *existing_run_id* = the run folder name. A bundle exists for runs that reached `READY_TO_PUBLISH`. A previous `PARTIAL_WRITE` was already rolled back by the job; read its record first (`publication-fetch`). |
+| Retry a failed **publication** without scraping | Run workflow: *publish* checked, *existing_run_id* = the run folder name. A bundle exists for runs that reached `READY_TO_PUBLISH`. A previous `PARTIAL_WRITE` was already rolled back by the job; read its record first (`publication-fetch`). If the run log shows an earlier attempt of the same run as `IN_PROGRESS`, `PARTIAL_FAILURE` or `READBACK_FAILED`, the job stops (`BLOCKED_PRIOR_ATTEMPT`) until you have inspected the data tabs and tick *rerun_after_partial*. A failure **before** the first write (for example the Sheets quota while taking the backups) leaves no run-log row, so it needs no confirmation. |
 | Retry a failed **collection** | Run workflow again. State from the failed run was saved if its database validated, so no evidence is lost; do not rerun repeatedly, retailers answer 429. |
 | List stored versions | `python scripts/ci_state.py versions` (shows `complete: false` for a damaged one). |
 | Check a version end to end | `python scripts/ci_state.py verify [--version N]` |
@@ -403,6 +404,24 @@ to Google Sheets, verify, save state**.
 
 Local commands need `gh auth login`, `STATE_ENCRYPTION_KEY` in the environment, and (if
 `STATE_ENCRYPTION_KEY_PREVIOUS` was used) that too. They never print key material.
+
+## Sheets quota handling
+
+Google allows 60 read and 60 write requests per minute per user. One publication needs about 45
+reads (a preview, the pre-write inspection, the snapshots, the readback) and 8 writes, so it sits
+close to the read limit. `src/laptop_tracker/sheets_quota.py` therefore protects every Sheets call
+(it is gspread's HTTP layer, installed by `sheets_source.connect`):
+
+| Part | Behaviour |
+|---|---|
+| Throttle | At most 40 reads and 40 writes in any 60 seconds, process-wide (`SHEETS_READS_PER_MINUTE` / `SHEETS_WRITES_PER_MINUTE` override, both must stay under 60). A burst waits instead of being refused. |
+| Worksheet list | Fetched once per publication phase (inspect, back up, write, read back) instead of before every tab read; dropped when a write can add, remove or rename a tab. Tab **contents** are never cached. About 91 % fewer listing requests (44 to 4 per preview plus write on the test fixture). |
+| Retry | HTTP 429 and quota-style 403: up to 6 attempts, waits of about 4, 8, 16, 32 and 60 seconds plus up to 25 % jitter, `Retry-After` honoured as a minimum, a request abandoned when Google asks for more than 120 s, 240 s of waiting in total. 5xx and network errors: **reads only**. A write is retried only after a 429, which Google rejects before running it. |
+| Never retried | 401/403 (authentication, permission), 400 (validation), 404, and any data error: they fail on the first request. |
+| When it gives up | `SheetsRetryExhausted` states the attempts, the seconds waited and Google's answer. Before the first write it is `FAILED_BEFORE_WRITE` (nothing changed). After the data tabs were written but could not be read back, the run log is set to `PARTIAL_FAILURE` and the job rolls back from the snapshots. |
+
+Logs show the method, the endpoint with the spreadsheet ID removed, the status and the delay;
+never headers, tokens or request bodies.
 
 ## Encryption key: backup and rotation
 
@@ -469,7 +488,9 @@ be retrieved again, and **without it the stored history is unreadable**.
 | `The price history is no longer append-only` | The pipeline changed or lost stored observations; the state was **not** saved. The previous state is intact. |
 | `BLOCKED: Retailer request failures ...` | Read the summary table. Wait and rerun collection, or accept explicitly for a run you reviewed. |
 | `BLOCKED: ... superseded` | The run is over 7 days old; run a new collection. |
-| Publication `PARTIAL_WRITE` | The job rolled back from the snapshots; read the error in the summary, fix, publish again. |
+| Publication `PARTIAL_WRITE` | The job rolled back from the snapshots; read the error in the summary, fix, inspect the data tabs, then publish again with *rerun_after_partial*. |
+| Publication `FAILED_BEFORE_WRITE` with `SheetsRetryExhausted ... HTTP 429` | The Sheets read quota outlasted the retry policy (see [Sheets quota handling](#sheets-quota-handling)) while the destination was inspected or backed up. No tab was changed and no run-log row exists. Wait a few minutes and publish the same run again. |
+| Publication `BLOCKED_PRIOR_ATTEMPT` | An earlier attempt of this run may have left the Sheet half written. Open `PILOT_PRICE_RUN_LOG` and the data tabs; if needed restore from that attempt's snapshots (`publication-fetch`, then `publish_variation_prices.py --rollback`). Then rerun with *rerun_after_partial*. |
 | Publication `SUCCEEDED_UNREPORTED` | Written and verified; only the final run-log read hit a Sheets read quota. No action. |
 | `Published but not recorded durably` | The Sheet changed; only the record failed. Check the Releases permission, then do not republish: the Sheet shows `SUCCESS`. |
 | Scheduled run did not start | `WEEKLY_AUTOMATION` is not `preview`/`publish`; the workflow is not on `main`; GitHub disables schedules after 60 days without repository activity (re-enable in the Actions tab). |

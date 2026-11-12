@@ -36,6 +36,13 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-matching-drop-pct", type=float, default=None)
     parser.add_argument("--no-auto-rollback", action="store_true")
     parser.add_argument(
+        "--allow-rerun-after-partial",
+        action="store_true",
+        help="Publish although the live run log shows an earlier attempt of this same run as "
+        "IN_PROGRESS, PARTIAL_FAILURE or READBACK_FAILED (the Sheet may be partly written). "
+        "Only after the data tabs were inspected or restored.",
+    )
+    parser.add_argument(
         "--no-state",
         action="store_true",
         help="Do not record the attempt in durable storage (local rehearsal).",
@@ -139,6 +146,7 @@ def main(
         publisher_main=publisher,
         data_tabs=DATA_TABS,
         auto_rollback=not args.no_auto_rollback,
+        allow_rerun_after_partial=args.allow_rerun_after_partial,
         **({"sleep": sleep} if sleep else {}),
     )
     record = {
@@ -148,11 +156,14 @@ def main(
         "finished_at_utc": datetime.now(UTC).isoformat(timespec="seconds"),
         **outcome.as_dict(),
     }
-    if store is not None and outcome.classification != cp.ALREADY_PUBLISHED:
+    if store is not None and outcome.classification not in {
+        cp.ALREADY_PUBLISHED,
+        cp.BLOCKED_PRIOR_ATTEMPT,
+    }:
         try:
-            # An already published run changes nothing, so it adds no record. Otherwise one
-            # immutable record per attempt, with the publisher's snapshots of the previous tabs
-            # (durable recovery data) stored encrypted beside it.
+            # An already published or blocked run changes nothing, so it adds no record.
+            # Otherwise one immutable record per attempt, with the publisher's snapshots of the
+            # previous tabs (durable recovery data) stored encrypted beside it.
             ss.append_publication_attempt(
                 store,
                 ring,

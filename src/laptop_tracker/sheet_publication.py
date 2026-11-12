@@ -57,6 +57,7 @@ from .price_tracking import (
 )
 from .recheck import RECHECK_COLUMNS
 from .recheck import STAGE_TEXT as RECHECK_STAGE_TEXT
+from .sheets_quota import cached, find_worksheet
 from .target_master import TARGET_ID_PATTERN
 from .verified_top import CONFIGURATION_COLUMNS, VerifiedRankingInputError, read_csv_rows
 
@@ -192,7 +193,7 @@ def assert_publisher_tab(title: str, allowed: Sequence[str] = PUBLISHER_TABS) ->
 
 def is_variation_workbook(spreadsheet) -> bool:
     """True for a workbook prepared for the Shopee-variation grain (its Top list tab exists)."""
-    return any(ws.title == VARIATION_WORKBOOK_MARKER for ws in spreadsheet.worksheets())
+    return find_worksheet(spreadsheet, VARIATION_WORKBOOK_MARKER) is not None
 
 
 def refuse_variation_workbook(spreadsheet) -> None:
@@ -2558,8 +2559,7 @@ def _cell_text(cell: Mapping) -> str:
 def read_tab(spreadsheet, title: str, allowed: Sequence[str] = PUBLISHER_TABS) -> TabState:
     """Read one destination tab (values, links, formats); a missing tab is reported, not made."""
     assert_publisher_tab(title, allowed)
-    found = next((ws for ws in spreadsheet.worksheets() if ws.title == title), None)
-    if found is None:
+    if find_worksheet(spreadsheet, title) is None:
         return TabState(title, False)
     metadata = spreadsheet.fetch_sheet_metadata(
         params={"ranges": f"'{title}'", "includeGridData": "true", "fields": READ_FIELDS}
@@ -2647,7 +2647,7 @@ def snapshot_tab(
 ) -> dict | None:
     """The whole destination tab as the Sheets API returns it, or None when it is missing."""
     assert_publisher_tab(title, allowed)
-    if not any(ws.title == title for ws in spreadsheet.worksheets()):
+    if find_worksheet(spreadsheet, title) is None:
         return None
     metadata = spreadsheet.fetch_sheet_metadata(
         params={"ranges": f"'{title}'", "includeGridData": "true", "fields": SNAPSHOT_FIELDS})
@@ -2837,6 +2837,7 @@ def rollback(
     ``tabs`` / ``allowed`` select the data tabs and the destination allowlist of another
     publisher schema (the Shopee-variation publisher); retired tabs are never restorable."""
     restored, skipped, issues = [], [], []
+    spreadsheet = cached(spreadsheet, new_phase=True)  # one worksheet listing for the rollback
     if allowed is not PUBLISHER_TABS and (set(tabs) | set(allowed)) & set(RETIRED_TABS):
         raise DestinationError("A retired tab cannot be a rollback destination.")
     for title in tabs:
@@ -3423,6 +3424,7 @@ def publish(
         if progress is not None:
             progress(message)
 
+    spreadsheet = cached(spreadsheet, new_phase=True)  # one worksheet listing per phase
     step("inspecting destination tabs")
     refuse_variation_workbook(spreadsheet)
     states = {title: read_tab(spreadsheet, title) for title in PUBLISHER_TABS}
@@ -3488,6 +3490,7 @@ def publish(
             error += f"; run-log update also failed ({type(log_exc).__name__})"
         return PublicationOutcome("PARTIAL_FAILURE", written, [], tab_ids, error)
 
+    spreadsheet.invalidate()  # phase boundary: the writes are done
     issues = []
     for title in DATA_TABS:
         step(f"reading back {title}")

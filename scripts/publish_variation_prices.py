@@ -25,6 +25,7 @@ from laptop_tracker.sheet_publication import (
     rollback,
     write_plan_notes_csv,
 )
+from laptop_tracker.sheets_quota import cached
 from laptop_tracker.variation_publication import (
     COMPARISON_TAB,
     CONTRACT_PATH,
@@ -34,6 +35,7 @@ from laptop_tracker.variation_publication import (
     PUBLISHER_VERSION,
     REVIEW_TAB,
     RUN_LOG_TAB,
+    PreWriteFailure,
     apply_live_retention,
     apply_navigation,
     build_variation_plan,
@@ -240,7 +242,7 @@ def main(
     # 2. Open the configured spreadsheet: read-only scope for preview, write scope to publish.
     factory = spreadsheet_factory or open_configured_spreadsheet
     try:
-        spreadsheet = factory(not args.write_sheets)
+        spreadsheet = cached(factory(not args.write_sheets))  # one worksheet listing per phase
         states = {title: read_tab(spreadsheet, title, PUBLISHER_TABS) for title in PUBLISHER_TABS}
         present_retired = retired_tab_titles(spreadsheet)
     except Exception as exc:  # Access problems are reported without credentials.
@@ -327,6 +329,21 @@ def main(
     except DestinationError as exc:
         local_report |= {"status": "DESTINATION_REFUSED", "error": str(exc)}
         print(f"Publication refused before any write: {exc}", file=sys.stderr)
+        return finish(1)
+    except PreWriteFailure as exc:
+        # Reading the destination or taking the backups failed (for example the Sheets quota
+        # outlasted the retry policy). Nothing was written; the report says so.
+        local_report |= {"status": "FAILED_BEFORE_WRITE", "error": str(exc), "tabs_written": []}
+        print(f"Publication stopped before any write: {exc}", file=sys.stderr)
+        return finish(1)
+    except Exception as exc:
+        # An error after writing began: the run log and the local backups are the record.
+        local_report |= {"status": "PUBLICATION_ERROR", "error": f"{type(exc).__name__}: {exc}"}
+        print(
+            f"Publication stopped by an unexpected error ({type(exc).__name__}: {exc}). The "
+            f"Sheet may be partly written; inspect {RUN_LOG_TAB} and the local backups.",
+            file=sys.stderr,
+        )
         return finish(1)
     spreadsheet_id = getattr(spreadsheet, "id", "")
     local_report |= {
