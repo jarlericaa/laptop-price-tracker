@@ -1,8 +1,8 @@
 {
-  "provenance": "Reconstructed 2026-11-04 from the header rows of the live tabs (read-only), which the 2026-11-03 publication wrote and the publisher verified against the owner-supplied contract. The original owner file was never committed; replace this file with it if you have it. Layout variation-compact-1 (2026-11-05) replaces the 80-column comparison header with a compact visible block plus collapsed column groups; the earlier header is kept under earlier_headers so a live tab still carrying it is recognised as this publisher's own.",
+  "provenance": "Reconstructed 2026-11-04 from the header rows of the live tabs (read-only), which the 2026-11-03 publication wrote and the publisher verified against the owner-supplied contract. The original owner file was never committed; replace this file with it if you have it. Layout variation-compact-1 (2026-11-05) replaces the 80-column comparison header with a compact visible block plus collapsed column groups; the earlier header is kept under earlier_headers so a live tab still carrying it is recognised as this publisher's own. Layout variation-business-1 (2026-11-12) adds the business-facing PRICE COMPARISON tab (19 columns, created by the publisher, the only tab it creates) and hides the PILOT_PRICE_* tabs as technical sources; their headers are unchanged.",
   "schema_version": "shopee-variation-sheets-1",
   "ranking_grain": "SHOPEE_VARIATION",
-  "layout_version": "variation-compact-1",
+  "layout_version": "variation-business-1",
   "new_or_reset_headers": {
     "TOP_100_SHOPEE_VARIATIONS": [
       "rank",
@@ -239,6 +239,27 @@
       "Association ID",
       "Policy version",
       "Row grain"
+    ],
+    "PRICE COMPARISON": [
+      "Rank",
+      "Shopee Seller",
+      "Laptop Model",
+      "Variation",
+      "CPU",
+      "RAM",
+      "Storage",
+      "GPU",
+      "Shopee Price",
+      "DataBlitz",
+      "PC Express",
+      "Laptop Factory",
+      "PC Central",
+      "Octagon",
+      "Lowest Retailer",
+      "Lowest Price",
+      "Price Gap (₱)",
+      "Price Gap (%)",
+      "Competitiveness"
     ]
   },
   "append_to_existing_headers": {

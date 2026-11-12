@@ -292,10 +292,11 @@ def guide_entries(
         ),
         (
             "Current results",
-            f"{rows} variation rows published for the week {week}. PILOT_PRICE_COMPARISON is the "
-            "compact view, PILOT_PRICE_OVERVIEW the price matrix; PILOT_PRICE_ALTERNATIVES, "
-            "PILOT_PRICE_REVIEW and PILOT_PRICE_HISTORY hold the details. Earlier configuration "
-            "results remain below.",
+            f"{rows} variation rows published for the week {week}. PRICE COMPARISON is the "
+            "business view. The PILOT_PRICE_* tabs and TOP_100_SHOPEE_VARIATIONS are its hidden "
+            "technical sources (PILOT_PRICE_COMPARISON, PILOT_PRICE_OVERVIEW, "
+            "PILOT_PRICE_ALTERNATIVES, PILOT_PRICE_REVIEW, PILOT_PRICE_HISTORY, "
+            "PILOT_PRICE_RUN_LOG). Earlier configuration results remain below.",
         ),
         (
             "Next step",
@@ -324,10 +325,11 @@ def guide_entries(
         ),
         (
             "Compact view",
-            "PILOT_PRICE_COMPARISON shows rank, laptop, seller, selected variation, target specs, "
-            "the Shopee snapshot price and its date, a Price / Result pair per retailer, the two "
-            "in-stock minima and a row coverage summary. One row per Shopee variation. Reporting "
-            "week, cutoff and the colour legend are in the banner rows above the header.",
+            "Hidden technical tab PILOT_PRICE_COMPARISON (unhide it from the sheet list to "
+            "troubleshoot): rank, laptop, seller, selected variation, target specs, the Shopee "
+            "snapshot price and its date, a Price / Result pair per retailer, the two in-stock "
+            "minima and a row coverage summary. One row per Shopee variation. Reporting week, "
+            "cutoff and the colour legend are in the banner rows above the header.",
         ),
         (
             "Expanded columns",
@@ -339,7 +341,20 @@ def guide_entries(
         ),
         (
             "Result colours",
-            "Green MATCH, yellow ALT 1, orange ALT 2, violet RECHECK / EXCLUDED, grey no price. "
-            "Every colour also has its text label.",
+            "In the hidden technical tabs: green MATCH, yellow ALT 1, orange ALT 2, violet "
+            "RECHECK / EXCLUDED, grey no price. Every colour also has its text label.",
+        ),
+        (
+            "Price comparison",
+            "PRICE COMPARISON: Is this Shopee variation cheaper or dearer than the same laptop "
+            "configuration at other retailers? Price Gap = Shopee Price minus the lowest "
+            "verified in-stock matching retailer price (the % is over that retailer price). "
+            "Positive = Retailer cheaper, negative = Shopee cheaper. Out-of-stock prices "
+            "(OOS) are shown but never used for the lowest price; close alternatives are never "
+            "shown as prices. No match = search finished, no matching configuration verified; "
+            "Review = a candidate needs checking, or the search hit a result cap so the result "
+            "is uncertain; Not checked = search not completed. Price Data As Of = when the "
+            "prices were taken, not when the tab was published. ⚠ Stale = the "
+            "Shopee snapshot is older than 7 days (the gap is still calculated).",
         ),
     ]
