@@ -1,9 +1,9 @@
 # ruff: noqa: F401, F811  (the ``world`` fixture is imported, then named as a test parameter)
-"""PRICE COMPARISON, the business-facing tab (layout variation-business-1, 2026-11-12).
+"""PRICE COMPARISON, the minimal business tab (layout variation-business-2, 2026-11-12).
 
 Unit tests of the display rules on report-shaped rows, then the whole publisher against the fake
-workbook: one visible tab, the technical tabs hidden, the same rows in the same order, links,
-formats and idempotency.
+workbook: both business tabs visible, the technical tabs hidden, the same rows in the same order,
+links, formats, no notes and idempotency. The detailed PRICE REPORT has its own file.
 """
 
 from __future__ import annotations
@@ -25,9 +25,11 @@ from test_variation_publication import (
 )
 
 from laptop_tracker import price_comparison_view as pv
+from laptop_tracker.price_report_view import REPORT_HEADER, REPORT_TAB
 from laptop_tracker.result_labels import retailer_result
 from laptop_tracker.sheet_publication import NUMBER_FORMATS, STATUS_FILLS, DestinationError
 from laptop_tracker.variation_publication import (
+    BUSINESS_TABS,
     COMPARISON_TAB,
     DATA_TABS,
     OVERVIEW_TAB,
@@ -72,8 +74,7 @@ def priced(code: str, price: str, stock: str = "IN_STOCK", **extra: str) -> dict
 
 
 def shown(r: dict[str, str], code: str = "DBZ") -> str:
-    result = retailer_result(r, code)
-    return pv.display_text(pv.retailer_cell(r, code, "Retailer", result)[0])
+    return pv.display_text(pv.retailer_cell(r, code, retailer_result(r, code))[0])
 
 
 def test_the_visible_columns_are_exactly_the_specified_nineteen_in_order() -> None:
@@ -98,6 +99,8 @@ def test_the_visible_columns_are_exactly_the_specified_nineteen_in_order() -> No
         (priced("DBZ", "54950.0"), "₱54,950"),
         (priced("DBZ", "52990.0", "OUT_OF_STOCK"), "₱52,990 (OOS)"),
         (priced("DBZ", "52990.50"), "₱52,990.50"),  # centavos are never rounded away
+        (priced("DBZ", "52990.0", "UNKNOWN"), "₱52,990 (Stock unknown)"),
+        (priced("DBZ", "52990.0", ""), "₱52,990 (Stock unknown)"),  # never read as available
         # a close alternative is a different configuration: never a price
         (
             {
@@ -106,24 +109,22 @@ def test_the_visible_columns_are_exactly_the_specified_nineteen_in_order() -> No
                 "DBZ_Stock": "IN_STOCK",
                 "DBZ_Comparison_Tag": "ALT 1",
             },
-            "No match",
+            "—",
         ),
-        # the search finished without a verified matching configuration
-        ({"DBZ_Price_Status": "NO_RELEVANT_CANDIDATE"}, "No match"),
-        ({"DBZ_Price_Status": "NO_CANDIDATE_FOUND"}, "No match"),
-        # a candidate or an excluded matching offer needs verification
-        ({"DBZ_Price_Status": "CANDIDATE_NOT_CONFIRMED"}, "Review"),
-        ({"DBZ_Price_Status": "REVIEW_REQUIRED_ONLY"}, "Review"),
-        ({"DBZ_Price_Status": "NO_COMPARABLE_OFFER"}, "Review"),
-        ({"DBZ_Price_Status": "CATALOG_IDENTITY_UNRESOLVED"}, "Review"),
-        # the search or observation never completed
-        ({"DBZ_Price_Status": "CANDIDATE_NOT_FETCHED"}, "Not checked"),
-        ({"DBZ_Price_Status": "FETCH_FAILED"}, "Not checked"),
-        ({"DBZ_Price_Status": "SEARCH_FAILED"}, "Not checked"),
-        ({"DBZ_Price_Status": "DISCOVERY_INCOMPLETE"}, "Not checked"),
-        ({"DBZ_Price_Status": "DISCOVERY_NOT_ATTEMPTED"}, "Not checked"),
-        ({"DBZ_Price_Status": "NO_OBSERVATION_IN_WEEK"}, "Not checked"),
-        ({}, "Not checked"),  # no record at all
+        # every other state is the same placeholder: no verified comparable retailer price
+        ({"DBZ_Price_Status": "NO_RELEVANT_CANDIDATE"}, "—"),  # was "No match"
+        ({"DBZ_Price_Status": "NO_CANDIDATE_FOUND"}, "—"),
+        ({"DBZ_Price_Status": "CANDIDATE_NOT_CONFIRMED"}, "—"),  # was "Review"
+        ({"DBZ_Price_Status": "REVIEW_REQUIRED_ONLY"}, "—"),
+        ({"DBZ_Price_Status": "NO_COMPARABLE_OFFER"}, "—"),
+        ({"DBZ_Price_Status": "CATALOG_IDENTITY_UNRESOLVED"}, "—"),
+        ({"DBZ_Price_Status": "CANDIDATE_NOT_FETCHED"}, "—"),  # was "Not checked"
+        ({"DBZ_Price_Status": "FETCH_FAILED"}, "—"),
+        ({"DBZ_Price_Status": "SEARCH_FAILED"}, "—"),
+        ({"DBZ_Price_Status": "DISCOVERY_INCOMPLETE"}, "—"),
+        ({"DBZ_Price_Status": "DISCOVERY_NOT_ATTEMPTED"}, "—"),
+        ({"DBZ_Price_Status": "NO_OBSERVATION_IN_WEEK"}, "—"),
+        ({}, "—"),  # no record at all
     ],
 )
 def test_a_retailer_cell_shows_a_price_only_for_a_verified_matching_configuration(
@@ -136,15 +137,6 @@ def test_a_row_without_a_trusted_context_compares_no_retailer() -> None:
     assert shown(row(context_id="", **priced("DBZ", "1000.0"))) == "—"
 
 
-def test_missing_data_is_not_collapsed_into_no_match() -> None:
-    """The three short labels stay distinct for the distinct situations."""
-    labels = {
-        shown(row(DBZ_Price_Status=status))
-        for status in ("NO_RELEVANT_CANDIDATE", "CANDIDATE_NOT_CONFIRMED", "SEARCH_FAILED")
-    }
-    assert labels == {"No match", "Review", "Not checked"}
-
-
 CAPPED_NOTE = (
     "NO_RELEVANT_CANDIDATE: 3 search page(s) over 3 query tier(s) returned 10 result(s), none "
     "showing this configuration's model code: UNRELATED x10; 1 result page(s) at the retailer's "
@@ -152,72 +144,49 @@ CAPPED_NOTE = (
     "exhaustively searched; discovery ended: QUERY_PLAN_EXHAUSTED; search coverage "
     "RESULT_CAP_REACHED"
 )
-FALLBACK_OFF_NOTE = (
-    "NO_RELEVANT_CANDIDATE: 7 search page(s) over 7 query tier(s) returned 8 result(s), none "
-    "showing this configuration's model code: DIFFERENT_MODEL_CODE x8; discovery ended: "
-    "QUERY_PLAN_EXHAUSTED; search coverage FALLBACK_NOT_TRIED_DISABLED"
-)
 
 
-@pytest.mark.parametrize(
-    ("status", "reason", "expected"),
-    [
-        # a search that hit the result cap has not shown that no match exists
-        ("NO_RELEVANT_CANDIDATE", CAPPED_NOTE, "Review"),
-        ("NO_CANDIDATE_FOUND", CAPPED_NOTE, "Review"),
-        ("NO_RELEVANT_CANDIDATE", "result page(s) with unread next pages", "Review"),
-        ("NO_RELEVANT_CANDIDATE", "discovery ended: BUDGET_EXHAUSTED", "Review"),
-        ("NO_CANDIDATE_FOUND", "search coverage FALLBACK_NOT_TRIED_BUDGET", "Review"),
-        # a finished query plan (the optional fallback being off is a configuration choice)
-        ("NO_RELEVANT_CANDIDATE", FALLBACK_OFF_NOTE, "No match"),
-        ("NO_RELEVANT_CANDIDATE", "discovery ended: QUERY_PLAN_EXHAUSTED", "No match"),
-        ("NO_CANDIDATE_FOUND", "", "No match"),
-        # the fallback being off does not hide a cap recorded beside it
-        (
-            "NO_RELEVANT_CANDIDATE",
-            FALLBACK_OFF_NOTE + "; 1 result page(s) at the retailer's result cap",
-            "Review",
-        ),
-        # an incomplete or failed search stays Not checked, never Review or No match
-        ("DISCOVERY_INCOMPLETE", CAPPED_NOTE, "Not checked"),
-        ("SEARCH_FAILED", "", "Not checked"),
-    ],
-)
-def test_a_capped_or_cut_short_search_is_review_and_a_finished_one_is_no_match(
-    status, reason, expected
-) -> None:
-    assert shown(row(DBZ_Price_Status=status, DBZ_Reason=reason)) == expected
+def test_the_placeholder_never_says_no_match_review_or_not_checked() -> None:
+    """The simple tab has one placeholder; the reasons live in PRICE REPORT and the hidden tabs."""
+    words = {"No match", "Review", "Not checked", "Search limited"}
+    for status in (
+        "NO_RELEVANT_CANDIDATE",
+        "CANDIDATE_NOT_CONFIRMED",
+        "SEARCH_FAILED",
+        "NO_CANDIDATE_FOUND",
+    ):
+        for reason in ("", CAPPED_NOTE):
+            assert shown(row(DBZ_Price_Status=status, DBZ_Reason=reason)) not in words
+            assert shown(row(DBZ_Price_Status=status, DBZ_Reason=reason)) == "—"
 
 
 def test_a_capped_search_cannot_demote_a_verified_price_or_promote_a_close_alternative() -> None:
     # A verified matching offer is a price whatever else the search left unread.
     assert shown(row(**priced("DBZ", "54950.0", DBZ_Reason=CAPPED_NOTE))) == "₱54,950"
-    # A close alternative is a different configuration (No match); capped, it is uncertain.
+    # A close alternative is a different configuration: the placeholder, never a price or a link.
     alt = {
         "DBZ_Price": "50000.0",
         "DBZ_Price_Status": "ALTERNATIVE_SELECTED",
         "DBZ_Stock": "IN_STOCK",
         "DBZ_Comparison_Tag": "ALT 1",
+        "DBZ_Offer_URL": "https://dbz.example/alt",
     }
-    assert shown(row(**alt)) == "No match"
-    assert shown(row(**alt, DBZ_Reason=CAPPED_NOTE)) == "Review"
-    # Never a price, never a link, and the note says why it needs a look.
-    r = row(DBZ_Price_Status="NO_RELEVANT_CANDIDATE", DBZ_Reason=CAPPED_NOTE)
-    cell, shows_price = pv.retailer_cell(r, "DBZ", "DataBlitz", retailer_result(r, "DBZ"))
+    assert shown(row(**alt)) == shown(row(**alt, DBZ_Reason=CAPPED_NOTE)) == "—"
+    r = row(**alt)
+    cell, shows_price = pv.retailer_cell(r, "DBZ", retailer_result(r, "DBZ"))
     assert not shows_price and cell.kind == "text" and cell.link == ""
-    assert "result cap" in cell.note
 
 
 def test_a_displayed_price_stays_a_number_with_its_words_in_the_format() -> None:
     r = row(**priced("PCX", "52990.0", "OUT_OF_STOCK"))
-    cell, shows_price = pv.retailer_cell(r, "PCX", "PC Express", retailer_result(r, "PCX"))
+    cell, shows_price = pv.retailer_cell(r, "PCX", retailer_result(r, "PCX"))
     assert shows_price and cell.kind == "number" and Decimal(cell.value) == Decimal("52990")
     assert NUMBER_FORMATS[cell.number_format]["pattern"] == '"₱"#,##0" (OOS)"'
     assert NUMBER_FORMATS[cell.number_format]["type"] == "CURRENCY"
     assert cell.link == "https://pcx.example/p"  # the verified offer's page
     # A verified price without a usable link is kept, and no link is invented.
     r2 = row(**priced("PCX", "52990.0") | {"PCX_Offer_URL": ""})
-    cell2, _ = pv.retailer_cell(r2, "PCX", "PC Express", retailer_result(r2, "PCX"))
+    cell2, _ = pv.retailer_cell(r2, "PCX", retailer_result(r2, "PCX"))
     assert cell2.kind == "number" and cell2.link == ""
 
 
@@ -227,8 +196,23 @@ def test_a_status_cell_never_links_to_a_candidate() -> None:
         DBZ_Candidate_URL="https://dbz.example/unconfirmed",
         DBZ_Offer_URL="https://dbz.example/unconfirmed",
     )
-    cell, shows_price = pv.retailer_cell(r, "DBZ", "DataBlitz", retailer_result(r, "DBZ"))
+    cell, shows_price = pv.retailer_cell(r, "DBZ", retailer_result(r, "DBZ"))
     assert not shows_price and cell.kind == "text" and cell.link == ""
+
+
+def test_no_cell_of_the_simple_view_carries_a_note() -> None:
+    priced_row = row(shopee_price_php="50000", **priced("DBZ", "54950.0", "OUT_OF_STOCK"))
+    cells = [
+        pv.retailer_cell(priced_row, "DBZ", retailer_result(priced_row, "DBZ"))[0],
+        pv.retailer_cell(row(), "DBZ", retailer_result(row(), "DBZ"))[0],
+        pv.shopee_cell(priced_row, stale=True),
+        pv.shopee_cell(row(), stale=False),
+        *pv.competitiveness_cells(
+            priced_row, pv.LowestOffer("54950.0", ("DataBlitz",), "https://dbz.example/p")
+        ),
+        *pv.competitiveness_cells(row(), None),
+    ]
+    assert all(cell.note == "" for cell in cells)
 
 
 # ---- the lowest in-stock matching price ----
@@ -272,7 +256,7 @@ def test_no_in_stock_matching_offer_means_no_lowest_price_and_no_comparison() ->
     # tab shows no lowest price and never falls back to the out-of-stock one.
     r = lowest(shopee_price_php="50000.0", **priced("DBZ", "40000.0", "OUT_OF_STOCK"))
     assert pv.lowest_in_stock(r) is None
-    names, price, gap, pct, label = pv.competitiveness_cells(r, None, lowest_note="")
+    names, price, gap, pct, label = pv.competitiveness_cells(r, None)
     assert [pv.display_text(c) for c in (names, price, gap, pct, label)] == [
         "—", "—", "—", "—", "No comparison",
     ]  # fmt: skip
@@ -355,7 +339,7 @@ def test_a_missing_or_invalid_price_is_no_comparison_never_zero(shopee, retailer
 def test_the_competitiveness_cells_format_and_colour_the_result() -> None:
     r = row(shopee_price_php="56390.0")
     offer = pv.LowestOffer("54950.0", ("DataBlitz",), "https://dbz.example/p")
-    names, price, gap, pct, label = pv.competitiveness_cells(r, offer, lowest_note="n")
+    names, price, gap, pct, label = pv.competitiveness_cells(r, offer)
     assert [pv.display_text(c) for c in (names, price, gap, pct, label)] == [
         "DataBlitz", "₱54,950", "+₱1,440", "+2.62%", "Retailer cheaper",
     ]  # fmt: skip
@@ -363,17 +347,16 @@ def test_the_competitiveness_cells_format_and_colour_the_result() -> None:
     assert gap.kind == pct.kind == "number" and gap.value == "1440.0"  # numeric, not a string
     assert label.fill == gap.fill == pct.fill == "cmp_red"
     cheaper = pv.competitiveness_cells(
-        row(shopee_price_php="48990.0"), pv.LowestOffer("49999.0", ("PC Central",), ""),
-        lowest_note="",
-    )  # fmt: skip
+        row(shopee_price_php="48990.0"), pv.LowestOffer("49999.0", ("PC Central",), "")
+    )
     assert [pv.display_text(c) for c in cheaper[2:]] == ["-₱1,009", "-2.02%", "Shopee cheaper"]
     assert cheaper[4].fill == "cmp_green"
     same = pv.competitiveness_cells(
-        row(shopee_price_php="1000"), pv.LowestOffer("1000", ("Octagon",), ""), lowest_note=""
+        row(shopee_price_php="1000"), pv.LowestOffer("1000", ("Octagon",), "")
     )
     assert [pv.display_text(c) for c in same[2:]] == ["₱0", "0.00%", "Same price"]
     assert same[4].fill == "cmp_neutral"
-    none = pv.competitiveness_cells(row(shopee_price_php="1000"), None, lowest_note="")
+    none = pv.competitiveness_cells(row(shopee_price_php="1000"), None)
     assert none[4].fill == "cmp_gray" and none[2].fill == ""  # only the result is emphasised
     assert {"cmp_green", "cmp_red", "cmp_neutral", "cmp_gray"} <= set(STATUS_FILLS)
 
@@ -387,14 +370,14 @@ def test_a_stale_shopee_price_is_flagged_beside_the_price_and_still_compared() -
         shopee_listing_url="https://shopee.example/i",
         shopee_price_status="SNAPSHOT_PRICE_STALE",
     )
-    cell = pv.shopee_cell(r, stale=True, note="n")
+    cell = pv.shopee_cell(r, stale=True)
     assert pv.display_text(cell) == "₱49,990 ⚠ Stale" and cell.kind == "number"
     assert cell.fill == "stale" and cell.link == "https://shopee.example/i"
     assert Decimal(cell.value) == Decimal("49990")  # the price itself is untouched
     assert pv.compare("49990.0", "46990.0").label == "Retailer cheaper"  # still compared
-    fresh = pv.shopee_cell(r, stale=False, note="n")
+    fresh = pv.shopee_cell(r, stale=False)
     assert pv.display_text(fresh) == "₱49,990" and fresh.fill == ""
-    assert pv.display_text(pv.shopee_cell(row(), stale=False, note="")) == "—"
+    assert pv.display_text(pv.shopee_cell(row(), stale=False)) == "—"
 
 
 # ---- product detail text ----
@@ -450,28 +433,41 @@ def published(world, **kwargs):
 def grid(fake, title: str = PRICE_TAB) -> list[list[dict]]:
     sheet = fake.sheets[title]
     height = max(r for r, _ in sheet["grid"]) + 1
-    width = len(pv.PRICE_HEADER)
+    width = len(REPORT_HEADER if title == REPORT_TAB else pv.PRICE_HEADER)
     return [[sheet["grid"].get((r, c), {}) for c in range(width)] for r in range(height)]
 
 
-def test_one_visible_business_tab_is_created_and_the_technical_tabs_are_hidden(world) -> None:
+def test_both_business_tabs_are_created_and_the_technical_tabs_are_hidden(world) -> None:
     fake = SpyingSpreadsheet(template_tabs())
     fake = published(world, fake=fake)
 
     assert [m for m in fake.mutations if m.startswith("add_worksheet")] == [
-        f"add_worksheet:{PRICE_TAB}"
+        f"add_worksheet:{PRICE_TAB}",
+        f"add_worksheet:{REPORT_TAB}",
     ]
-    assert list(fake.sheets).count(PRICE_TAB) == 1
-    assert PRICE_TAB in fake.visible_tabs()
+    for title in BUSINESS_TABS:
+        assert list(fake.sheets).count(title) == 1
+        assert title in fake.visible_tabs()
     for title in TECHNICAL_TABS:
         assert fake.sheets[title]["tab_hidden"], f"{title} must be hidden"
     # The workbook's other tabs keep whatever visibility they had.
     for title in ("raw", "TARGET_MASTER", "ARCHIVE_PILOT_PRICE_COMPARISON_20261027"):
         assert not fake.sheets[title]["tab_hidden"]
     assert latest_report(world)["status"] == "SUCCESS"
-    # It sits next to the pilot tabs (before the Top list), not at the end of the workbook.
+    # They sit next to the pilot tabs (before the Top list), the simple view first, not at the end
+    # of the workbook.
     order = list(fake.sheets)
-    assert order.index(PRICE_TAB) == order.index(TOP_TAB) - 1
+    assert order.index(PRICE_TAB) == order.index(TOP_TAB) - 2
+    assert order.index(REPORT_TAB) == order.index(PRICE_TAB) + 1
+
+
+def test_neither_business_tab_carries_a_cell_note(world) -> None:
+    fake = published(world, fake=SpyingSpreadsheet(template_tabs()))
+    for title in BUSINESS_TABS:
+        assert fake.sheets[title]["grid"], title
+        assert not any("note" in cell for cell in fake.sheets[title]["grid"].values()), title
+    # The hidden technical comparison still explains itself (its notes are untouched).
+    assert any("note" in cell for cell in fake.sheets[COMPARISON_TAB]["grid"].values())
 
 
 def test_the_business_tab_carries_the_header_banner_and_dynamic_reporting_dates(world) -> None:
@@ -502,6 +498,8 @@ def test_one_row_per_selected_variation_in_the_top_lists_order_with_its_rank(wor
     tab = fake.values(PRICE_TAB)[4:]
     assert [row_[0] for row_ in tab] == [f"{float(rank)!r}" for rank in top_ranks]
     assert len(tab) == len(report.top) == len(report.comparison)
+    # PRICE REPORT lists the same variations in the same order.
+    assert [row_[0] for row_ in fake.values(REPORT_TAB)[4:]] == [row_[0] for row_ in tab]
     top_tab = fake.values(TOP_TAB)
     top_header = top_tab[0]
     assert [r[top_header.index("comparison_row_id")] for r in top_tab[1:]] == [
@@ -537,7 +535,8 @@ def test_prices_stay_numeric_links_are_kept_and_numbers_are_not_text(world) -> N
                 assert cell.get("hyperlink") == source[f"{code}_Offer_URL"]
                 saw_link += bool(cell.get("hyperlink"))
             else:
-                assert "numberValue" not in value  # a status label, never a number
+                assert "numberValue" not in value  # the placeholder, never a number
+                assert value == {"stringValue": "—"}
                 assert not cell.get("hyperlink")
         # the gap cells are real numbers too
         gap = row_cells[index["Price Gap (₱)"]].get("userEnteredValue", {})
@@ -593,29 +592,47 @@ def test_republishing_is_idempotent_and_never_duplicates_tabs_formats_or_headers
     assert list(fake.sheets) == first[1]  # no tab added or removed
     assert fake.values(PRICE_TAB) == first[0]  # the same table, one header
     assert sum(r[0] == "Rank" for r in fake.values(PRICE_TAB)) == 1
-    assert fake.sheets[PRICE_TAB]["cf"] == [] and fake.sheets[PRICE_TAB]["filter"] is None
+    assert sum(r[0] == "Rank" for r in fake.values(REPORT_TAB)) == 1
+    for title in BUSINESS_TABS:
+        assert fake.sheets[title]["cf"] == [] and fake.sheets[title]["filter"] is None
     assert {t: fake.values(t) for t in DATA_TABS} == tabs
     assert [m for m in fake.mutations if m.startswith("add_worksheet")] == [
-        f"add_worksheet:{PRICE_TAB}"
-    ]  # created once, ever
+        f"add_worksheet:{PRICE_TAB}",
+        f"add_worksheet:{REPORT_TAB}",
+    ]  # each created once, ever
     for title in TECHNICAL_TABS:
         assert fake.sheets[title]["tab_hidden"]  # still hidden, never re-shown
-    assert fake.visible_tabs().count(PRICE_TAB) == 1
+    for title in BUSINESS_TABS:
+        assert fake.visible_tabs().count(title) == 1
 
 
 def test_an_existing_business_tab_is_replaced_in_place_not_recreated_or_appended(world) -> None:
     tabs = template_tabs()
     tabs[PRICE_TAB] = [[], [], [], list(pv.PRICE_HEADER), ["9", "Old seller"]]
-    fake = published(world, fake=SpyingSpreadsheet(tabs))
-    assert not any(m.startswith("add_worksheet") for m in fake.mutations)
+    fake = SpyingSpreadsheet(tabs)
+    # The earlier layout (PR #5, variation-business-1) carried a note on its cells.
+    fake.sheets[PRICE_TAB]["grid"][(4, 0)]["note"] = "an earlier note"
+    fake.sheets[PRICE_TAB]["grid"][(3, 0)]["note"] = "an earlier header note"
+    fake = published(world, fake=fake)
+    # Only the missing PRICE REPORT is created; the existing tab is replaced where it is.
+    assert [m for m in fake.mutations if m.startswith("add_worksheet")] == [
+        f"add_worksheet:{REPORT_TAB}"
+    ]
     values = fake.values(PRICE_TAB)
     assert "Old seller" not in sum(values, [])  # earlier cells replaced, not appended to
     assert sum(r[0] == "Rank" for r in values) == 1
+    assert not any("note" in cell for cell in fake.sheets[PRICE_TAB]["grid"].values())
+    # The new tab sits right after the existing one, not before the Top list's other neighbours.
+    order = list(fake.sheets)
+    assert order.index(REPORT_TAB) == order.index(PRICE_TAB) + 1
 
 
-def test_a_business_tab_name_holding_someone_elses_content_is_refused(world, capsys) -> None:
+@pytest.mark.parametrize("title", BUSINESS_TABS)
+def test_a_business_tab_name_holding_someone_elses_content_is_refused(
+    world, capsys, title
+) -> None:
     tabs = template_tabs()
-    tabs[PRICE_TAB] = [["Our own notes"], ["do not overwrite"]]
+    tabs[title] = [["Our own notes"], ["do not overwrite"]]
     code, fake, _ = run(world, fake=SpyingSpreadsheet(tabs))
     assert code == 1 and fake.mutations == []
     assert "live header differs from the contract" in capsys.readouterr().err
@@ -626,9 +643,10 @@ def test_visibility_requests_only_touch_this_publishers_tabs(world) -> None:
     for title in ("raw", "TARGET_MASTER"):
         assert not fake.sheets[title]["tab_hidden"]
     assert {t for t, s in fake.sheets.items() if s["tab_hidden"]} == set(TECHNICAL_TABS)
+    assert not any(fake.sheets[t]["tab_hidden"] for t in BUSINESS_TABS)
 
 
-def test_the_tab_stays_as_it_was_when_the_readback_fails(world) -> None:
+def test_the_tabs_stay_as_they_were_when_the_readback_fails(world) -> None:
     fake = SpyingSpreadsheet(template_tabs())
     state = {"done": False}
 
@@ -644,9 +662,10 @@ def test_the_tab_stays_as_it_was_when_the_readback_fails(world) -> None:
     report = latest_report(world)
     assert code == 1 and report["status"] == "READBACK_FAILED"
     # No visibility switch: the tabs people were using stay visible until a verified publication,
-    # and the new (unverified) business tab was created hidden and stays hidden.
+    # and the new (unverified) business tabs were created hidden and stay hidden.
     assert not any(fake.sheets[t]["tab_hidden"] for t in TECHNICAL_TABS)
-    assert fake.sheets[PRICE_TAB]["tab_hidden"] and PRICE_TAB not in fake.visible_tabs()
+    for title in BUSINESS_TABS:
+        assert fake.sheets[title]["tab_hidden"] and title not in fake.visible_tabs()
     assert state["done"]
 
 
@@ -664,12 +683,41 @@ def test_rollback_restores_the_earlier_visibility_of_the_technical_tabs(world, t
     )
     assert code == 0
     # The tabs backed up were visible before the publication, so they are visible again. The run
-    # log is never restored (it is the record of publications) and a tab the publication created
-    # has no earlier state: both are left as they are.
+    # log is never restored (it is the record of publications), so it stays as it is.
     restored = [t for t in TECHNICAL_TABS if t != "PILOT_PRICE_RUN_LOG"]
     assert not any(fake.sheets[t]["tab_hidden"] for t in restored)
     assert fake.sheets["PILOT_PRICE_RUN_LOG"]["tab_hidden"]
-    assert PRICE_TAB in fake.sheets and PRICE_TAB in fake.visible_tabs()
+    # A business tab the publication created has no earlier state: it must not stay in front of
+    # readers showing a report whose technical tabs were just restored, so it is hidden. Its
+    # content is kept (a republication replaces it in place).
+    for title in BUSINESS_TABS:
+        assert title in fake.sheets and title not in fake.visible_tabs()
+        assert fake.values(title)
+    report = json.loads((sorted(world["out"].iterdir())[-1] / "rollback_report.json").read_text())
+    assert report["hidden"] == list(BUSINESS_TABS) and report["status"] == "SUCCESS"
+
+
+def test_rollback_restores_an_existing_business_tab_with_its_notes_and_visibility(world) -> None:
+    tabs = template_tabs()
+    tabs[PRICE_TAB] = [[], [], [], list(pv.PRICE_HEADER), ["9", "Old seller"]]
+    fake = SpyingSpreadsheet(tabs)
+    fake.sheets[PRICE_TAB]["grid"][(4, 0)]["note"] = "an earlier note"
+    published(world, fake=fake)
+    assert fake.values(PRICE_TAB)[4][1] != "Old seller"
+    folder = sorted(world["out"].iterdir())[-1]
+    from test_verified_top import load_script
+
+    code = load_script("publish_variation_prices").main(
+        ["--rollback", str(folder), "--output-root", str(world["out"])],
+        spreadsheet_factory=lambda read_only: fake,
+        now=NOW + timedelta(minutes=9),
+    )
+    assert code == 0
+    # The tab that existed is put back as it was (values, note, visible); only the tab the
+    # publication created is hidden.
+    assert fake.values(PRICE_TAB)[4][:2] == ["9", "Old seller"]
+    assert fake.sheets[PRICE_TAB]["grid"][(4, 0)]["note"] == "an earlier note"
+    assert PRICE_TAB in fake.visible_tabs() and REPORT_TAB not in fake.visible_tabs()
 
 
 def test_hidden_technical_tabs_keep_their_data_and_headers(world) -> None:
@@ -685,23 +733,24 @@ def test_the_preview_lists_the_new_tab_as_to_be_created_and_writes_nothing(world
     code, fake, opened = run(world, mode="--preview", fake=SpyingSpreadsheet(template_tabs()))
     assert code == 0 and opened == [True] and fake.mutations == []
     printed = capsys.readouterr().out
-    assert "PRICE COMPARISON: does not exist yet; will be created" in printed
+    for title in BUSINESS_TABS:
+        assert f"{title}: does not exist yet; will be created" in printed
     folder = sorted(world["out"].iterdir())[-1]
     preview = (folder / "preview_PRICE_COMPARISON.csv").read_text(encoding="utf-8").splitlines()
     assert preview[0].startswith("LAPTOP PRICE COMPARISON") and preview[3].startswith("Rank,")
-    assert (
-        json.loads((folder / "publication_report.json").read_text())["planned_rows"][PRICE_TAB]
-        == 12
-    )
+    detailed = (folder / "preview_PRICE_REPORT.csv").read_text(encoding="utf-8").splitlines()
+    assert detailed[0].startswith("LAPTOP PRICE REPORT") and detailed[3].startswith("Rank,Laptop,")
+    planned = json.loads((folder / "publication_report.json").read_text())["planned_rows"]
+    assert planned[PRICE_TAB] == planned[REPORT_TAB] == 12
 
 
-def test_the_new_tab_is_the_only_one_the_publisher_may_create(world) -> None:
+def test_the_two_business_tabs_are_the_only_ones_the_publisher_may_create(world) -> None:
     states = {t: pv_state(t, exists=False) for t in PUBLISHER_TABS}
     report = load_variation_report(world["variation"], world["reports"], world["context"])
     plan = build_variation_plan(report, load_contract())
     problems, _ = check_destinations(states, plan)
-    assert len(problems) == len(PUBLISHER_TABS) - 1
-    assert not any(PRICE_TAB in p for p in problems)
+    assert len(problems) == len(PUBLISHER_TABS) - len(BUSINESS_TABS)
+    assert not any(title in p for p in problems for title in BUSINESS_TABS)
     assert all("never created" in p for p in problems)
     with pytest.raises(DestinationError):
         from laptop_tracker.sheet_publication import assert_publisher_tab
@@ -726,9 +775,10 @@ def test_a_failure_while_showing_and_hiding_tabs_is_reported_and_changes_no_visi
     assert code == 1 and report["status"] == "READBACK_FAILED"
     assert any("Tab visibility could not be applied" in i for i in report["readback_issues"])
     assert not any(fake.sheets[t]["tab_hidden"] for t in TECHNICAL_TABS)
-    assert PRICE_TAB not in fake.visible_tabs()  # verified data, but never shown half-switched
+    for title in BUSINESS_TABS:  # verified data, but never shown half-switched
+        assert title not in fake.visible_tabs()
     # The data itself was written and verified; the run log records the unfinished publication.
-    assert len(fake.values(PRICE_TAB)) == 4 + 12
+    assert len(fake.values(PRICE_TAB)) == len(fake.values(REPORT_TAB)) == 4 + 12
     status = [r for r in fake.values("PILOT_PRICE_RUN_LOG")[-1]]
     assert "READBACK_FAILED" in status
     # The same command repairs it: still one business tab, now visible and the rest hidden.
@@ -736,15 +786,16 @@ def test_a_failure_while_showing_and_hiding_tabs_is_reported_and_changes_no_visi
     code, fake, _ = run(world, fake=fake, now=NOW + timedelta(minutes=6))
     assert code == 0 and latest_report(world)["status"] == "SUCCESS"
     assert all(fake.sheets[t]["tab_hidden"] for t in TECHNICAL_TABS)
-    assert list(fake.sheets).count(PRICE_TAB) == 1
+    for title in BUSINESS_TABS:
+        assert list(fake.sheets).count(title) == 1 and title in fake.visible_tabs()
 
 
-def test_the_tracker_guide_text_points_at_the_business_tab() -> None:
+def test_the_tracker_guide_text_points_at_both_business_tabs() -> None:
     from laptop_tracker.sheet_guide import guide_entries
 
     entries = dict(
         guide_entries(
-            layout_version="variation-business-1",
+            layout_version="variation-business-2",
             publication_id="PUB-x",
             week="2026-11-09 to 2026-11-15",
             cutoff="2026-11-10 19:07",
@@ -752,7 +803,11 @@ def test_the_tracker_guide_text_points_at_the_business_tab() -> None:
             published="2026-11-12",
         )
     )
-    assert "PRICE COMPARISON is the business view" in entries["Current results"]
+    assert "PRICE COMPARISON is the minimal business view" in entries["Current results"]
+    assert "PRICE REPORT the detailed" in entries["Current results"]
     assert "hidden technical" in entries["Compact view"].lower()
-    for phrase in ("Price Gap", "(OOS)", "No match", "Review", "Not checked", "Stale"):
+    for phrase in ("Price Gap", "(OOS)", "dash (—)", "does not mean the retailer", "Stale"):
         assert phrase in entries["Price comparison"]
+    for phrase in ("Match", "Alt", "Review", "No match", "Search limited", "Not checked", "OOS"):
+        assert phrase in entries["Price report"]
+    assert "never counted in the lowest matching price" in entries["Price report"]

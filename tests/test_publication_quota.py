@@ -25,9 +25,9 @@ from test_verified_top import load_script
 
 from laptop_tracker import ci_publish as cp
 from laptop_tracker import sheets_quota as q
-from laptop_tracker.price_comparison_view import PRICE_TAB
 from laptop_tracker.sheet_publication import SNAPSHOT_FIELDS
 from laptop_tracker.variation_publication import (
+    BUSINESS_TABS,
     CONTRACT_PATH,
     DATA_TABS,
     PUBLISHER_TABS,
@@ -38,10 +38,10 @@ from laptop_tracker.variation_publication import (
     load_variation_report,
 )
 
-# The workbook before a first publication has no PRICE COMPARISON tab (the publisher creates it),
+# The workbook before a first publication has no business tabs (the publisher creates them),
 # so "as before" comparisons cover the tabs that already existed.
-EXISTING_TABS = tuple(t for t in PUBLISHER_TABS if t != PRICE_TAB)
-EXISTING_DATA_TABS = tuple(t for t in DATA_TABS if t != PRICE_TAB)
+EXISTING_TABS = tuple(t for t in PUBLISHER_TABS if t not in BUSINESS_TABS)
+EXISTING_DATA_TABS = tuple(t for t in DATA_TABS if t not in BUSINESS_TABS)
 
 
 def exhausted() -> q.SheetsRetryExhausted:
@@ -150,7 +150,7 @@ def test_quota_exhaustion_while_taking_backups_changes_nothing_and_says_so(world
     assert "SheetsRetryExhausted" in report["error"] and "HTTP 429" in report["error"]
     assert "stopped before any write" in capsys.readouterr().err
     assert {t: fake.values(t) for t in EXISTING_TABS} == before
-    assert PRICE_TAB not in fake.sheets  # not even the new tab was created
+    assert not set(BUSINESS_TABS) & set(fake.sheets)  # not even the new tabs were created
 
     # Once the quota clears, the same publication goes through and the history is intact.
     fake.fail_snapshots = False
@@ -201,8 +201,8 @@ def test_quota_exhaustion_during_readback_is_recorded_not_left_in_progress(world
     assert code == 0
     assert {t: fake.values(t) for t in EXISTING_DATA_TABS} == before
     # Visibility was never switched: the readback did not complete, so the tabs people use stay
-    # and the new, unverified business tab stays hidden.
-    assert PRICE_TAB not in fake.visible_tabs()
+    # and the new, unverified business tabs stay hidden.
+    assert not set(BUSINESS_TABS) & set(fake.visible_tabs())
     assert "PILOT_PRICE_COMPARISON" in fake.visible_tabs()
 
 

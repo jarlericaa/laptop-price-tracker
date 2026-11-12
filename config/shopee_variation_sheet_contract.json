@@ -1,8 +1,8 @@
 {
-  "provenance": "Reconstructed 2026-11-04 from the header rows of the live tabs (read-only), which the 2026-11-03 publication wrote and the publisher verified against the owner-supplied contract. The original owner file was never committed; replace this file with it if you have it. Layout variation-compact-1 (2026-11-05) replaces the 80-column comparison header with a compact visible block plus collapsed column groups; the earlier header is kept under earlier_headers so a live tab still carrying it is recognised as this publisher's own. Layout variation-business-1 (2026-11-12) adds the business-facing PRICE COMPARISON tab (19 columns, created by the publisher, the only tab it creates) and hides the PILOT_PRICE_* tabs as technical sources; their headers are unchanged.",
+  "provenance": "Reconstructed 2026-11-04 from the header rows of the live tabs (read-only), which the 2026-11-03 publication wrote and the publisher verified against the owner-supplied contract. The original owner file was never committed; replace this file with it if you have it. Layout variation-compact-1 (2026-11-05) replaces the 80-column comparison header with a compact visible block plus collapsed column groups; the earlier header is kept under earlier_headers so a live tab still carrying it is recognised as this publisher's own. Layout variation-business-1 (2026-11-12) adds the business-facing PRICE COMPARISON tab (19 columns, created by the publisher) and hides the PILOT_PRICE_* tabs as technical sources; their headers are unchanged. Layout variation-business-2 (2026-11-12) removes that tab's cell notes and adds the second business-facing tab PRICE REPORT (22 columns, also created by the publisher); these two are the only tabs it creates.",
   "schema_version": "shopee-variation-sheets-1",
   "ranking_grain": "SHOPEE_VARIATION",
-  "layout_version": "variation-business-1",
+  "layout_version": "variation-business-2",
   "new_or_reset_headers": {
     "TOP_100_SHOPEE_VARIATIONS": [
       "rank",
@@ -260,6 +260,30 @@
       "Price Gap (₱)",
       "Price Gap (%)",
       "Competitiveness"
+    ],
+    "PRICE REPORT": [
+      "Rank",
+      "Laptop",
+      "Shopee Seller",
+      "Variation",
+      "Target Specs",
+      "Shopee Price",
+      "Shopee Price Date",
+      "DataBlitz Price",
+      "DataBlitz Result",
+      "Laptop Factory Price",
+      "Laptop Factory Result",
+      "PC Express Price",
+      "PC Express Result",
+      "PC Central Price",
+      "PC Central Result",
+      "Octagon Price",
+      "Octagon Result",
+      "Lowest Matching Price",
+      "Lowest Matching Retailer",
+      "Lowest Alternative Price",
+      "Lowest Alternative Retailer",
+      "Coverage"
     ]
   },
   "append_to_existing_headers": {

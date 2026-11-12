@@ -16,7 +16,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from laptop_tracker.price_comparison_view import PRICE_TAB, write_display_csv
+from laptop_tracker.price_comparison_view import write_display_csv
 from laptop_tracker.sheet_guide import GUIDE_TAB, plan_guide
 from laptop_tracker.sheet_publication import (
     RETIRED_TABS,
@@ -28,6 +28,7 @@ from laptop_tracker.sheet_publication import (
 )
 from laptop_tracker.sheets_quota import cached
 from laptop_tracker.variation_publication import (
+    BUSINESS_TABS,
     COMPARISON_TAB,
     CONTRACT_PATH,
     DATA_TABS,
@@ -159,8 +160,9 @@ def main(
         write_plan_csv(run_dir / f"plan_{title}.csv", tab)
         if any(cell.note or cell.italic for row in tab.grid() for cell in row):
             notes[title] = write_plan_notes_csv(run_dir / f"plan_{title}_notes.csv", tab)
-    # What a reader will see in PRICE COMPARISON (amounts with their (OOS) / Stale words).
-    write_display_csv(run_dir / "preview_PRICE_COMPARISON.csv", plan.tabs[PRICE_TAB])
+    # What a reader will see in the two business tabs (amounts with their (OOS) / Stale words).
+    for title in BUSINESS_TABS:
+        write_display_csv(run_dir / f"preview_{title.replace(' ', '_')}.csv", plan.tabs[title])
     week = report.summary["report_week"]
     counts = report.counts
     local_report: dict = {
@@ -279,8 +281,8 @@ def main(
         before = (
             f"exists, {state.used_rows} used rows"
             if state.exists
-            else "does not exist yet; will be created"
-            if title == PRICE_TAB
+            else "does not exist yet; will be created (hidden until verified)"
+            if title in BUSINESS_TABS
             else "MISSING"
         )
         planned = plan.tabs.get(title)
@@ -406,6 +408,7 @@ def run_rollback(args, started_at: datetime, spreadsheet_factory) -> int:
             progress=lambda s: print(f"  ... {s}", flush=True),
             tabs=(*DATA_TABS, GUIDE_TAB),
             allowed=(*PUBLISHER_TABS, GUIDE_TAB),
+            hide_unbacked=BUSINESS_TABS,
         )
     except DestinationError as exc:
         report |= {"status": "DESTINATION_REFUSED", "error": str(exc)}
@@ -419,10 +422,13 @@ def run_rollback(args, started_at: datetime, spreadsheet_factory) -> int:
         report |= {
             "status": outcome.status,
             "restored": outcome.restored,
+            "hidden": outcome.hidden,
             "skipped": outcome.skipped,
             "readback_issues": outcome.issues,
         }
         print(f"Rollback {outcome.status}: restored {', '.join(outcome.restored) or 'nothing'}.")
+        if outcome.hidden:
+            print(f"  Hidden (created by that publication): {', '.join(outcome.hidden)}.")
         for line in outcome.skipped + outcome.issues[:10]:
             print(f"  {line}")
         code = 0 if outcome.status == "SUCCESS" else 1

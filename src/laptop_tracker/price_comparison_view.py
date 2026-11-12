@@ -1,22 +1,22 @@
-"""The business-facing ``PRICE COMPARISON`` tab (layout ``variation-business-1``, 2026-11-12).
+"""The business-facing ``PRICE COMPARISON`` tab (layout ``variation-business-2``, 2026-11-12).
 
 A projection of the saved variation reports, nothing more: it never selects, ranks, matches or
 prices anything. Every number it shows is a value the reports already carry (the Shopee snapshot
-price, each retailer's selected matching price, the report's own lowest *in-stock* matching price)
-and every label is derived from the structured fields behind ``result_labels``. What it adds is
-wording for business readers and the two derived numbers the report does not carry: the price gap
-and the competitiveness result.
+price, each retailer's selected matching price, the report's own lowest *in-stock* matching price).
+What it adds is the two derived numbers the report does not carry: the price gap and the
+competitiveness result.
 
 Rules the tests pin down:
 
 - One row per selected Shopee variation, in the Top list's order; the Rank column is the Top
   list's own rank. No grouping, no filtering, no sorting of its own.
 - A retailer cell shows a number only for a verified *matching* configuration (the report's
-  ``SELECTED`` offer). A close alternative (ALT 1 / ALT 2) is a different configuration, so it is
-  shown as ``No match`` and never as a price.
-- ``No match`` means the search *finished*. A search that hit a result cap, left result pages
-  unread or stopped early (``search_unsettled``) has not shown that no matching configuration
-  exists, so it is ``Review``, never ``No match``.
+  ``SELECTED`` offer). Every other state (a close alternative, an unconfirmed candidate, a search
+  that finished, was capped or never ran) is the one placeholder ``—``: *no verified comparable
+  retailer price is available in this report*. It never says the retailer does not carry the
+  product, and the underlying statuses stay in the hidden technical tabs and in ``PRICE REPORT``.
+- The tab carries no cell notes: the explanations live in the guide, the documentation and the
+  detailed report.
 - Out-of-stock matching prices stay visible (``₱52,990 (OOS)``) but never compete for the lowest
   price. The lowest price is the report's ``Lowest_In_Stock_Price``, which uses only offers
   recorded ``IN_STOCK``; unknown stock is never counted as in stock.
@@ -34,16 +34,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 
-from .result_labels import (
-    KIND_ALT,
-    KIND_EXCLUDED,
-    KIND_MATCH,
-    KIND_NONE,
-    KIND_PENDING,
-    KIND_REVIEW,
-    RetailerResult,
-    search_limited,
-)
+from .result_labels import KIND_MATCH, RetailerResult
 from .sheet_publication import (
     NUMBER_FORMATS,
     PHP_LABEL_PREFIX,
@@ -97,8 +88,8 @@ SECTIONS: tuple[tuple[str, int, int], ...] = (
 )
 assert len(PRICE_HEADER) == 19
 
-# Short retailer cell labels.
-NO_MATCH, REVIEW, NOT_CHECKED, UNAVAILABLE = "No match", "Review", "Not checked", "—"
+# The one placeholder of a cell with no verified comparable price (never "does not carry").
+UNAVAILABLE = "—"
 SHOPEE_CHEAPER, RETAILER_CHEAPER, SAME_PRICE, NO_COMPARISON = (
     "Shopee cheaper",
     "Retailer cheaper",
@@ -106,6 +97,15 @@ SHOPEE_CHEAPER, RETAILER_CHEAPER, SAME_PRICE, NO_COMPARISON = (
     "No comparison",
 )
 OOS_SUFFIX, STALE_SUFFIX, UNKNOWN_STOCK_SUFFIX = "(OOS)", "⚠ Stale", "(Stock unknown)"
+PREORDER_SUFFIX = "(Preorder)"
+
+
+def stock_suffix(stock: str) -> str:
+    """The words beside a price for its recorded stock: nothing for ``IN_STOCK``; anything not
+    verified in stock is said (never assumed available)."""
+    return {"IN_STOCK": "", "OUT_OF_STOCK": OOS_SUFFIX, "PREORDER": PREORDER_SUFFIX}.get(
+        stock, UNKNOWN_STOCK_SUFFIX
+    )
 
 COMPETITIVENESS_FILL = {
     SHOPEE_CHEAPER: "cmp_green",
@@ -260,103 +260,27 @@ def storage_display(gigabytes: str) -> str:
 # Retailer cells
 
 
-# The one coverage token that does not make a finished search uncertain: the optional category
-# fallback was switched off by configuration, while the query plan itself ran to its end.
-_FALLBACK_OFF = "search coverage FALLBACK_NOT_TRIED_DISABLED"
+def retailer_cell(row: Mapping[str, str], code: str, result: RetailerResult) -> tuple[Cell, bool]:
+    """``(cell, shows_price)`` for one retailer of one row.
 
-
-def search_unsettled(reason: str) -> bool:
-    """True when the recorded search cannot show that no matching configuration exists: a result
-    page hit the retailer's cap or has unread pages, the search stopped early (budget, provider
-    failure, replay only), or the fallback was not tried for a reason other than being switched
-    off. Reads the same recorded wording as ``result_labels.search_limited``; it changes no
-    business outcome."""
-    return search_limited(reason.replace(_FALLBACK_OFF, ""))
-
-
-def retailer_status(result: RetailerResult, reason: str = "") -> str:
-    """The short label of a retailer cell, or ``PRICE`` when it carries a verified price.
-
-    ``No match``: the search finished and no matching configuration was verified (including a
-    close alternative, which is a different configuration). ``Review``: a candidate needs
-    verification, or the search was capped or cut short so the result remains uncertain (``reason``
-    is the retailer's recorded search note). ``Not checked``: the search or observation did not
-    complete. ``—``: the row has no trusted comparison, so no retailer is compared."""
-    if result.head == "NOT COMPARED":
-        return UNAVAILABLE
-    if result.priced and result.kind == KIND_MATCH:
-        return "PRICE"
-    if result.kind == KIND_ALT:
-        return REVIEW if search_unsettled(reason) else NO_MATCH
-    if result.kind in (KIND_REVIEW, KIND_EXCLUDED):
-        return REVIEW
-    if result.kind == KIND_PENDING:
-        return NOT_CHECKED
-    if result.kind == KIND_NONE:
-        if result.head not in {"NO RESULTS", "NO RELEVANT"}:
-            return NOT_CHECKED
-        return REVIEW if search_unsettled(reason) else NO_MATCH
-    return NOT_CHECKED
-
-
-_STATUS_MEANING = {
-    NO_MATCH: "The search finished and no matching configuration was verified.",
-    REVIEW: "A candidate needs manual verification, or the search could not be completed "
-    "(result cap or unread pages); it is not shown as a price.",
-    NOT_CHECKED: "The search or observation was not completed for this retailer.",
-    UNAVAILABLE: "Not compared: the row has no trusted configuration context.",
-}
-
-
-def retailer_cell(
-    row: Mapping[str, str], code: str, name: str, result: RetailerResult
-) -> tuple[Cell, bool]:
-    """``(cell, shows_price)`` for one retailer of one row."""
-    reason = row.get(f"{code}_Reason", "")
-    status = retailer_status(result, reason)
+    A number only for the report's verified *matching* offer (``SELECTED``, MATCH, in a row with a
+    trusted context); the stock words sit in the number format. Everything else is ``—``."""
     price = row.get(f"{code}_Price", "")
-    where = "Technical detail: hidden tab PILOT_PRICE_COMPARISON."
-    if status == "PRICE" and price and row.get(f"{code}_Price_Status") == "SELECTED":
+    if (
+        result.priced
+        and result.kind == KIND_MATCH
+        and price
+        and row.get(f"{code}_Price_Status") == "SELECTED"
+    ):
         value = Decimal(price)
-        stock = row.get(f"{code}_Stock", "")
-        suffix = {"IN_STOCK": "", "OUT_OF_STOCK": OOS_SUFFIX}.get(stock, UNKNOWN_STOCK_SUFFIX)
-        stock_words = {
-            "IN_STOCK": "in stock",
-            "OUT_OF_STOCK": "out of stock (never used for the lowest price)",
-        }.get(stock, "stock not verified (never used for the lowest price)")
-        basis = (
-            " Matched on listed specs (the specific Shopee model is unknown)."
-            if row.get(f"{code}_Match_Basis") == "LISTED_SPEC"
-            else ""
-        )
-        observed = row.get(f"{code}_Observed_At", "")
-        note = (
-            f"{name}: verified matching configuration, {stock_words}.{basis}"
-            + (f" Observed {observed} (Asia/Singapore)." if observed else "")
-            + " Click the price to open the retailer's page."
-        )
         cell = Cell(
             "number",
             price,
             row.get(f"{code}_Offer_URL", ""),
-            peso_format(suffix, centavos=_has_centavos(value)),
-            note=note,
+            peso_format(stock_suffix(row.get(f"{code}_Stock", "")), centavos=_has_centavos(value)),
         )
         return cell, True
-    meaning = _STATUS_MEANING.get(status, _STATUS_MEANING[NOT_CHECKED])
-    extra = ""
-    if result.kind == KIND_ALT:
-        extra = (
-            f" Only a close alternative ({result.tag}) was found; it is a different configuration, "
-            "so its price is not shown."
-        )
-    if status == REVIEW and search_unsettled(reason):
-        extra += (
-            " The search hit a result cap or was cut short, so a matching configuration may exist "
-            "beyond the results read: check the retailer's site."
-        )
-    note = f"{name}: {meaning}{extra} Result: {result.one_line}. {where}"
-    return text(status, note=note), False
+    return text(UNAVAILABLE), False
 
 
 # Competitiveness
@@ -397,20 +321,39 @@ class LowestOffer:
     link: str
 
 
-def lowest_in_stock(row: Mapping[str, str]) -> LowestOffer | None:
-    """The report's lowest in-stock matching offer: its price, retailers (in column order, so a
-    tie lists every winner) and a link to the first winner's offer. ``None`` when no matching
-    offer is recorded in stock. Out-of-stock and alternative prices never reach it: the report
-    builds the minimum from in-stock comparable matching offers only."""
-    price = row.get("Lowest_In_Stock_Price", "")
-    codes = [c for c in row.get("Lowest_In_Stock_Price_Retailers", "").split(";") if c]
+def lowest_offer(
+    row: Mapping[str, str],
+    prefix: str,
+    order: Sequence[tuple[str, str]] = RETAILER_COLUMNS,
+    *,
+    retailers_key: str = "",
+    url_key: str = "",
+) -> LowestOffer | None:
+    """One of the report's lowest-price groups (``Lowest_In_Stock_Price`` or
+    ``Lowest_Alternative_In_Stock_Price``): its price, retailers (in ``order``, so a tie lists
+    every winner) and a link to the first winner's offer. ``None`` when the report records none.
+    Nothing is recomputed: the group is the report's own."""
+    price = row.get(prefix, "")
+    codes = [c for c in row.get(retailers_key or f"{prefix}_Retailers", "").split(";") if c]
     if not price or not codes:
         return None
-    urls = [u for u in row.get("Lowest_In_Stock_Offer_URL", "").split(";")]
+    urls = row.get(url_key or f"{prefix}_Offer_URL", "").split(";")
     link_of = dict(zip(codes, urls, strict=False)) if len(urls) == len(codes) else {}
-    ordered = [(code, name) for code, name in RETAILER_COLUMNS if code in codes]
+    ordered = [(code, name) for code, name in order if code in codes]
     link = link_of.get(ordered[0][0], "") if ordered else ""
     return LowestOffer(price, tuple(name for _, name in ordered), link)
+
+
+def lowest_in_stock(row: Mapping[str, str]) -> LowestOffer | None:
+    """The report's lowest in-stock matching offer. ``None`` when no matching offer is recorded in
+    stock. Out-of-stock and alternative prices never reach it: the report builds the minimum from
+    in-stock comparable matching offers only."""
+    return lowest_offer(
+        row,
+        "Lowest_In_Stock_Price",
+        retailers_key="Lowest_In_Stock_Price_Retailers",
+        url_key="Lowest_In_Stock_Offer_URL",
+    )
 
 
 def lowest_in_stock_issues(row: Mapping[str, str]) -> list[str]:
@@ -451,34 +394,7 @@ def lowest_in_stock_issues(row: Mapping[str, str]) -> list[str]:
     return issues
 
 
-# Column notes and layout
-
-COLUMN_NOTES = {
-    "Rank": "Rank in the Top 100 Shopee variations (existing GMV ranking, unchanged). One row per "
-    "Shopee seller variation.",
-    "Laptop Model": "Brand, series and model of the mapped laptop configuration.",
-    "Variation": "The Shopee variation exactly as listed by the seller.",
-    "CPU": "Processor of the mapped configuration (recorded fields only).",
-    "Shopee Price": "This variation's own latest Shopee snapshot price from the sales extract, "
-    "never a live price. '⚠ Stale' = the snapshot is older than 7 days at the report cutoff; the "
-    "gap is still calculated. Click the price to open the Shopee listing.",
-    "DataBlitz": "Verified matching configuration price at this retailer. (OOS) = out of stock, "
-    "shown but never used for the lowest price. No match = searched, no matching configuration "
-    "verified. Review = a candidate needs manual verification. Not checked = search not "
-    "completed. Click a price to open the retailer's page. Close alternatives are not shown "
-    "as prices.",
-    "Lowest Retailer": "Retailer(s) with the lowest verified in-stock matching price; ties list "
-    "every retailer. — when no in-stock matching price exists.",
-    "Lowest Price": "The lowest verified in-stock matching retailer price. Out-of-stock prices "
-    "and similar-but-different configurations are never used.",
-    "Price Gap (₱)": "Shopee price minus the lowest price. Positive = Shopee is more expensive.",
-    "Price Gap (%)": "The gap as a percentage of the lowest retailer price.",
-    "Competitiveness": "Retailer cheaper = Shopee is above the lowest retailer price. Shopee "
-    "cheaper = below. Same price = equal. No comparison = no valid in-stock matching retailer "
-    "price or no Shopee price.",
-}
-for _code, _name in RETAILER_COLUMNS[1:]:
-    COLUMN_NOTES[_name] = COLUMN_NOTES["DataBlitz"]
+# Layout
 
 _NUMBER = {"align": "RIGHT"}
 
@@ -517,44 +433,40 @@ def price_layout(header: Sequence[str]) -> TabLayout:
 # Cells of the Shopee price and of the competitiveness block
 
 
-def shopee_cell(row: Mapping[str, str], *, stale: bool, note: str) -> Cell:
+def shopee_cell(row: Mapping[str, str], *, stale: bool) -> Cell:
     """The Shopee snapshot price: numeric, linked to the listing, ``⚠ Stale`` beside it (and a soft
     amber fill) when the report marks the snapshot stale. No valid price is ``—``."""
     price = row.get("shopee_price_php", "")
     value = _positive(price)
     if value is None:
-        return text(UNAVAILABLE, note=note)
+        return text(UNAVAILABLE)
     return Cell(
         "number",
         price,
         row.get("shopee_listing_url", ""),
         peso_format(STALE_SUFFIX if stale else "", centavos=_has_centavos(value)),
-        note=note,
         fill="stale" if stale else "",
     )
 
 
-def competitiveness_cells(
-    row: Mapping[str, str], lowest: LowestOffer | None, *, lowest_note: str
-) -> list[Cell]:
+def lowest_price_cell(lowest: LowestOffer | None) -> Cell:
+    """A lowest-price cell: the report's number linked to the first winner's offer, else ``—``."""
+    if lowest is None:
+        return text(UNAVAILABLE)
+    return Cell(
+        "number",
+        lowest.price,
+        lowest.link,
+        peso_format("", centavos=_has_centavos(Decimal(lowest.price))),
+    )
+
+
+def competitiveness_cells(row: Mapping[str, str], lowest: LowestOffer | None) -> list[Cell]:
     """Lowest Retailer, Lowest Price, Price Gap (₱), Price Gap (%), Competitiveness."""
     price = lowest.price if lowest else ""
     result = compare(row.get("shopee_price_php", ""), price)
     names = text(", ".join(lowest.names) if lowest else UNAVAILABLE)
-    if lowest is None:
-        shown = text(
-            UNAVAILABLE,
-            note="No verified in-stock matching retailer price. Out-of-stock "
-            "prices and other configurations are never used.",
-        )
-    else:
-        shown = Cell(
-            "number",
-            lowest.price,
-            lowest.link,
-            peso_format("", centavos=_has_centavos(Decimal(lowest.price))),
-            note=lowest_note,
-        )
+    shown = lowest_price_cell(lowest)
     fill = COMPETITIVENESS_FILL[result.label]
     if result.gap is None:
         gap, percent = text(UNAVAILABLE), text(UNAVAILABLE)
