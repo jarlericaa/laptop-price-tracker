@@ -2832,6 +2832,7 @@ class RollbackOutcome:
     restored: list[str]
     skipped: list[str]
     issues: list[str]
+    hidden: list[str] = field(default_factory=list)
 
 
 def rollback(
@@ -2841,22 +2842,29 @@ def rollback(
     progress=None,
     tabs: Sequence[str] = DATA_TABS,
     allowed: Sequence[str] = PUBLISHER_TABS,
+    hide_unbacked: Sequence[str] = (),
 ) -> RollbackOutcome:
     """Restore every data tab backed up in ``backup_dir`` (a publication folder) to its snapshot.
 
     Only publisher tabs are touched, each only when it is still the same sheet (same ID) that
     was backed up; the run log is never rewritten (it remains the record of publications). A
-    tab the publication created has no backup and is left as it is (reported as skipped).
+    tab the publication created has no backup and is left as it is (reported as skipped) -- except
+    the ``hide_unbacked`` business tabs: such a tab was created by the publication being undone,
+    so it is *hidden*, never left showing a report whose technical tabs were just restored to
+    an earlier state. Its content is kept (a republication replaces it in place).
     ``tabs`` / ``allowed`` select the data tabs and the destination allowlist of another
     publisher schema (the Shopee-variation publisher); retired tabs are never restorable."""
-    restored, skipped, issues = [], [], []
+    restored, skipped, issues, hidden = [], [], [], []
     spreadsheet = cached(spreadsheet, new_phase=True)  # one worksheet listing for the rollback
     if allowed is not PUBLISHER_TABS and (set(tabs) | set(allowed)) & set(RETIRED_TABS):
         raise DestinationError("A retired tab cannot be a rollback destination.")
     for title in tabs:
         path = backup_dir / f"backup_{title}.json"
         if not path.is_file():
-            skipped.append(f"{title}: no backup in this folder (left as it is)")
+            skipped.append(
+                f"{title}: no backup in this folder ("
+                + ("created by that publication: hidden, content kept)" if title in hide_unbacked
+                   else "left as it is)"))
             continue
         backup = json.loads(path.read_text(encoding="utf-8"))
         if backup.get("title") != title:
@@ -2880,8 +2888,25 @@ def rollback(
                         or (actual.get("note") or "") != (cell.get("note") or ""):
                     issues.append(f"{title} {_column_letter(c)}{r + 1} differs after restore")
         restored.append(title)
+    for title in hide_unbacked:
+        if title in restored or (backup_dir / f"backup_{title}.json").is_file():
+            continue
+        state = read_tab(spreadsheet, title, allowed)
+        if not state.exists:
+            continue
+        request = [visibility_request(state.sheet_id, True)]
+        guard_requests(request, {state.sheet_id})
+        if progress is not None:
+            progress(f"hiding {title} (created by the publication being rolled back)")
+        spreadsheet.batch_update({"requests": request})
+        found = spreadsheet.fetch_sheet_metadata(
+            params={"fields": "sheets(properties(sheetId,hidden))"})
+        if not any(s["properties"]["sheetId"] == state.sheet_id
+                   and s["properties"].get("hidden") for s in found["sheets"]):
+            issues.append(f"{title} is not hidden after the rollback")
+        hidden.append(title)
     return RollbackOutcome("SUCCESS" if not issues else "READBACK_FAILED", restored, skipped,
-                           issues)
+                           issues, hidden)
 
 
 def tab_requests(
@@ -2998,7 +3023,10 @@ STATUS_FILLS = {"match": _rgb("#D5EFDB"), "alt1": _rgb("#FFF2A8"), "alt2": _rgb(
                 # red tints, a neutral and a grey) and the two section-label tints.
                 "cmp_green": _rgb("#D5EFDB"), "cmp_red": _rgb("#F8D7D4"),
                 "cmp_neutral": _rgb("#E6EAF0"), "cmp_gray": _rgb("#EEF1F5"),
-                "section_a": _rgb("#DCE4F1"), "section_b": _rgb("#EAEFF7")}
+                "section_a": _rgb("#DCE4F1"), "section_b": _rgb("#EAEFF7"),
+                # PRICE REPORT (2026-11-12): amber for an alternative or a candidate to review,
+                # a soft red for an out-of-stock price (green and grey are ``match`` / ``missing``).
+                "rpt_amber": _rgb("#FFF1CC"), "rpt_oos": _rgb("#F9E0DC")}
 PADDING = {"top": 6, "right": 8, "bottom": 6, "left": 8}
 LAYOUT_FIELDS = ",".join(f"userEnteredFormat.{name}" for name in (
     "backgroundColor", "backgroundColorStyle", "horizontalAlignment", "verticalAlignment",

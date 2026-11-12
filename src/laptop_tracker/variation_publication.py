@@ -8,10 +8,13 @@ workbook. The contract, not the legacy publisher's column positions, defines eve
 headers are read before anything is planned for a write and must equal the contract (or be a
 layout of this publisher's own that the contract lists under ``earlier_headers``).
 
-Layout ``variation-business-1`` (2026-11-12) adds the one business-facing tab, ``PRICE COMPARISON``
-(a 19-column projection of the same report rows, see ``price_comparison_view``), and hides every
-``PILOT_PRICE_*`` / Top-list tab as a technical source. It is the only tab this publisher may
-create. The compact layout below is unchanged and now lives in the hidden technical tabs.
+Layout ``variation-business-2`` (2026-11-12) has two business-facing tabs, both projections of the
+same report rows: ``PRICE COMPARISON`` (19 columns, the minimal Shopee-versus-retailer matrix, see
+``price_comparison_view``) and ``PRICE REPORT`` (22 columns, the side-by-side retailer report with
+short result labels, see ``price_report_view``). Neither carries cell notes. Every ``PILOT_PRICE_*``
+/ Top-list tab is hidden as a technical source. These two are the only tabs this publisher may
+create; a created tab starts hidden and is shown only after the full readback passes. The compact
+layout below is unchanged and now lives in the hidden technical tabs.
 
 Layout ``variation-compact-1`` (2026-11-05) is presentation only. PILOT_PRICE_COMPARISON shows a
 short visible block (rank, laptop, seller, variation, target specs, Shopee snapshot price and date,
@@ -49,7 +52,6 @@ from decimal import Decimal, InvalidOperation
 from pathlib import Path
 
 from .price_comparison_view import (
-    COLUMN_NOTES,
     PRICE_HEADER,
     PRICE_TAB,
     RETAILER_COLUMNS,
@@ -65,6 +67,20 @@ from .price_comparison_view import (
     retailer_cell,
     shopee_cell,
     storage_display,
+)
+from .price_report_view import (
+    REPORT_HEADER,
+    REPORT_RETAILERS,
+    REPORT_SECTIONS,
+    REPORT_TAB,
+    REPORT_TITLE,
+    alternative_lowest,
+    coverage_text,
+    finding_cells,
+    matching_lowest,
+    report_layout,
+    retailer_cells,
+    shopee_date_text,
 )
 from .price_tracking import (
     ALTERNATIVE_SELECTED,
@@ -155,11 +171,11 @@ from .verified_top import VerifiedRankingInputError, read_csv_rows
 CONTRACT_PATH = (
     Path(__file__).resolve().parents[2] / "config" / "shopee_variation_sheet_contract.json"
 )
-PUBLISHER_VERSION = "variation-sheets-3"
+PUBLISHER_VERSION = "variation-sheets-4"
 # The sheet layout (columns, groups, result labels, banners), versioned apart from the report
 # schema: the compact dashboard of 2026-11-05 changes presentation only, so the report files and
 # ``SCHEMA_VERSION`` (shopee-variation-sheets-1) are unchanged.
-LAYOUT_VERSION = "variation-business-1"
+LAYOUT_VERSION = "variation-business-2"
 
 TOP_TAB = "TOP_100_SHOPEE_VARIATIONS"
 COMPARISON_TAB = "PILOT_PRICE_COMPARISON"
@@ -169,6 +185,9 @@ HISTORY_TAB = "PILOT_PRICE_HISTORY"
 REVIEW_TAB = "PILOT_PRICE_REVIEW"
 RUN_LOG_TAB = "PILOT_PRICE_RUN_LOG"
 # The exact destination allowlist, compared exactly (no trimming or case folding).
+# The two business-facing tabs: written last (only after the technical tabs they are projected
+# from), created hidden when absent, and the only visible price tabs after a verified publication.
+BUSINESS_TABS: tuple[str, ...] = (PRICE_TAB, REPORT_TAB)
 DATA_TABS: tuple[str, ...] = (
     TOP_TAB,
     COMPARISON_TAB,
@@ -176,20 +195,20 @@ DATA_TABS: tuple[str, ...] = (
     ALTERNATIVES_TAB,
     HISTORY_TAB,
     REVIEW_TAB,
-    PRICE_TAB,  # last: written only after the technical tabs it is projected from
+    *BUSINESS_TABS,
 )
 PUBLISHER_TABS: tuple[str, ...] = (*DATA_TABS, RUN_LOG_TAB)
-# The technical source tabs: hidden on every publication. PRICE_TAB is the one visible tab.
-TECHNICAL_TABS: tuple[str, ...] = tuple(t for t in PUBLISHER_TABS if t != PRICE_TAB)
+# The technical source tabs: hidden on every publication. The business tabs are shown.
+TECHNICAL_TABS: tuple[str, ...] = tuple(t for t in PUBLISHER_TABS if t not in BUSINESS_TABS)
 # Tabs whose cell notes the publisher owns: cleared and rewritten every publication, so a note of
-# an earlier run cannot stay attached to a new result. History, review and the run log keep any
-# notes people add.
+# an earlier run cannot stay attached to a new result (and the business tabs carry none). History,
+# review and the run log keep any notes people add.
 VARIATION_NOTE_TABS: tuple[str, ...] = (
     TOP_TAB,
     COMPARISON_TAB,
     OVERVIEW_TAB,
     ALTERNATIVES_TAB,
-    PRICE_TAB,
+    *BUSINESS_TABS,
 )
 assert not set(PUBLISHER_TABS) & set(RETIRED_TABS)
 
@@ -1384,33 +1403,46 @@ def comparison_plan(report: VariationPublicationReport, header: Sequence[str]) -
     )
 
 
-# PRICE COMPARISON (layout variation-business-1, 2026-11-12)
+# PRICE COMPARISON and PRICE REPORT (layout variation-business-2, 2026-11-12)
 #
-# A projection of the rows above for business readers. Nothing is selected, matched, ranked or
-# priced here: see ``price_comparison_view`` for the display rules and their tests.
+# Two projections of the rows above for business readers. Nothing is selected, matched, ranked or
+# priced here: see ``price_comparison_view`` and ``price_report_view`` for the display rules and
+# their tests. Neither tab carries a cell note.
 
 PRICE_TITLE = "LAPTOP PRICE COMPARISON"
 
 
-def price_banner(report: VariationPublicationReport) -> tuple[tuple[Cell, ...], ...]:
+def business_banner(
+    report: VariationPublicationReport,
+    title: str,
+    sections: Sequence[tuple[str, int, int]],
+    width: int,
+) -> tuple[tuple[Cell, ...], ...]:
     """Title, reporting week with the report's own cutoff (``Price Data As Of``: when the prices
-    were taken, not when the tab was published), and the three section labels."""
-    width = len(PRICE_HEADER)
+    were taken, not when the tab was published), and the section labels."""
     last_day = report.week_end - timedelta(days=1)
     first = [BLANK] * width
-    first[0] = text(PRICE_TITLE, bold=True)
+    first[0] = text(title, bold=True)
     second = [BLANK] * width
     second[0] = text(
         f"Reporting Week: {report.week_start.isoformat()} \u2013 {last_day.isoformat()} | "
         f"Price Data As Of: {_local_short(report.as_of)} (Asia/Singapore)"
     )
     third = [BLANK] * width
-    for number_, (label, start, end) in enumerate(SECTIONS):
+    for number_, (label, start, end) in enumerate(sections):
         fill = "section_a" if number_ % 2 == 0 else "section_b"
         for column in range(start, end):
             third[column] = text("", fill=fill)
         third[start] = text(label, bold=True, fill=fill)
     return (tuple(first), tuple(second), tuple(third))
+
+
+def price_banner(report: VariationPublicationReport) -> tuple[tuple[Cell, ...], ...]:
+    return business_banner(report, PRICE_TITLE, SECTIONS, len(PRICE_HEADER))
+
+
+def report_banner(report: VariationPublicationReport) -> tuple[tuple[Cell, ...], ...]:
+    return business_banner(report, REPORT_TITLE, REPORT_SECTIONS, len(REPORT_HEADER))
 
 
 def price_plan(report: VariationPublicationReport, header: Sequence[str]) -> TabPlan:
@@ -1425,11 +1457,6 @@ def price_plan(report: VariationPublicationReport, header: Sequence[str]) -> Tab
         results = _row_results(report, row, alternatives)
         issues += lowest_in_stock_issues(row)
         _, stale = shopee_freshness(row)
-        shopee_note = (
-            "\n".join(filter(None, (shopee_date_note(row), _shopee_status(row))))
-            if row["shopee_price_php"]
-            else _shopee_status(row)
-        )
         cells: list[Cell] = [
             number(row["rank"], "integer"),
             text(seller_name(row)),
@@ -1439,39 +1466,72 @@ def price_plan(report: VariationPublicationReport, header: Sequence[str]) -> Tab
             text(ram_display(row["ram_capacity_gb"])),
             text(storage_display(row["storage_capacity_gb"])),
             text(gpu_display(row["gpu_model"])),
-            shopee_cell(row, stale=stale, note=shopee_note),
+            shopee_cell(row, stale=stale),
         ]
-        for code, name in RETAILER_COLUMNS:
-            cells.append(retailer_cell(row, code, name, results[code][0])[0])
-        lowest = lowest_in_stock(row)
-        lowest_note = "; ".join(
-            filter(
-                None,
-                (
-                    "Lowest verified in-stock matching price. "
-                    + _minimum_text(
-                        row,
-                        "Lowest_In_Stock_Price_Retailers",
-                        "Lowest_In_Stock_Notes",
-                        "Lowest_In_Stock_Basis",
-                    ),
-                    _minimum_basis(
-                        row.get("Lowest_In_Stock_Label", ""), row.get("Lowest_In_Stock_Basis", "")
-                    ),
-                ),
-            )
-        )
-        cells += competitiveness_cells(row, lowest, lowest_note=lowest_note)
+        for code, _ in RETAILER_COLUMNS:
+            cells.append(retailer_cell(row, code, results[code][0])[0])
+        cells += competitiveness_cells(row, lowest_in_stock(row))
         rows.append(tuple(cells))
     if issues:
         raise PublicationInputError(issues)
-    return TabPlan(
-        PRICE_TAB,
-        tuple(header),
-        tuple(rows),
-        tuple(COLUMN_NOTES.get(name, "") for name in header),
-        price_banner(report),
-    )
+    return TabPlan(PRICE_TAB, tuple(header), tuple(rows), (), price_banner(report))
+
+
+def report_plan(report: VariationPublicationReport, header: Sequence[str]) -> TabPlan:
+    """The 22-column PRICE REPORT: the visible block of the technical comparison with short result
+    labels, one row per selected Shopee variation in the Top list's order. A retailer Price is the
+    price the report selected for the cell (matching or the displayed alternative); the lowest
+    prices are the report's own in-stock minima, so an alternative never reaches the matching
+    one."""
+    if tuple(header) != REPORT_HEADER:
+        raise PublicationInputError(["the PRICE REPORT header differs from the publisher's"])
+    alternatives = _alternative_index(report)
+    rows = []
+    for row in report.comparison:
+        results = _row_results(report, row, alternatives)
+        _, stale = shopee_freshness(row)
+        cells: list[Cell] = [
+            number(row["rank"], "integer"),
+            text(model_display(row["brand"], row["series"], row["model"], row["item_name"])),
+            text(seller_name(row)),
+            text(row["shopee_model_name"]),
+            text(compact_specs(row)),
+            shopee_cell(row, stale=stale),
+            text(shopee_date_text(row, stale=stale), fill="stale" if stale else ""),
+        ]
+        kinds: list[str] = []
+        for code, _ in REPORT_RETAILERS:
+            price, label, kind = retailer_cells(row, code, results[code][0])
+            cells += [price, label]
+            kinds.append(kind)
+        cells += finding_cells(
+            matching_lowest(row),
+            _minimum_text(
+                row,
+                "Lowest_In_Stock_Price_Retailers",
+                "Lowest_In_Stock_Notes",
+                "Lowest_In_Stock_Basis",
+            ),
+            alternative_lowest(row),
+            _minimum_retailers(
+                row.get("Lowest_Alternative_In_Stock_Price_Retailers", ""),
+                row.get("Lowest_Alternative_In_Stock_Price_Notes", ""),
+            ),
+            coverage_text(kinds, compared=bool(row["context_id"])),
+        )
+        rows.append(tuple(cells))
+    return TabPlan(REPORT_TAB, tuple(header), tuple(rows), (), report_banner(report))
+
+
+def note_issues(tabs: Mapping[str, TabPlan]) -> list[str]:
+    """The business tabs carry no cell note at all (explanations live in the guide, the docs and
+    the hidden technical tabs)."""
+    issues = []
+    for title in BUSINESS_TABS:
+        plan = tabs[title]
+        if any(plan.header_notes) or any(cell.note for row in plan.grid() for cell in row):
+            issues.append(f"{title} must carry no cell notes")
+    return issues
 
 
 def price_view_issues(report: VariationPublicationReport, tabs: Mapping[str, TabPlan]) -> list[str]:
@@ -1485,7 +1545,7 @@ def price_view_issues(report: VariationPublicationReport, tabs: Mapping[str, Tab
     c_idx = {name: i for i, name in enumerate(comparison.header)}
     t_idx = {name: i for i, name in enumerate(top.header)}
     v_idx = {name: i for i, name in enumerate(view.header)}
-    issues: list[str] = []
+    issues: list[str] = note_issues(tabs)
     for row, v, c, t in zip(report.comparison, view.rows, comparison.rows, top.rows, strict=True):
         key = row["comparison_row_id"]
         if v[v_idx["Rank"]].value != t[t_idx["rank"]].value:
@@ -1507,12 +1567,78 @@ def price_view_issues(report: VariationPublicationReport, tabs: Mapping[str, Tab
                     issues.append(f"{key}: {name} shows a price that is not the matching price")
             elif matching:
                 issues.append(f"{key}: {name} hides a verified matching price")
+            elif shown.value != "\u2014":
+                issues.append(f"{key}: {name} shows {shown.value!r} instead of the placeholder")
         lowest = c[c_idx["Lowest in-stock matching retailer price (PHP)"]]
         shown = v[v_idx["Lowest Price"]]
         if (lowest.kind == "number") != (shown.kind == "number") or (
             lowest.kind == "number" and lowest.value != shown.value
         ):
             issues.append(f"{key}: Lowest Price differs from the technical comparison")
+    return issues
+
+
+def report_view_issues(
+    report: VariationPublicationReport, tabs: Mapping[str, TabPlan]
+) -> list[str]:
+    """PRICE REPORT against the technical comparison and PRICE COMPARISON: the same rows in the
+    same order, every price the technical comparison's own (with its link), the label kind
+    agreeing with the price (``Match`` / ``Alt`` only with a price), the two lowest prices the
+    report's own in-stock minima, a matching winner that really holds a selected matching price,
+    and a coverage text that reconciles with the ten retailer cells."""
+    view, comparison, price_tab = tabs[REPORT_TAB], tabs[COMPARISON_TAB], tabs[PRICE_TAB]
+    counts = {len(view.rows), len(comparison.rows), len(price_tab.rows), len(report.comparison)}
+    if len(counts) != 1:
+        return ["PRICE REPORT and PRICE COMPARISON have different numbers of rows"]
+    c_idx = {name: i for i, name in enumerate(comparison.header)}
+    p_idx = {name: i for i, name in enumerate(price_tab.header)}
+    v_idx = {name: i for i, name in enumerate(view.header)}
+    issues: list[str] = []
+    for row, v, c, p in zip(
+        report.comparison, view.rows, comparison.rows, price_tab.rows, strict=True
+    ):
+        key = row["comparison_row_id"]
+        if v[v_idx["Rank"]].value != p[p_idx["Rank"]].value:
+            issues.append(f"{key}: PRICE REPORT rank differs from PRICE COMPARISON")
+        mine, theirs = v[v_idx["Shopee Price"]], c[c_idx["Shopee snapshot price (PHP)"]]
+        if theirs.kind == "number":
+            if (mine.kind, mine.value, mine.link) != (theirs.kind, theirs.value, theirs.link):
+                issues.append(f"{key}: Shopee Price differs from the technical comparison")
+        elif mine.kind != "text":
+            issues.append(f"{key}: Shopee Price shows a number the technical comparison lacks")
+        kinds = []
+        for code, name in REPORT_RETAILERS:
+            shown = v[v_idx[f"{name} Price"]]
+            label = v[v_idx[f"{name} Result"]].value
+            price = c[c_idx[f"{name} price (PHP)"]]
+            technical = c[c_idx[f"{name} result"]].value
+            if price.kind == "number":
+                if (shown.kind, shown.value, shown.link) != (price.kind, price.value, price.link):
+                    issues.append(f"{key}: {name} price differs from the technical comparison")
+            elif (shown.kind, shown.value, shown.link) != ("text", "—", ""):
+                issues.append(f"{key}: {name} shows {shown.value!r} where no price is selected")
+            is_match, is_alt = label.startswith("Match"), label.startswith("Alt")
+            if (is_match or is_alt) != (shown.kind == "number"):
+                issues.append(f"{key}: {name} label {label!r} and price disagree")
+            if is_match != technical.startswith("MATCH") or is_alt != technical.startswith("ALT"):
+                issues.append(f"{key}: {name} label {label!r} differs from {technical!r}")
+            kinds.append("match" if is_match else "alt" if is_alt else "none")
+            if row["context_id"] and row[f"{code}_Price_Status"] == SELECTED and not is_match:
+                issues.append(f"{key}: {name} hides a verified matching price")
+        for name, source in (
+            ("Lowest Matching Price", "Lowest_In_Stock_Price"),
+            ("Lowest Alternative Price", "Lowest_Alternative_In_Stock_Price"),
+        ):
+            shown = v[v_idx[name]]
+            if (shown.kind == "number") != bool(row[source]) or (
+                shown.kind == "number" and shown.value != row[source]
+            ):
+                issues.append(f"{key}: {name} is not the report's {source}")
+        winners = [c_ for c_ in row.get("Lowest_In_Stock_Price_Retailers", "").split(";") if c_]
+        if any(row[f"{w}_Price_Status"] != SELECTED for w in winners):
+            issues.append(f"{key}: a lowest matching retailer has no selected matching price")
+        if v[v_idx["Coverage"]].value != coverage_text(kinds, compared=bool(row["context_id"])):
+            issues.append(f"{key}: Coverage does not reconcile with the retailer cells")
     return issues
 
 
@@ -2054,6 +2180,7 @@ def build_variation_plan(
         HISTORY_TAB: history_plan_variation(report, contract),
         REVIEW_TAB: review_plan_variation(report, contract),
         PRICE_TAB: price_plan(report, contract.headers[PRICE_TAB]),
+        REPORT_TAB: report_plan(report, contract.headers[REPORT_TAB]),
     }
     for plan in tabs.values():
         for row in plan.rows:
@@ -2063,6 +2190,7 @@ def build_variation_plan(
         plan_issues(report, tabs)
         + source_agreement_issues(report, tabs)
         + price_view_issues(report, tabs)
+        + report_view_issues(report, tabs)
     )
     if issues:
         raise PublicationInputError(issues)
@@ -2400,8 +2528,8 @@ def check_destinations(
             ],
         }
         if not state.exists:
-            if title == PRICE_TAB:
-                continue  # the one tab this publisher creates (see create_price_tab)
+            if title in BUSINESS_TABS:
+                continue  # the tabs this publisher creates (see create_business_tabs)
             problems.append(
                 f"{title} is missing; the prepared template tab is required and is "
                 "never created by this publisher"
@@ -2593,6 +2721,8 @@ def variation_tab_layout(title: str, header: Sequence[str]) -> TabLayout | None:
         return comparison_layout(header)
     if title == PRICE_TAB:
         return price_layout(header)
+    if title == REPORT_TAB:
+        return report_layout(header)
     if title == OVERVIEW_TAB:
         styles = dict(_IDENTITY) | {
             "Shopee (PHP, snapshot)": ColumnStyle(150, "orange", "shopee", align="RIGHT"),
@@ -2663,39 +2793,57 @@ class PreWriteFailure(RuntimeError):
     changed. Distinct from a failed write so the caller never rolls back or records a partial."""
 
 
-def create_price_tab(spreadsheet, plan: VariationPublicationPlan) -> TabState:
-    """Create the empty PRICE COMPARISON tab, next to the pilot tabs. It is the only tab this
-    publisher ever creates; nothing else about the workbook changes."""
-    tab = plan.tabs[PRICE_TAB]
-    anchor = find_worksheet(spreadsheet, TOP_TAB)
-    index = getattr(anchor, "index", None)
-    options = {"index": index} if isinstance(index, int) else {}
-    created = spreadsheet.add_worksheet(
-        title=PRICE_TAB, rows=len(tab.grid()) + 20, cols=len(tab.header), **options
-    )
-    # A new tab is empty: its state is what the API just returned, no further read is needed.
-    return TabState(PRICE_TAB, True, created.id, created.row_count, created.col_count)
+def create_business_tabs(
+    spreadsheet, plan: VariationPublicationPlan, states: dict[str, TabState]
+) -> list[str]:
+    """Create each missing business tab (empty), next to the pilot tabs and in order: PRICE
+    COMPARISON before PRICE REPORT, the pair before the Top list. These are the only tabs this
+    publisher ever creates; nothing else about the workbook changes. Returns the created titles
+    and puts their states in ``states``."""
+    created: list[str] = []
+    position: int | None = None  # where the next created tab goes (None: the API's default)
+    for title in BUSINESS_TABS:
+        if states[title].exists:
+            index = getattr(find_worksheet(spreadsheet, title), "index", None)
+            position = index + 1 if isinstance(index, int) else None
+            continue
+        if position is None and not created:
+            anchor = getattr(find_worksheet(spreadsheet, TOP_TAB), "index", None)
+            position = anchor if isinstance(anchor, int) else None
+        tab = plan.tabs[title]
+        options = {"index": position} if position is not None else {}
+        added = spreadsheet.add_worksheet(
+            title=title, rows=len(tab.grid()) + 20, cols=len(tab.header), **options
+        )
+        # A new tab is empty: its state is what the API just returned, no further read is needed.
+        states[title] = TabState(title, True, added.id, added.row_count, added.col_count)
+        created.append(title)
+        index = getattr(added, "index", None)
+        position = index + 1 if isinstance(index, int) else None
+    return created
 
 
 def visibility_requests(states: Mapping[str, TabState]) -> list[dict]:
-    """Show PRICE COMPARISON, hide every technical tab (the sheets of this publisher only)."""
+    """Show both business tabs, hide every technical tab (the sheets of this publisher only)."""
     return [
-        visibility_request(states[PRICE_TAB].sheet_id, False),
+        *(visibility_request(states[title].sheet_id, False) for title in BUSINESS_TABS),
         *(visibility_request(states[title].sheet_id, True) for title in TECHNICAL_TABS),
     ]
 
 
 def verify_visibility(spreadsheet, states: Mapping[str, TabState]) -> list[str]:
-    """Read the tabs' visibility back: PRICE COMPARISON visible, every technical tab hidden."""
+    """Read the tabs' visibility back: both business tabs visible, every technical tab hidden."""
     found = spreadsheet.fetch_sheet_metadata(
         params={"fields": "sheets(properties(sheetId,title,hidden))"}
     )
     hidden = {
         s["properties"]["sheetId"]: bool(s["properties"].get("hidden")) for s in found["sheets"]
     }
-    issues = []
-    if hidden.get(states[PRICE_TAB].sheet_id, True):
-        issues.append(f"{PRICE_TAB} is not visible")
+    issues = [
+        f"{title} is not visible"
+        for title in BUSINESS_TABS
+        if hidden.get(states[title].sheet_id, True)
+    ]
     issues += [
         f"{title} is not hidden"
         for title in TECHNICAL_TABS
@@ -2769,7 +2917,7 @@ def publish_variation(
 
     spreadsheet = cached(spreadsheet, new_phase=True)  # one worksheet listing for this phase
     step("inspecting destination tabs")
-    created_price_tab = False
+    created_tabs: list[str] = []
     try:
         states = {title: read_tab(spreadsheet, title, PUBLISHER_TABS) for title in PUBLISHER_TABS}
         problems, _ = check_destinations(states, plan)
@@ -2780,10 +2928,10 @@ def publish_variation(
         for title, state in states.items():
             if state.used_rows:
                 write_backup(backup_dir, state, snapshot_tab(spreadsheet, title, PUBLISHER_TABS))
-        if not states[PRICE_TAB].exists:
-            step(f"creating {PRICE_TAB}")
-            states[PRICE_TAB] = create_price_tab(spreadsheet, plan)
-            created_price_tab = True
+        missing = [title for title in BUSINESS_TABS if not states[title].exists]
+        if missing:
+            step(f"creating {', '.join(missing)}")
+            created_tabs = create_business_tabs(spreadsheet, plan, states)
     except DestinationError:
         raise
     except Exception as exc:  # nothing has been written yet: report it as such
@@ -2792,10 +2940,9 @@ def publish_variation(
     tab_ids = {t: states[t].sheet_id for t in PUBLISHER_TABS}
     # A tab this publication created starts hidden (in the first write, with the run log's
     # IN_PROGRESS row), so a publication that fails before its content is verified never leaves an
-    # empty or unverified business tab in front of readers; the visibility step shows it last.
-    hide_new_tab = (
-        [visibility_request(states[PRICE_TAB].sheet_id, True)] if created_price_tab else []
-    )
+    # empty or unverified business tab in front of readers; the visibility step shows it last. A
+    # business tab that already exists keeps its visibility until then.
+    hide_new_tab = [visibility_request(states[title].sheet_id, True) for title in created_tabs]
     header = plan.run_log_header
     earlier = existing_run_log_rows(states[RUN_LOG_TAB], header)
     first, attempts = "", 0
@@ -2943,10 +3090,12 @@ def publish_variation(
     except Exception as exc:
         guide = f"FAILED ({type(exc).__name__}: {exc})"
     if data_verified:
-        # Every data tab is verified: now show PRICE COMPARISON and hide the technical tabs (one
+        # Every data tab is verified: now show the business tabs and hide the technical tabs (one
         # batch; idempotent). Never earlier, so a failed publication keeps the tabs people use.
         try:
-            step(f"showing {PRICE_TAB}, hiding {len(TECHNICAL_TABS)} technical tabs")
+            step(
+                f"showing {', '.join(BUSINESS_TABS)}, hiding {len(TECHNICAL_TABS)} technical tabs"
+            )
             requests = visibility_requests(states)
             guard_requests(requests, allowed)
             spreadsheet.batch_update({"requests": requests})

@@ -293,7 +293,8 @@ def guide_entries(
         (
             "Current results",
             f"{rows} variation rows published for the week {week}. PRICE COMPARISON is the "
-            "business view. The PILOT_PRICE_* tabs and TOP_100_SHOPEE_VARIATIONS are its hidden "
+            "minimal business view and PRICE REPORT the detailed side-by-side report. The "
+            "PILOT_PRICE_* tabs and TOP_100_SHOPEE_VARIATIONS are their hidden "
             "technical sources (PILOT_PRICE_COMPARISON, PILOT_PRICE_OVERVIEW, "
             "PILOT_PRICE_ALTERNATIVES, PILOT_PRICE_REVIEW, PILOT_PRICE_HISTORY, "
             "PILOT_PRICE_RUN_LOG). Earlier configuration results remain below.",
@@ -346,15 +347,31 @@ def guide_entries(
         ),
         (
             "Price comparison",
-            "PRICE COMPARISON: Is this Shopee variation cheaper or dearer than the same laptop "
-            "configuration at other retailers? Price Gap = Shopee Price minus the lowest "
-            "verified in-stock matching retailer price (the % is over that retailer price). "
-            "Positive = Retailer cheaper, negative = Shopee cheaper. Out-of-stock prices "
+            "PRICE COMPARISON (minimal view): Is this Shopee variation cheaper or dearer than the "
+            "same laptop configuration at other retailers? Price Gap = Shopee Price minus the "
+            "lowest verified in-stock matching retailer price (the % is over that retailer "
+            "price). Positive = Retailer cheaper, negative = Shopee cheaper. Out-of-stock prices "
             "(OOS) are shown but never used for the lowest price; close alternatives are never "
-            "shown as prices. No match = search finished, no matching configuration verified; "
-            "Review = a candidate needs checking, or the search hit a result cap so the result "
-            "is uncertain; Not checked = search not completed. Price Data As Of = when the "
-            "prices were taken, not when the tab was published. ⚠ Stale = the "
-            "Shopee snapshot is older than 7 days (the gap is still calculated).",
+            "shown as prices. A dash (—) means no verified comparable retailer price is "
+            "available in this report; it does not mean the retailer does not carry the "
+            "product. Price Data As Of = when the prices were taken, not when the tab was "
+            "published. ⚠ Stale = the Shopee snapshot is older than 7 days (the gap is still "
+            "calculated).",
+        ),
+        (
+            "Price report",
+            "PRICE REPORT (detailed view): the same variations side by side, with each "
+            "retailer's price and a short result. Match = verified matching configuration; "
+            "Alt = close alternative (a different configuration, shown for research, never "
+            "counted in the lowest matching price, the gap or the competitiveness); Review = a "
+            "candidate needs checking; No match = the search finished and verified no matching "
+            "configuration; Search limited = the search hit a result cap or was cut short, so a "
+            "match may exist; Not checked = the search or observation was not completed. OOS = "
+            "out of stock (the price is shown but never counted in the in-stock lowest prices). "
+            "After Alt, the words name what differs (for example Alt · Screen, Storage) and "
+            "Limited means only a limited basis (model family or CPU series) was compared; "
+            "Listed specs after Match means the specs agree but the exact product is unknown. "
+            "No label says a retailer does not carry the laptop. Coverage counts the matches "
+            "and alternatives among the five retailers.",
         ),
     ]

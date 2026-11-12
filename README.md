@@ -307,20 +307,28 @@ One spreadsheet (`SPREADSHEET_ID`) holds both the inputs and the dashboard outpu
 
 | Tab | Visible | Content |
 |---|---|---|
-| `PRICE COMPARISON` | yes | The business view: one row per Top 100 Shopee variation with the Shopee price, each retailer's verified matching price (`₱54,950`, `₱54,950 (OOS)`, `No match`, `Review`, `Not checked`), the lowest in-stock retailer, the price gap and `Retailer cheaper` / `Shopee cheaper` / `Same price` / `No comparison`. The only tab the publisher creates. See [docs/PRICE_COMPARISON_TAB_2026-11-12.md](docs/PRICE_COMPARISON_TAB_2026-11-12.md). |
+| `PRICE COMPARISON` | yes | The minimal business view: one row per Top 100 Shopee variation with the Shopee price, each retailer's verified matching price (`₱54,950`, `₱54,950 (OOS)`, or `—` when no verified comparable price is available), the lowest in-stock retailer, the price gap and `Retailer cheaper` / `Shopee cheaper` / `Same price` / `No comparison`. No cell notes. Created by the publisher. See [docs/PRICE_COMPARISON_TAB_2026-11-12.md](docs/PRICE_COMPARISON_TAB_2026-11-12.md). |
+| `PRICE REPORT` | yes | The detailed side-by-side report: the first 22 columns of `PILOT_PRICE_COMPARISON`, with a Price and a short Result (`Match`, `Alt · Storage`, `Review`, `No match`, `Search limited`, `Not checked`, plus `OOS`) per retailer, the lowest in-stock matching and alternative prices, and a coverage count. Alternatives are shown for research and never count toward the lowest matching price or the gap. No cell notes. Created by the publisher. |
 | `TOP_100_SHOPEE_VARIATIONS` | hidden | The selected Top 100 eligible mapped Shopee variations. |
-| `PILOT_PRICE_COMPARISON` | hidden | Technical source of `PRICE COMPARISON`: Shopee snapshot price against each retailer's price and result label (`MATCH`, `ALT 1`, `ALT 2`, `RECHECK ...`), plus collapsed detail column groups. |
+| `PILOT_PRICE_COMPARISON` | hidden | Technical source of both business tabs (it keeps every detail column and note): Shopee snapshot price against each retailer's price and result label (`MATCH`, `ALT 1`, `ALT 2`, `RECHECK ...`), plus collapsed detail column groups. |
 | `PILOT_PRICE_OVERVIEW` | hidden | Compact numeric overview of the same prices. |
 | `PILOT_PRICE_ALTERNATIVES` | hidden | The close-alternative offers. |
 | `PILOT_PRICE_HISTORY` | hidden | Dated observations. |
 | `PILOT_PRICE_REVIEW` | hidden | Retailer matching problems and exclusions. |
 | `PILOT_PRICE_RUN_LOG` | hidden | One row per publication (appended, not replaced). |
 
-`PRICE COMPARISON` is a presentation layer over the same report rows: it never selects, ranks, matches
-or prices anything. The publisher writes it after the technical tabs, verifies it, and only then shows
-it and hides the technical tabs; unhide a technical tab from the sheet list to troubleshoot a price.
-Gap = Shopee price minus the lowest **in-stock matching** retailer price; out-of-stock prices and close
-alternatives never compete; a stale Shopee snapshot is flagged `⚠ Stale` and still compared.
+`PRICE COMPARISON` and `PRICE REPORT` are presentation layers over the same report rows: they never
+select, rank, match or price anything, and they list the same variations in the same order. The
+publisher creates them hidden, writes them after the technical tabs, verifies them, and only then shows
+both and hides the technical tabs; unhide a technical tab from the sheet list to troubleshoot a price
+(the full explanation behind every result lives there, not in cell notes). The `—` in the minimal view
+means *no verified comparable retailer price is available in this report*, never that the retailer does
+not carry the laptop; the detailed report says why. In the detailed report `Match` is a verified
+matching configuration, `Alt` a close alternative (a different configuration, shown for research only),
+`Review` a candidate to check, `No match` a finished search with no verified match, `Search limited` a
+capped or cut-short search, and `Not checked` a search that never completed. Gap = Shopee price minus
+the lowest **in-stock matching** retailer price; out-of-stock prices and close alternatives never
+compete; a stale Shopee snapshot is flagged `⚠ Stale` and still compared.
 
 **Outputs of `run_phase1.py --write-sheets`:** `P1_TOP_100_TARGETS`, `P1_ELIGIBLE_RANKING`,
 `P1_EXCLUDED_LISTINGS`, `P1_ELIGIBILITY_REVIEW`, `P1_ELIGIBILITY_DECISIONS`,
@@ -429,7 +437,7 @@ Start here:
 - [Weekly workflow, dataflow and commands](docs/WEEKLY_WORKFLOW.md)
 - [Setup and operations](docs/SETUP_AND_OPERATIONS.md)
 - [Top 100 eligible mapped variations and the next-run commands](docs/MAPPED_TOP_100_2026-11-03.md)
-- [PRICE COMPARISON, the business-facing tab](docs/PRICE_COMPARISON_TAB_2026-11-12.md)
+- [PRICE COMPARISON and PRICE REPORT, the business-facing tabs](docs/PRICE_COMPARISON_TAB_2026-11-12.md)
 - [Compact Sheets dashboard (the hidden technical comparison)](docs/SHEETS_DASHBOARD_2026-11-05.md)
 - [Shopee variation grain](docs/SHOPEE_VARIATION_GRAIN_2026-10-27.md)
 

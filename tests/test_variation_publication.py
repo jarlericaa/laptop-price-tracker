@@ -21,6 +21,7 @@ from test_variation_ranking import vs
 from test_verified_top import load_script
 
 from laptop_tracker.price_comparison_view import PRICE_HEADER, PRICE_TAB
+from laptop_tracker.price_report_view import REPORT_HEADER, REPORT_TAB
 from laptop_tracker.sheet_publication import (
     RETIRED_TABS,
     STATUS_FILLS,
@@ -255,11 +256,14 @@ def test_the_contract_headers_are_the_exact_owner_supplied_headers(world) -> Non
     # contract file and the plan agree, and the 80-column header of variation-sheets-1 is kept as
     # an earlier layout so a live tab still carrying it is recognised as this publisher's own.
     assert CONTRACT.headers[COMPARISON_TAB] == comparison_header()
-    assert CONTRACT.layout_version == LAYOUT_VERSION == "variation-business-1"
-    # The business tab: one definition, the contract file and the plan agree; it is the last data
-    # tab (written after the technical tabs it is projected from).
+    assert CONTRACT.layout_version == LAYOUT_VERSION == "variation-business-2"
+    # The business tabs: one definition each, the contract file and the plan agree; they are the
+    # last data tabs (written after the technical tabs they are projected from).
     assert CONTRACT.headers[PRICE_TAB] == PRICE_HEADER and len(PRICE_HEADER) == 19
-    assert plan.tabs[PRICE_TAB].header == PRICE_HEADER and DATA_TABS[-1] == PRICE_TAB
+    assert plan.tabs[PRICE_TAB].header == PRICE_HEADER
+    assert CONTRACT.headers[REPORT_TAB] == REPORT_HEADER and len(REPORT_HEADER) == 22
+    assert plan.tabs[REPORT_TAB].header == REPORT_HEADER
+    assert DATA_TABS[-2:] == (PRICE_TAB, REPORT_TAB)
     (earlier,) = CONTRACT.earlier_headers[COMPARISON_TAB]
     assert len(earlier) == 80
     assert set(earlier) - set(comparison_header()) == {"Shopee price (PHP, snapshot)"}
@@ -359,12 +363,14 @@ def test_write_publishes_the_variation_tabs_and_touches_no_other_tab(world) -> N
     assert code == 0 and opened == [False]
     assert latest_report(world)["status"] == "SUCCESS"
     assert latest_report(world)["readback_issues"] == []
-    # The business tab is the one thing the publisher creates; every other tab is as it was.
-    assert set(fake.sheets) == set(template_tabs()) | {PRICE_TAB}
+    # The two business tabs are the only things the publisher creates; every other tab is as it
+    # was.
+    assert set(fake.sheets) == set(template_tabs()) | {PRICE_TAB, REPORT_TAB}
     for retired in RETIRED_TABS:
         assert retired not in fake.sheets and retired not in read_titles
     assert [m for m in fake.mutations if m.startswith("add_worksheet")] == [
-        f"add_worksheet:{PRICE_TAB}"
+        f"add_worksheet:{PRICE_TAB}",
+        f"add_worksheet:{REPORT_TAB}",
     ]
     for title, values in before.items():
         assert fake.values(title) == values  # source, catalog and archive tabs untouched
@@ -540,7 +546,7 @@ def test_run_log_records_schema_grain_and_the_new_metrics_and_keeps_earlier_rows
     assert new["Distinct configuration contexts"] == "10.0"
     assert new["Mapped selected variations"] == "12.0"
     assert new["Unmapped selected variations"] == "0.0"
-    assert new["Publisher version"] == "variation-sheets-3"
+    assert new["Publisher version"] == "variation-sheets-4"
     assert new["Publication status"] == "SUCCESS" and new["Readback"] == "PASSED"
 
 

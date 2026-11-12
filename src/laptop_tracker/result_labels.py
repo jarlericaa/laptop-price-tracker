@@ -167,6 +167,19 @@ def search_limited(reason: str) -> bool:
     return bool(coverage and coverage.group(1) != "COMPLETE")
 
 
+# The one coverage token that does not make a finished search uncertain: the optional category
+# fallback was switched off by configuration, while the query plan itself ran to its end.
+_FALLBACK_OFF = "search coverage FALLBACK_NOT_TRIED_DISABLED"
+
+
+def search_unsettled(reason: str) -> bool:
+    """True when the recorded search cannot show that no matching configuration exists: a result
+    page hit the retailer's cap or has unread pages, the search stopped early (budget, provider
+    failure, replay only), or the fallback was not tried for a reason other than being switched
+    off. Reads the same recorded wording as ``search_limited``; it changes no business outcome."""
+    return search_limited(reason.replace(_FALLBACK_OFF, ""))
+
+
 def rate_limited(*texts: str) -> bool:
     return any(_RATE_LIMITED.search(text) for text in texts if text)
 
