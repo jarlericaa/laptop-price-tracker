@@ -19,6 +19,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from laptop_tracker import ci_publish as cp
+from laptop_tracker import retailer_failure_policy as rfp
 from laptop_tracker import run_gate
 from laptop_tracker import state_store as ss
 
@@ -48,6 +49,22 @@ def build_parser() -> argparse.ArgumentParser:
         help="Do not record the attempt in durable storage (local rehearsal).",
     )
     return parser
+
+
+def readiness_record(gate: run_gate.GateResult) -> dict:
+    """What the readiness gate decided, kept with the publication attempt: the decision, the
+    retailer-failure counts and thresholds, and whether a person's acceptance was used."""
+    policy = gate.metrics.get("retailer_failure_policy") or {}
+    return {
+        "decision": gate.decision,
+        "warnings": gate.warnings,
+        **{
+            key: policy[key]
+            for key in ("severity", "automated_decision", "reason", "requests", "thresholds")
+            if key in policy
+        },
+        "manual_acceptance": policy.get("manual_acceptance", {}),
+    }
 
 
 def publisher_inputs(run_dir: Path) -> list[str]:
@@ -97,17 +114,24 @@ def main(
     except ss.StateError as exc:
         print(f"State error: {exc}", file=sys.stderr)
         return 1
+    try:
+        policy = rfp.FailurePolicy.from_environment()
+    except rfp.PolicyConfigError as exc:
+        # A malformed threshold never falls back to a default: nothing is published.
+        print(f"BLOCKED: invalid retailer-failure policy configuration: {exc}", file=sys.stderr)
+        ss.write_step_summary(f"**Publication blocked:** invalid retailer-failure policy: {exc}")
+        return 1
     gate = run_gate.evaluate(
         run_dir,
         accept_retailer_failures=args.accept_retailer_failures,
         max_age_hours=args.max_age_hours,
         max_matching_drop_pct=args.max_matching_drop_pct,
         previous_counts=previous,
+        policy=policy,
     )
+    run_gate.report_to_console(gate)
     if not gate.ok:
         ss.write_step_summary(run_gate.render_summary("Publication blocked", gate))
-        for line in gate.blocking:
-            print(f"BLOCKED: {line}", file=sys.stderr)
         return 1
     publication_id = gate.metrics["publication_id"]
 
@@ -168,7 +192,11 @@ def main(
                 store,
                 ring,
                 publication_id,
-                {**record, "counts": gate.metrics.get("counts", {})},
+                {
+                    **record,
+                    "counts": gate.metrics.get("counts", {}),
+                    "readiness": readiness_record(gate),
+                },
                 Path(outcome.write_dir) if outcome.write_dir else None,
             )
         except ss.StateError as exc:

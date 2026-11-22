@@ -65,8 +65,8 @@ Federation, no homelab, no always-on computer.**
 
 Findings that shaped the design (all still true): a read-quota 429 during the final run-log read was
 once reported as a failed publication after a successful write (handled by `SUCCEEDED_UNREPORTED`);
-discovery exit code 2 (`PARTIAL_SUCCESS`) is **normal**, so only real retailer request failures block
-unattended publication; the throttled 2026-11-09 run was `READY_TO_PUBLISH` with 30 instead of 41
+discovery exit code 2 (`PARTIAL_SUCCESS`) is **normal**, so only significant retailer request failures block
+unattended publication (see [Retailer request failure policy](#retailer-request-failure-policy)); the throttled 2026-11-09 run was `READY_TO_PUBLISH` with 30 instead of 41
 matching rows, which the gate now blocks; the compact dashboard layout has **never been written
 live** (adjacent column groups are written as one merged group, tested only against a fake that
 merges like Sheets).
@@ -188,7 +188,8 @@ not confirm the key on the official syntax page, so **the first scheduled week m
 Scheduled runs only start from the default branch and may be delayed by several minutes.
 `WEEKLY_AUTOMATION` is a repository Variable and is **inert until set**: unset or `off` skips the
 scheduled run before anything happens; `preview` runs mode A weekly; `publish` is the full unattended
-run. Scheduled runs never accept retailer failures.
+run. Scheduled runs never use the manual acceptance of retailer failures; minor failures publish with a
+warning under the [policy](#retailer-request-failure-policy).
 
 Every mode saves the validated collection state (new observations are real evidence and the
 rate-limit cooldowns must carry over). Only the `publish` job writes to Sheets, and only in a run that
@@ -203,9 +204,9 @@ publisher's preview report, never console text. It blocks when:
   the driver does not accept (the stage list is tested against the driver);
 - a report folder is empty, the discovery summary or preview report is missing, or the preview is not
   `PREVIEW_ONLY`;
-- discovery failed outright, or **retailer request failures** occurred (searches with errors,
-  searches not sent after repeated errors, failed page fetches, targets with provider failures). A
-  person can accept them explicitly (`accept_retailer_failures`) after reading the diagnostics;
+- discovery failed outright, or **significant retailer request failures** occurred (graded by the
+  [policy below](#retailer-request-failure-policy): minor, isolated failures only warn). A person can
+  accept a blocking finding explicitly (`accept_retailer_failures`) after reading the diagnostics;
 - the run is older than 7 days;
 - optionally, `MAX_MATCHING_DROP_PCT` is set and matching rows fell by more than that percentage
   against the last successful publication. **Off by default**: no coverage threshold is invented.
@@ -222,6 +223,61 @@ Sheet was published, so it is never silent.
 The run bundle is stored **before** any publication starts, so a failed publication never needs
 another scrape.
 
+### Retailer request failure policy
+
+The gate used to block on **any** failed request. One failed Octagon page among about 770 requests
+(2026-11-22) stopped an otherwise complete report. `src/laptop_tracker/retailer_failure_policy.py`
+now grades the failures instead; the decision is `PASS`, `PASS_WITH_WARNINGS` or `BLOCKED`
+(`gate.json` field `decision`; `ok`, `blocking`, `warnings` and `metrics` are unchanged).
+
+**What is counted** (each failure once; `discovery/search_requests.csv`, `product_inspections.csv`):
+a search whose outcome is `SEARCH_ERROR` or `UNSUPPORTED_LAYOUT`, and a page inspection that is
+`FETCH_FAILED`. Rows answered from a saved copy and requests never sent are not attempts. A 429 is an
+attribute of the failed row, and the summary's `PROVIDER_FAILURE` / `RETAILER_STOPPED_AFTER_ERRORS`
+counters are cross-checked against the rows, never added to them.
+
+| Level | Condition | Result |
+|---|---|---|
+| A, minor | all thresholds below hold, no retailer stopped or unavailable, and every failed request is visible in the report as an unresolved candidate or incomplete search | `PASS_WITH_WARNINGS`, publishes |
+| B, moderate | two or more failures on one target; or a failed search whose job still ended as "searched, nothing found" (it would read as a confirmed absence); or a failed request whose job outcome cannot be read | blocks when material (a target with no retailer price anywhere, a silent negative, unknown impact), otherwise warns |
+| C, significant | a threshold is exceeded; a retailer was stopped after repeated errors or answered no search; too much of the plan was never executed; provider failures the request files do not explain | `BLOCKED` |
+
+Not retailer failures, and never accepted by anyone: missing, unreadable or mutually inconsistent
+discovery files, a failed stage, an invalid preview, a stale run, a coverage drop beyond
+`MAX_MATCHING_DROP_PCT`. If the diagnostics cannot establish that a failure is minor, the gate fails
+closed.
+
+**Thresholds** (optional repository Variables; unset or empty means the default; a set but invalid
+value, such as `-1`, `2.5` for a count, `101` or `nan` for a percentage, **blocks** instead of falling
+back):
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `RETAILER_FAILURE_MAX_TOTAL` | `3` | failed requests across all retailers (whole number) |
+| `RETAILER_FAILURE_MAX_PER_RETAILER` | `2` | failed requests of any one retailer (whole number) |
+| `RETAILER_FAILURE_MAX_RETAILER_PCT` | `10` | failed / attempted of any one retailer, 0 to 100 |
+| `RETAILER_FAILURE_MAX_TOTAL_PCT` | `1` | failed / attempted over all retailers, 0 to 100 |
+| `RETAILER_FAILURE_MAX_UNSENT_PCT` | `5` | planned searches never executed (budget, search limit, retailer failing) / planned searches, 0 to 100; checked only when a request failed |
+
+Why these: with about 680 discovery requests, three failures is 0.4%, so the 1% overall limit is the
+binding one only for small runs and the counts are the real brake; two per retailer and 10% of a
+retailer's requests keep one flaky site from hiding behind a large total; a retailer that stopped
+searching after two consecutive errors, or answered nothing, is never "minor". The unsent limit
+catches a run whose request budget ran out, which the old gate ignored when nothing had failed.
+Percentages are compared exactly, not as rounded floats.
+
+**Manual acceptance** (`accept_retailer_failures`, scheduled runs never use it) lets a person publish
+a run whose retailer-failure findings block. It is recorded: `gate.json` and the publication attempt
+record carry `manual_acceptance` (`requested`, `used`, `overrode_block`) and the job summary says so.
+It cannot reach any other check (see above).
+
+**Bundles and the two jobs.** Collect and Publish evaluate the same files with the same Variables:
+run bundles now also keep `discovery/search_requests.csv` and `discovery/product_inspections.csv`
+(a few hundred KB, encrypted like the rest). A bundle saved before this change (for example
+`tracker-run-20261122T071112Z`) holds neither file, so its failures cannot be recounted; the gate
+blocks it with a message that **only** `accept_retailer_failures` clears (read that run's collection
+job summary first).
+
 ## Secrets and Variables
 
 Secrets are passed **only to the steps that need them** (never workflow-wide or job-wide, never in a
@@ -236,6 +292,7 @@ Secrets are passed **only to the steps that need them** (never workflow-wide or 
 | `SPREADSHEET_ID` | Variable | yes | the part of the Sheet URL between `/d/` and `/edit` | Which workbook |
 | `WEEKLY_AUTOMATION` | Variable | no, **set last** | `preview` or `publish` | Activates the schedule |
 | `MAX_MATCHING_DROP_PCT` | Variable | no | `30` | Optional coverage-drop gate |
+| `RETAILER_FAILURE_MAX_TOTAL`, `_MAX_PER_RETAILER`, `_MAX_RETAILER_PCT`, `_MAX_TOTAL_PCT`, `_MAX_UNSENT_PCT` | Variable | no | defaults `3`, `2`, `10`, `1`, `5` | Thresholds of the [retailer failure policy](#retailer-request-failure-policy) |
 
 A missing or malformed Secret fails the run in its first step naming **only the setting**, never its
 value (an invalid service-account text or key is rejected without being echoed).

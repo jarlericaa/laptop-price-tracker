@@ -8,8 +8,9 @@ and it reports why not.
 
 Three conditions beyond the existing ones are deliberate, documented safety extensions:
 
-* retailer request failures (searches or page fetches that failed, searches not sent after
-  repeated errors) block unattended publication unless a person explicitly accepts them;
+* retailer request failures are assessed by ``retailer_failure_policy``: minor, isolated failures
+  publish with a warning, significant ones block unless a person explicitly accepts them (a person
+  never overrides missing or inconsistent discovery files or any other check here);
 * a run older than ``max_age_hours`` is superseded and is not published;
 * an optional, owner-configured relative drop in matching rows against the last publication.
 """
@@ -18,10 +19,15 @@ from __future__ import annotations
 
 import csv
 import json
+import os
+import sys
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 
+from . import retailer_failure_policy as rfp
+
+PASS, PASS_WITH_WARNINGS, BLOCKED = "PASS", "PASS_WITH_WARNINGS", "BLOCKED"
 READY = "READY_TO_PUBLISH"
 # Order of the driver's stages (scripts/run_variation_week.sh) and the exit codes it accepts.
 EXPECTED_STAGES: tuple[tuple[str, tuple[int, ...]], ...] = (
@@ -57,9 +63,17 @@ class GateResult:
     def ok(self) -> bool:
         return not self.blocking
 
+    @property
+    def decision(self) -> str:
+        """``BLOCKED``, ``PASS_WITH_WARNINGS`` or ``PASS``."""
+        if self.blocking:
+            return BLOCKED
+        return PASS_WITH_WARNINGS if self.warnings else PASS
+
     def as_dict(self) -> dict:
         return {
             "run_id": self.run_id,
+            "decision": self.decision,
             "ok": self.ok,
             "blocking": self.blocking,
             "warnings": self.warnings,
@@ -181,7 +195,9 @@ def evaluate(
     max_age_hours: float = DEFAULT_MAX_AGE_HOURS,
     previous_counts: dict | None = None,
     max_matching_drop_pct: float | None = None,
+    policy: rfp.FailurePolicy | None = None,
 ) -> GateResult:
+    policy = policy or rfp.FailurePolicy()
     now = now or datetime.now(UTC)
     result = GateResult(run_id=run_dir.name)
     block, warn = result.blocking.append, result.warnings.append
@@ -241,17 +257,33 @@ def evaluate(
             block(f"Discovery finished with status {run_status!r}.")
         failures = retailer_failures(summary, metrics["retailers"])
         metrics["retailer_failures"] = failures
-        if failures:
-            message = (
-                "Retailer request failures make coverage incomplete: " + "; ".join(failures) + "."
+        assessment = rfp.assess(rfp.read_ledger(run_dir), summary, policy, plain_language=failures)
+        for line in assessment.integrity:
+            block(line)  # Missing or inconsistent discovery files: never accepted by a person.
+        acceptance = {
+            "requested": accept_retailer_failures,
+            "used": False,
+            "overrode_block": False,
+        }
+        if assessment.blocking and accept_retailer_failures and not assessment.integrity:
+            acceptance |= {"used": True, "overrode_block": True}
+            for line in assessment.blocking:
+                warn(f"{line} Accepted explicitly by a person.")
+        else:
+            hint = (
+                "Acceptance does not apply while the discovery files are unreliable."
+                if assessment.integrity and accept_retailer_failures
+                else "A person must review the diagnostics and accept the run explicitly to "
+                "publish it."
             )
-            if accept_retailer_failures:
-                warn(message + " Accepted explicitly by a person.")
-            else:
-                block(
-                    message + " A person must review the diagnostics and accept the run "
-                    "explicitly to publish it."
-                )
+            for line in assessment.blocking:
+                block(f"{line} {hint}")
+        acceptance["used"] = acceptance["used"] or bool(
+            accept_retailer_failures and assessment.warnings and not assessment.integrity
+        )
+        for line in assessment.warnings:
+            warn(f"{line} Accepted explicitly by a person." if acceptance["used"] else line)
+        metrics["retailer_failure_policy"] = assessment.metrics | {"manual_acceptance": acceptance}
 
     previews = sorted((run_dir / "publications").glob("*_preview/publication_report.json"))
     report = _json(previews[-1]) if previews else None
@@ -319,7 +351,7 @@ def render_summary(title: str, result: GateResult, extra: dict | None = None) ->
         f"**Run:** `{result.run_id}`  ",
         f"**Publication ID:** `{m.get('publication_id', 'n/a')}`  ",
         f"**Pipeline status:** `{m.get('pipeline_status', 'n/a')}`  ",
-        f"**Gate:** {'PASS' if result.ok else 'BLOCKED'}  ",
+        f"**Gate:** {result.decision}  ",
     ]
     if m.get("started_at"):
         lines.append(f"**Started / finished (UTC):** {m['started_at']} / {m.get('finished_at')}  ")
@@ -359,8 +391,74 @@ def render_summary(title: str, result: GateResult, extra: dict | None = None) ->
                 f"{v['inspection_failures']} | {v['http_429']} |"
             )
         lines.append("")
+    lines += _policy_section(m.get("retailer_failure_policy"))
     if result.blocking:
         lines += ["**Blocking:**", *[f"- {b}" for b in result.blocking], ""]
     if result.warnings:
         lines += ["**Warnings:**", *[f"- {w}" for w in result.warnings], ""]
     return "\n".join(lines) + "\n"
+
+
+def report_to_console(result: GateResult, stream=None) -> None:
+    """Blocking reasons and warnings as log lines; in GitHub Actions each warning is also a
+    workflow annotation, so it shows on the run page without opening the log. Counts and retailer
+    names only."""
+    stream = stream or sys.stderr
+    for line in result.blocking:
+        print(f"BLOCKED: {line}", file=stream)
+    for line in result.warnings:
+        print(f"WARNING: {line}", file=stream)
+        if os.environ.get("GITHUB_ACTIONS") == "true":
+            text = line.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
+            print(f"::warning title=Retailer request failures::{text}")
+
+
+def _policy_section(policy: dict | None) -> list[str]:
+    """Counts, rates and thresholds of the retailer-failure policy: no targets, URLs or prices."""
+    if not policy:
+        return []
+    req, acceptance = policy["requests"], policy["manual_acceptance"]
+    limits = policy["thresholds"]
+    lines = [
+        "**Retailer request failures**",
+        "",
+        f"- Automated decision: {policy['automated_decision']} (severity {policy['severity']})",
+        f"- Reason: {policy['reason']}",
+        f"- Requests attempted: {req['attempted']}; failed: {req['failed']} "
+        f"({req['failure_rate_pct'] if req['failure_rate_pct'] is not None else 'n/a'}%)",
+        f"- Search requests failed: {req['search_failures']} of {req['searches_attempted']}; "
+        f"page inspections failed: {req['inspection_failures']} of {req['inspections_attempted']}",
+        f"- Planned searches never sent: {req['searches_not_executed']} of "
+        f"{req['searches_planned']} (retailer failing: "
+        f"{req['searches_not_sent_retailer_failing']})",
+        f"- Thresholds: at most {limits['max_total']} failed in total, "
+        f"{limits['max_per_retailer']} per retailer, {limits['max_retailer_pct']:g}% per "
+        f"retailer, {limits['max_total_pct']:g}% overall, {limits['max_unsent_pct']:g}% of the "
+        "plan unsent",
+        "- Manual acceptance: "
+        + (
+            "used to publish despite a blocking retailer-failure finding"
+            if acceptance["overrode_block"]
+            else "requested; the run was within policy anyway"
+            if acceptance["used"]
+            else "requested; nothing needed it"
+            if acceptance["requested"]
+            else "not used"
+        ),
+        "",
+    ]
+    rows = [(name, v) for name, v in policy["retailers"].items() if v["attempted"] or v["failed"]]
+    if rows:
+        lines += [
+            "| Retailer | Attempted | Failed | Failure rate | Search failures | "
+            "Inspection failures |",
+            "|---|---|---|---|---|---|",
+        ]
+        for name, v in rows:
+            rate = f"{v['failure_rate_pct']}%" if v["failure_rate_pct"] is not None else "n/a"
+            lines.append(
+                f"| {name} | {v['attempted']} | {v['failed']} | {rate} | "
+                f"{v['search_failures']} | {v['inspection_failures']} |"
+            )
+        lines.append("")
+    return lines
