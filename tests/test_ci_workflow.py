@@ -213,6 +213,30 @@ def test_each_step_receives_only_the_secrets_it_needs(workflow) -> None:
             assert "GOOGLE_SERVICE_ACCOUNT_JSON" not in env  # storage never needs Sheets access
 
 
+def test_both_gates_share_one_policy_configuration_from_optional_variables(workflow) -> None:
+    from laptop_tracker.retailer_failure_policy import ENV_NAMES
+
+    env = workflow["env"]
+    assert {k for k in env if k.startswith("RETAILER_FAILURE_")} == set(ENV_NAMES.values())
+    for name in ENV_NAMES.values():
+        assert env[name] == "${{ vars." + name + " }}"  # a Variable only: never a literal
+    for _, step in all_steps(workflow):  # no step overrides them: collect and publish agree
+        assert not any(k.startswith("RETAILER_FAILURE_") for k in step.get("env", {}))
+    gates = [
+        s
+        for _, s in all_steps(workflow)
+        if re.search(r"ci_(run_gate|publish)\.py", s.get("run", ""))
+    ]
+    assert len(gates) == 2  # the collect gate and the publish job's gate, each one script call
+    # A warning is not a failure: only the gate step's exit code decides, and the collect job
+    # fails (so publish is skipped) exactly when the gate, the pipeline, state or bundle fail.
+    final = next(
+        s for s in workflow["jobs"]["collect"]["steps"] if "critical step" in s.get("name", "")
+    )
+    assert '"$GATE" != "success"' in final["run"] and "decision" in final["run"]
+    assert "needs.collect.result == 'success'" in workflow["jobs"]["publish"]["if"]
+
+
 def test_no_step_installs_or_logs_in_to_a_cloud_cli(workflow) -> None:
     for _, step in all_steps(workflow):
         assert "gcloud" not in step.get("run", "")

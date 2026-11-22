@@ -208,13 +208,23 @@ def test_retailer_request_failures_block_until_a_person_accepts_them(tmp_path) -
     run = make_run(tmp_path, discovery_code=2, run_status="PARTIAL_SUCCESS", failures=True)
     blocked = evaluate(run)
     assert not blocked.ok
-    assert any("pcx: 1 search error(s), 1 search(es) not sent" in b for b in blocked.blocking)
-    assert any("pcc: 1 page fetch(es) failed (1 HTTP 429)" in b for b in blocked.blocking)
+    assert any("pcx: searching stopped after repeated errors" in b for b in blocked.blocking)
+    assert any("failed across all retailers" in b for b in blocked.blocking)
+    # The plain-language list of what failed stays in the metrics.
+    assert any(
+        "pcx: 1 search error(s), 1 search(es) not sent" in f
+        for f in blocked.metrics["retailer_failures"]
+    )
+    assert any(
+        "pcc: 1 page fetch(es) failed (1 HTTP 429)" in f
+        for f in blocked.metrics["retailer_failures"]
+    )
     accepted = evaluate(run, accept_retailer_failures=True)
     assert accepted.ok and any("Accepted explicitly" in w for w in accepted.warnings)
+    assert accepted.metrics["retailer_failure_policy"]["manual_acceptance"]["overrode_block"]
 
 
-def test_provider_failures_in_the_summary_alone_also_block(tmp_path) -> None:
+def test_provider_failures_in_the_summary_without_a_failed_request_block(tmp_path) -> None:
     run = make_run(tmp_path)
     (run / "discovery/discovery_summary.json").write_text(
         json.dumps(
@@ -226,7 +236,10 @@ def test_provider_failures_in_the_summary_alone_also_block(tmp_path) -> None:
         )
     )
     result = evaluate(run)
-    assert not result.ok and any("provider failures" in b for b in result.blocking)
+    # The request files show no failed or unsent search behind these counters: the files disagree,
+    # and a person's acceptance does not repair that.
+    assert not result.ok and any("PROVIDER_FAILURE" in b for b in result.blocking)
+    assert not evaluate(run, accept_retailer_failures=True).ok
 
 
 def test_a_failed_discovery_status_always_blocks(tmp_path) -> None:

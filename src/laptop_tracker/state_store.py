@@ -97,6 +97,10 @@ BUNDLE_INCLUDE = (
     "context_reports",
     "discovery/collection",
     "discovery/discovery_summary.json",
+    # The request ledger the readiness gate counts failures from (retailer_failure_policy.py): the
+    # publish job must judge a stored run by the same files as the collect job (2026-11-22).
+    "discovery/search_requests.csv",
+    "discovery/product_inspections.csv",
     "alternative_audit",
     "selection_audit.log",
     "variation_audit.log",

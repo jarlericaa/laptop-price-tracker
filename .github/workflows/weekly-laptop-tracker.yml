@@ -26,7 +26,7 @@ on:
         type: string
         default: ""
       accept_retailer_failures:
-        description: "I reviewed the diagnostics and accept a run that had retailer request failures"
+        description: "A person accepts retailer request failures that the automated policy would block (minor failures publish without it). Never overrides a missing/invalid run, preview, stale run, or any other check."
         type: boolean
         default: false
       rerun_after_partial:
@@ -50,6 +50,13 @@ concurrency:
 env:
   PYTHON_VERSION: "3.14"
   PYTHONUNBUFFERED: "1"
+  # Retailer-failure policy thresholds (optional repository Variables; an unset one means the
+  # documented default, an invalid one blocks publication). docs/GITHUB_ACTIONS_SETUP.md
+  RETAILER_FAILURE_MAX_TOTAL: ${{ vars.RETAILER_FAILURE_MAX_TOTAL }}
+  RETAILER_FAILURE_MAX_PER_RETAILER: ${{ vars.RETAILER_FAILURE_MAX_PER_RETAILER }}
+  RETAILER_FAILURE_MAX_RETAILER_PCT: ${{ vars.RETAILER_FAILURE_MAX_RETAILER_PCT }}
+  RETAILER_FAILURE_MAX_TOTAL_PCT: ${{ vars.RETAILER_FAILURE_MAX_TOTAL_PCT }}
+  RETAILER_FAILURE_MAX_UNSENT_PCT: ${{ vars.RETAILER_FAILURE_MAX_UNSENT_PCT }}
 
 jobs:
   plan:
@@ -191,11 +198,12 @@ jobs:
           SAVE: ${{ steps.save.outcome }}
           BUNDLE: ${{ steps.bundle.outcome }}
         run: |
-          echo "pipeline=$DRIVER gate=$GATE state_save=$SAVE bundle=$BUNDLE"
+          decision="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["decision"])' "${RUN_DIR:-/nonexistent}/gate.json" 2>/dev/null || echo "not produced")"
+          echo "pipeline=$DRIVER gate=$GATE state_save=$SAVE bundle=$BUNDLE decision=$decision"
           {
             echo "### Outcome"
             echo "- Pipeline: $DRIVER"
-            echo "- Readiness gate: $GATE"
+            echo "- Readiness gate: $GATE ($decision)"
             echo "- State save: $SAVE"
             echo "- Run bundle: $BUNDLE"
           } >> "$GITHUB_STEP_SUMMARY"

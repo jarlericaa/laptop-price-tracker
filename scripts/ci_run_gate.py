@@ -15,6 +15,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
+from laptop_tracker import retailer_failure_policy as rfp
 from laptop_tracker import run_gate
 from laptop_tracker import state_store as ss
 
@@ -27,7 +28,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--accept-retailer-failures",
         action="store_true",
-        help="A person reviewed the retailer request failures and accepts the run.",
+        help="A person reviewed the retailer request failures and accepts a run the automated "
+        "policy blocks. Never overrides any other check.",
     )
     parser.add_argument("--max-age-hours", type=float, default=run_gate.DEFAULT_MAX_AGE_HOURS)
     parser.add_argument(
@@ -53,6 +55,16 @@ def main(
     ring: ss.sc.KeyRing | None = None,
 ) -> int:
     args = build_parser().parse_args(argv)
+    try:
+        policy = rfp.FailurePolicy.from_environment()
+    except rfp.PolicyConfigError as exc:
+        # A malformed threshold never falls back to a default: the gate refuses.
+        print(f"BLOCKED: invalid retailer-failure policy configuration: {exc}", file=sys.stderr)
+        if not args.no_summary:
+            ss.write_step_summary(
+                f"## {args.title}\n\n**Gate:** BLOCKED  \n- Invalid policy: {exc}"
+            )
+        return 1
     previous = None
     if args.max_matching_drop_pct is not None:
         try:
@@ -68,17 +80,15 @@ def main(
         max_age_hours=args.max_age_hours,
         previous_counts=previous,
         max_matching_drop_pct=args.max_matching_drop_pct,
+        policy=policy,
     )
     if args.output:
         args.output.parent.mkdir(parents=True, exist_ok=True)
         args.output.write_text(json.dumps(result.as_dict(), indent=2, default=str) + "\n")
     if not args.no_summary:
         ss.write_step_summary(run_gate.render_summary(args.title, result))
-    for line in result.blocking:
-        print(f"BLOCKED: {line}", file=sys.stderr)
-    for line in result.warnings:
-        print(f"WARNING: {line}", file=sys.stderr)
-    print("Publication gate:", "PASS" if result.ok else "BLOCKED")
+    run_gate.report_to_console(result)
+    print("Publication gate:", result.decision)
     return 0 if result.ok else 1
 
 
