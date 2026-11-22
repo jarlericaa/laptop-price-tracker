@@ -2994,17 +2994,98 @@ STATUS_FILLS = {"match": _rgb("#D5EFDB"), "alt1": _rgb("#FFF2A8"), "alt2": _rgb(
                 # Variation dashboard (2026-11-05): review/conflict is a distinct violet; results
                 # without a price are a quiet neutral; a stale Shopee snapshot is a soft amber.
                 "review": _rgb("#E4DAF4"), "missing": _rgb("#EEF1F5"), "stale": _rgb("#FFE3B8"),
-                # PRICE COMPARISON (2026-11-12): the competitiveness result (restrained green and
-                # red tints, a neutral and a grey) and the two section-label tints.
-                "cmp_green": _rgb("#D5EFDB"), "cmp_red": _rgb("#F8D7D4"),
-                "cmp_neutral": _rgb("#E6EAF0"), "cmp_gray": _rgb("#EEF1F5"),
-                "section_a": _rgb("#DCE4F1"), "section_b": _rgb("#EAEFF7")}
+}
+# PRICE COMPARISON dashboard (2026-11-22). A semantic cell style is a *fill key* naming up to three
+# things: a background (``STATUS_FILLS``), a text colour (``STATUS_INK``) and a horizontal
+# alignment (``STATUS_ALIGN``); a style without a background leaves the row banding visible. The
+# colours mean the same thing everywhere: teal a verified in-stock price, peach an out-of-stock
+# one, amber something to look at, slate not checked or not compared, green Shopee cheaper, red a
+# retailer cheaper. Colour is never the only signal: every state also has its own visible text.
+STATUS_INK: dict[str, dict] = {}
+STATUS_ALIGN: dict[str, str] = {}
+DASHBOARD_STYLES: dict[str, tuple[str, str, str]] = {  # key: (background, text colour, alignment)
+    # Section labels over the column headers.
+    "d_sec_product": ("#D6E2F1", "#1B365D", ""),
+    "d_sec_retail": ("#D8ECE7", "#1B365D", ""),
+    "d_sec_compare": ("#E3E8F0", "#1B365D", ""),
+    # The retailer coverage chip.
+    "d_cov_ok": ("#EDF1F5", "#64748B", ""),
+    "d_cov_warn": ("#FFF0CE", "#8A5B12", ""),
+    "d_cov_bad": ("#F9E0DE", "#AD3E39", ""),
+    # Retailer cells.
+    "d_price": ("#E5F3F0", "#1F5F53", "RIGHT"),
+    "d_oos": ("#FCE5D3", "#8A4B1B", "RIGHT"),
+    "d_stock_unknown": ("#EDF1F5", "#475569", "RIGHT"),
+    "d_review": ("#FFF0CE", "#8A5B12", "CENTER"),
+    "d_unchecked": ("#EDF1F5", "#64748B", "CENTER"),
+    "d_nomatch": ("", "#94A3B8", "CENTER"),
+    "d_dash": ("", "#94A3B8", "CENTER"),
+    "d_stale": ("#FFF0CE", "#8A5B12", "RIGHT"),
+    # Competitiveness: the label, and the gap amounts that share its colour.
+    "d_cmp_green": ("#DDF2E4", "#207348", "CENTER"),
+    "d_cmp_red": ("#F9E0DE", "#AD3E39", "CENTER"),
+    "d_cmp_same": ("#E3EAF4", "#294D73", "CENTER"),
+    "d_cmp_none": ("#EDF1F5", "#64748B", "CENTER"),
+    "d_gap_green": ("#DDF2E4", "#207348", "RIGHT"),
+    "d_gap_red": ("#F9E0DE", "#AD3E39", "RIGHT"),
+    "d_gap_same": ("#E3EAF4", "#294D73", "RIGHT"),
+}
+for _key, (_background, _ink, _align) in DASHBOARD_STYLES.items():
+    if _background:
+        STATUS_FILLS[_key] = _rgb(_background)
+    STATUS_INK[_key] = _rgb(_ink)
+    if _align:
+        STATUS_ALIGN[_key] = _align
 PADDING = {"top": 6, "right": 8, "bottom": 6, "left": 8}
 LAYOUT_FIELDS = ",".join(f"userEnteredFormat.{name}" for name in (
     "backgroundColor", "backgroundColorStyle", "horizontalAlignment", "verticalAlignment",
     "wrapStrategy", "padding", "borders", "textFormat.foregroundColor",
     "textFormat.foregroundColorStyle", "textFormat.fontFamily", "textFormat.fontSize",
 ))
+
+
+@dataclass(frozen=True)
+class Theme:
+    """The colours of one tab layout. ``HOUSE`` reproduces the layout of the technical tabs
+    exactly; ``DASHBOARD`` is the business-facing PRICE COMPARISON (2026-11-22)."""
+
+    ink: dict
+    band: dict
+    rule: dict  # the rule under the column headers
+    headers: dict  # header key -> background
+    header_ink: dict  # header key -> text colour (default white)
+    fills: dict  # ColumnStyle.fill key -> background
+    title_fill: dict | None = None  # a filled title row (first banner row), text WHITE
+    meta_fill: dict | None = None  # a tinted second banner row
+    meta_ink: dict | None = None
+    separator: dict | None = None  # thin rule at the left edge of each ``TabLayout.separators``
+
+
+HOUSE = Theme(
+    ink=INK,
+    band=BAND_BACKGROUND,
+    rule=ORANGE,
+    headers=HEADER_FILLS,
+    header_ink={"orange": NAVY},
+    fills=FILLS,
+)
+DASHBOARD = Theme(
+    ink=_rgb("#24334B"),
+    band=_rgb("#F6F8FC"),
+    rule=_rgb("#EE8B35"),
+    headers={
+        "navy": _rgb("#1B365D"),
+        "navy_alt": _rgb("#294D73"),
+        "orange": _rgb("#EE8B35"),
+    },
+    header_ink={"orange": _rgb("#1B365D")},
+    fills={"shopee": _rgb("#FFF4E8")},
+    title_fill=_rgb("#1B365D"),
+    meta_fill=_rgb("#F6F8FC"),
+    meta_ink=_rgb("#475569"),
+    separator=_rgb("#C9D3E0"),
+)
+THEMES = {"house": HOUSE, "dashboard": DASHBOARD}
 
 
 @dataclass(frozen=True)
@@ -3035,6 +3116,9 @@ class TabLayout:
     basic_filter: bool = True
     # Font size of the first banner row (the sheet title); 0 keeps the banner size.
     title_size: int = 0
+    theme: str = "house"  # key of ``THEMES``
+    # Columns whose left edge carries a thin section rule (the first column of a section).
+    separators: tuple[int, ...] = ()
 
     @property
     def header_row(self) -> int:
@@ -3149,7 +3233,7 @@ def tab_layout(title: str, header: Sequence[str]) -> TabLayout | None:
 
 
 def _format(*, background: dict, text_color: dict, mono: bool = False, align: str = "LEFT",
-            wrap: str = "WRAP", border: bool = False) -> dict:
+            wrap: str = "WRAP", border: bool = False, rule: dict = ORANGE) -> dict:
     fmt = {
         "backgroundColor": background, "backgroundColorStyle": {"rgbColor": background},
         "horizontalAlignment": align, "verticalAlignment": "MIDDLE", "wrapStrategy": wrap,
@@ -3159,8 +3243,8 @@ def _format(*, background: dict, text_color: dict, mono: bool = False, align: st
                        "fontFamily": "Roboto Mono" if mono else "Roboto", "fontSize": 10},
     }
     if border:
-        fmt["borders"] = {"bottom": {"style": "SOLID_MEDIUM", "colorStyle": {"rgbColor": ORANGE},
-                                     "color": ORANGE}}
+        fmt["borders"] = {"bottom": {"style": "SOLID_MEDIUM", "colorStyle": {"rgbColor": rule},
+                                     "color": rule}}
     return fmt
 
 
@@ -3168,6 +3252,7 @@ def layout_requests(sheet_id: int | None, rows: int, layout: TabLayout) -> list[
     """The house layout of one tab; every request is scoped to its sheet ID. The managed fields
     are reset on the whole tab first, so a shorter publication leaves no stale bands."""
     width = len(layout.columns)
+    theme = THEMES[layout.theme]
 
     def area(top: int, bottom: int, left: int, right: int) -> dict:
         return {"sheetId": sheet_id, "startRowIndex": top, "endRowIndex": bottom,
@@ -3193,32 +3278,48 @@ def layout_requests(sheet_id: int | None, rows: int, layout: TabLayout) -> list[
     if top:
         # Banner text overflows into the empty cells beside it; chips are filled by the plan.
         requests.append(style(area(0, top, 0, width), _format(
-            background=WHITE, text_color=INK, wrap="OVERFLOW_CELL")))
+            background=WHITE, text_color=theme.ink, wrap="OVERFLOW_CELL")))
+        if theme.title_fill:
+            requests.append(style(area(0, 1, 0, width), _format(
+                background=theme.title_fill, text_color=WHITE, wrap="OVERFLOW_CELL")))
+        if theme.meta_fill and top > 1:
+            requests.append(style(area(1, 2, 0, width), _format(
+                background=theme.meta_fill, text_color=theme.meta_ink or theme.ink,
+                wrap="OVERFLOW_CELL")))
         if layout.title_size:
             requests.append(style(
                 area(0, 1, 0, width), {"textFormat": {"fontSize": layout.title_size}},
                 "userEnteredFormat.textFormat.fontSize"))
     for left, right, header in groups(lambda c: c.header):
         requests.append(style(area(top, top + 1, left, right), _format(
-            background=HEADER_FILLS[header], border=True,
-            text_color=NAVY if header == "orange" else WHITE)))
+            background=theme.headers[header], border=True, rule=theme.rule,
+            text_color=theme.header_ink.get(header, WHITE))))
     if rows > top + 1:
         for left, right, (fill, wrap, align, mono, muted) in groups(
                 lambda c: (c.fill, c.wrap, c.align, c.mono, c.muted)):
             requests.append(style(area(top + 1, rows, left, right), _format(
-                background=FILLS.get(fill, WHITE), text_color=MUTED if muted else INK,
+                background=theme.fills.get(fill, WHITE), text_color=MUTED if muted else theme.ink,
                 mono=mono, align=align, wrap=wrap)))
         # Muted banding on every second data row, then the price tints over it again. The
         # result fills (``fill_requests``) are written after everything here, so banding never
         # overrides a meaningful colour.
         background = "userEnteredFormat.backgroundColor,userEnteredFormat.backgroundColorStyle"
         requests += [style(area(row, row + 1, 0, width), {
-            "backgroundColor": BAND_BACKGROUND,
-            "backgroundColorStyle": {"rgbColor": BAND_BACKGROUND}}, background)
+            "backgroundColor": theme.band,
+            "backgroundColorStyle": {"rgbColor": theme.band}}, background)
             for row in range(top + 2, rows, 2)]
         requests += [style(area(top + 1, rows, left, right), {
-            "backgroundColor": FILLS[fill], "backgroundColorStyle": {"rgbColor": FILLS[fill]}},
+            "backgroundColor": theme.fills[fill],
+            "backgroundColorStyle": {"rgbColor": theme.fills[fill]}},
             background) for left, right, fill in groups(lambda c: c.fill) if fill]
+    if theme.separator and layout.separators:
+        # A thin rule between the sections, after every reset of the borders above. Banner rows
+        # keep their own fills; the rule starts under the title and metadata rows.
+        edge = {"borders": {"left": {"style": "SOLID", "colorStyle": {"rgbColor": theme.separator},
+                                     "color": theme.separator}}}
+        for column in layout.separators:
+            requests.append(style(area(min(2, top), rows, column, column + 1), edge,
+                                  "userEnteredFormat.borders.left"))
     for left, right, pixels in groups(lambda c: c.width):
         requests.append({"updateDimensionProperties": {
             "range": {"sheetId": sheet_id, "dimension": "COLUMNS", "startIndex": left,
@@ -3264,15 +3365,41 @@ def guard_requests(requests: Sequence[Mapping], allowed_sheet_ids: set[int]) -> 
 
 
 def _fill_matches(actual: Mapping, fill: str) -> bool:
-    """The cell's read-back background is the planned status fill (to rounding)."""
+    """The cell's read-back background is the planned status fill (to rounding). A style without
+    a background (it keeps the row banding) has nothing to compare."""
+    if fill not in STATUS_FILLS:
+        return True
     colour = (actual.get("userEnteredFormat") or {}).get("backgroundColor") or {}
     wanted = STATUS_FILLS[fill]
     return all(abs(colour.get(channel, 0) - wanted[channel]) < 0.002
                for channel in ("red", "green", "blue"))
 
 
+_BACKGROUND_FIELDS = ("userEnteredFormat.backgroundColor", "userEnteredFormat.backgroundColorStyle")
+_INK_FIELDS = ("userEnteredFormat.textFormat.foregroundColor",
+               "userEnteredFormat.textFormat.foregroundColorStyle")
+
+
+def style_of(fill: str) -> tuple[dict, list[str]]:
+    """``(userEnteredFormat, field paths)`` of one status style: only what the style names."""
+    fmt: dict = {}
+    fields: list[str] = []
+    if fill in STATUS_FILLS:
+        fmt |= {"backgroundColor": STATUS_FILLS[fill],
+                "backgroundColorStyle": {"rgbColor": STATUS_FILLS[fill]}}
+        fields += _BACKGROUND_FIELDS
+    if fill in STATUS_INK:
+        fmt["textFormat"] = {"foregroundColor": STATUS_INK[fill],
+                             "foregroundColorStyle": {"rgbColor": STATUS_INK[fill]}}
+        fields += _INK_FIELDS
+    if fill in STATUS_ALIGN:
+        fmt["horizontalAlignment"] = STATUS_ALIGN[fill]
+        fields.append("userEnteredFormat.horizontalAlignment")
+    return fmt, fields
+
+
 def fill_requests(sheet_id: int | None, plan_grid: Sequence[Sequence[Cell]]) -> list[dict]:
-    """``repeatCell`` requests that colour the status-filled cells, one per run of adjacent
+    """``repeatCell`` requests that style the status-filled cells, one per run of adjacent
     cells of one fill in a row. They follow the layout requests, which reset backgrounds."""
     requests = []
     for r, row in enumerate(plan_grid):
@@ -3285,14 +3412,11 @@ def fill_requests(sheet_id: int | None, plan_grid: Sequence[Sequence[Cell]]) -> 
             end = c
             while end + 1 < len(row) and row[end + 1].fill == fill:
                 end += 1
-            colour = STATUS_FILLS[fill]
+            fmt, fields = style_of(fill)
             requests.append({"repeatCell": {
                 "range": {"sheetId": sheet_id, "startRowIndex": r, "endRowIndex": r + 1,
                           "startColumnIndex": c, "endColumnIndex": end + 1},
-                "cell": {"userEnteredFormat": {"backgroundColor": colour,
-                                               "backgroundColorStyle": {"rgbColor": colour}}},
-                "fields": "userEnteredFormat.backgroundColor,"
-                          "userEnteredFormat.backgroundColorStyle"}})
+                "cell": {"userEnteredFormat": fmt}, "fields": ",".join(fields)}})
             c = end + 1
     return requests
 

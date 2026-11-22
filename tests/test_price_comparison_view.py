@@ -201,11 +201,11 @@ def test_a_capped_search_cannot_demote_a_verified_price_or_promote_a_close_alter
     }
     assert shown(row(**alt)) == "No match"
     assert shown(row(**alt, DBZ_Reason=CAPPED_NOTE)) == "Review"
-    # Never a price, never a link, and the note says why it needs a look.
+    # Never a price, never a link, and no repeated note: the header says what Review means.
     r = row(DBZ_Price_Status="NO_RELEVANT_CANDIDATE", DBZ_Reason=CAPPED_NOTE)
     cell, shows_price = pv.retailer_cell(r, "DBZ", "DataBlitz", retailer_result(r, "DBZ"))
     assert not shows_price and cell.kind == "text" and cell.link == ""
-    assert "result cap" in cell.note
+    assert cell.value == "Review" and cell.fill == "d_review" and cell.note == ""
 
 
 def test_a_displayed_price_stays_a_number_with_its_words_in_the_format() -> None:
@@ -361,21 +361,22 @@ def test_the_competitiveness_cells_format_and_colour_the_result() -> None:
     ]  # fmt: skip
     assert price.link == "https://dbz.example/p"
     assert gap.kind == pct.kind == "number" and gap.value == "1440.0"  # numeric, not a string
-    assert label.fill == gap.fill == pct.fill == "cmp_red"
+    assert label.fill == "d_cmp_red" and gap.fill == pct.fill == "d_gap_red"
     cheaper = pv.competitiveness_cells(
         row(shopee_price_php="48990.0"), pv.LowestOffer("49999.0", ("PC Central",), ""),
         lowest_note="",
     )  # fmt: skip
     assert [pv.display_text(c) for c in cheaper[2:]] == ["-₱1,009", "-2.02%", "Shopee cheaper"]
-    assert cheaper[4].fill == "cmp_green"
+    assert cheaper[4].fill == "d_cmp_green" and cheaper[2].fill == cheaper[3].fill == "d_gap_green"
     same = pv.competitiveness_cells(
         row(shopee_price_php="1000"), pv.LowestOffer("1000", ("Octagon",), ""), lowest_note=""
     )
     assert [pv.display_text(c) for c in same[2:]] == ["₱0", "0.00%", "Same price"]
-    assert same[4].fill == "cmp_neutral"
+    assert same[4].fill == "d_cmp_same" and same[2].fill == same[3].fill == "d_gap_same"
     none = pv.competitiveness_cells(row(shopee_price_php="1000"), None, lowest_note="")
-    assert none[4].fill == "cmp_gray" and none[2].fill == ""  # only the result is emphasised
-    assert {"cmp_green", "cmp_red", "cmp_neutral", "cmp_gray"} <= set(STATUS_FILLS)
+    # With no comparison only the label is slate; the gaps are quiet dashes, never zero.
+    assert none[4].fill == "d_cmp_none" and none[2].fill == none[3].fill == "d_dash"
+    assert {"d_cmp_green", "d_cmp_red", "d_cmp_same", "d_cmp_none"} <= set(STATUS_FILLS)
 
 
 # ---- the Shopee price and its stale warning ----
@@ -389,7 +390,7 @@ def test_a_stale_shopee_price_is_flagged_beside_the_price_and_still_compared() -
     )
     cell = pv.shopee_cell(r, stale=True, note="n")
     assert pv.display_text(cell) == "₱49,990 ⚠ Stale" and cell.kind == "number"
-    assert cell.fill == "stale" and cell.link == "https://shopee.example/i"
+    assert cell.fill == "d_stale" and cell.link == "https://shopee.example/i"
     assert Decimal(cell.value) == Decimal("49990")  # the price itself is untouched
     assert pv.compare("49990.0", "46990.0").label == "Retailer cheaper"  # still compared
     fresh = pv.shopee_cell(r, stale=False, note="n")
@@ -480,12 +481,15 @@ def test_the_business_tab_carries_the_header_banner_and_dynamic_reporting_dates(
     assert values[0][0] == "LAPTOP PRICE COMPARISON"
     report = load_variation_report(world["variation"], world["reports"], world["context"])
     last_day = report.week_end - timedelta(days=1)
-    assert values[1][0].startswith(
-        f"Reporting Week: {report.week_start.isoformat()} – {last_day.isoformat()} | "
+    from laptop_tracker.variation_publication import cutoff_label, week_label
+
+    assert values[1][0] == (
+        f"Week: {week_label(report.week_start, last_day)}  |  "
+        f"Prices as of: {cutoff_label(report.as_of)}"
     )
     # The timestamp is the report cutoff, so it is labelled as such (never "Last Updated").
-    assert "Price Data As Of: " in values[1][0] and values[1][0].endswith("(Asia/Singapore)")
-    assert "Last Updated" not in values[1][0]
+    assert "Prices as of: " in values[1][0] and values[1][0].endswith("SGT")
+    assert "Last Updated" not in values[1][0] and "Coverage" not in values[1][0]
     assert [v for v in values[2] if v] == [
         "Product Details", "Retailer Prices", "Price Competitiveness",
     ]  # fmt: skip
@@ -577,7 +581,7 @@ def test_competitiveness_cells_are_the_only_emphasised_result_cells(world) -> No
         # retailer cells are never one of the result colours
         for _, name in pv.RETAILER_COLUMNS:
             retailer = background(r, index[name]) or {}
-            for fill in ("cmp_green", "cmp_red", "match", "alt1", "alt2", "review"):
+            for fill in ("d_cmp_green", "d_cmp_red", "d_gap_green", "d_gap_red", "match", "alt1"):
                 want = STATUS_FILLS[fill]
                 assert not (retailer and all(abs(retailer[k] - want[k]) < 0.002 for k in want)), (
                     f"retailer cell coloured {fill}"
