@@ -278,15 +278,16 @@ shows `Not checked` (the search or observation did not complete), or `Review` (a
 a provider failure); it is never `No match`, never a zero and never an older price. A price older than
 the reporting week is a labelled reference in the technical tabs, not carried forward. The lowest
 price, the gap and the competitiveness use only verified in-stock prices of the retailers that were
-checked, and show `—` / `No comparison` when there is none. When a retailer was not fully checked the
-second header line gains one notice, and its cell note explains what the comparison covers:
+checked, and show `—` / `No comparison` when there is none. A coverage chip over the retailer columns
+(its design is in [PRICE_COMPARISON_TAB](PRICE_COMPARISON_TAB_2026-11-12.md#dashboard-design-2026-11-22))
+says how many retailers were checked, in amber with a note when some were not:
 
-| Retailers not fully checked | Notice |
+| Retailers not fully checked | Chip |
 |---|---|
-| none | no notice |
+| none | `Coverage: 5/5 retailers checked` (neutral) |
 | one or two | `Coverage: 4/5 retailers checked \| Laptop Factory incomplete` |
 | three or four | `Coverage: 2/5 retailers checked \| Partial comparison` |
-| all | `Coverage: 0/5 retailers checked \| Retailer comparisons could not be verified this period` |
+| all | `Coverage: 0/5 retailers checked \| Retailer comparisons could not be verified this period` (red) |
 
 A retailer is *not fully checked* when no search of it was answered (`UNAVAILABLE`), its searching was
 stopped after repeated errors, or more than 10% of its jobs ended unverified or of its planned
