@@ -1406,27 +1406,58 @@ def comparison_plan(report: VariationPublicationReport, header: Sequence[str]) -
 PRICE_TITLE = "LAPTOP PRICE COMPARISON"
 
 
+_MONTHS = ("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")
+_COVERAGE_FILL = {"ok": "d_cov_ok", "warn": "d_cov_warn", "bad": "d_cov_bad"}
+
+
+def week_label(first: date, last: date) -> str:
+    """``Nov 16–22, 2026``; ``Nov 30 – Dec 6, 2026``; ``Dec 28, 2026 – Jan 3, 2027``."""
+    start, end = f"{_MONTHS[first.month - 1]} {first.day}", f"{_MONTHS[last.month - 1]} {last.day}"
+    if first.year != last.year:
+        return f"{start}, {first.year} \u2013 {end}, {last.year}"
+    if first.month != last.month:
+        return f"{start} \u2013 {end}, {last.year}"
+    return f"{start}\u2013{last.day}, {last.year}"
+
+
+def cutoff_label(moment: datetime) -> str:
+    """``Nov 22, 6:58 PM SGT``: the report cutoff in Singapore time (when the prices were taken)."""
+    local = datetime.fromisoformat(_local(moment))
+    hour = local.hour % 12 or 12
+    clock = f"{hour}:{local.minute:02d} {'AM' if local.hour < 12 else 'PM'}"
+    return f"{_MONTHS[local.month - 1]} {local.day}, {clock} SGT"
+
+
 def price_banner(report: VariationPublicationReport) -> tuple[tuple[Cell, ...], ...]:
-    """Title, reporting week with the report's own cutoff (``Price Data As Of``: when the prices
-    were taken, not when the tab was published), and the three section labels."""
+    """Title, the reporting week and price cutoff (left) beside the retailer coverage (a chip over
+    the retailer columns), and the three section labels."""
     width = len(PRICE_HEADER)
     last_day = report.week_end - timedelta(days=1)
     first = [BLANK] * width
     first[0] = text(PRICE_TITLE, bold=True)
     second = [BLANK] * width
-    line = (
-        f"Reporting Week: {report.week_start.isoformat()} \u2013 {last_day.isoformat()} | "
-        f"Price Data As Of: {_local_short(report.as_of)} (Asia/Singapore)"
+    second[0] = text(
+        f"Week: {week_label(report.week_start, last_day)}  |  "
+        f"Prices as of: {cutoff_label(report.as_of)}"
     )
     coverage = report.retailer_coverage
-    if coverage is not None and coverage.notice():
-        # Only an incomplete comparison says so; a complete week keeps the plain header.
-        second[0] = text(f"{line} | {coverage.notice()}", note=retailer_coverage.NOTE)
-    else:
-        second[0] = text(line)
+    if coverage is not None:
+        # Over the retailer columns it is about. Amber when a retailer was not fully checked,
+        # red when none was, slate when all were; only an incomplete one explains itself.
+        fill = _COVERAGE_FILL[coverage.level]
+        start, end = SECTIONS[1][1], SECTIONS[1][2]
+        for column in range(start, end):
+            second[column] = text("", fill=fill)
+        second[start] = text(
+            coverage.line(),
+            bold=not coverage.complete,
+            fill=fill,
+            note="" if coverage.complete else retailer_coverage.NOTE,
+        )
     third = [BLANK] * width
-    for number_, (label, start, end) in enumerate(SECTIONS):
-        fill = "section_a" if number_ % 2 == 0 else "section_b"
+    for (label, start, end), fill in zip(
+        SECTIONS, ("d_sec_product", "d_sec_retail", "d_sec_compare"), strict=True
+    ):
         for column in range(start, end):
             third[column] = text("", fill=fill)
         third[start] = text(label, bold=True, fill=fill)
@@ -1445,10 +1476,12 @@ def price_plan(report: VariationPublicationReport, header: Sequence[str]) -> Tab
         results = _row_results(report, row, alternatives)
         issues += lowest_in_stock_issues(row)
         _, stale = shopee_freshness(row)
+        # A note only where the reader needs it beside the number: a stale snapshot, or no price
+        # at all. An ordinary snapshot's provenance is in the header note and the technical tabs.
         shopee_note = (
-            "\n".join(filter(None, (shopee_date_note(row), _shopee_status(row))))
-            if row["shopee_price_php"]
-            else _shopee_status(row)
+            ""
+            if row["shopee_price_php"] and not stale
+            else "\n".join(filter(None, (shopee_date_note(row), _shopee_status(row))))
         )
         cells: list[Cell] = [
             number(row["rank"], "integer"),
@@ -1464,22 +1497,9 @@ def price_plan(report: VariationPublicationReport, header: Sequence[str]) -> Tab
         for code, name in RETAILER_COLUMNS:
             cells.append(retailer_cell(row, code, name, results[code][0])[0])
         lowest = lowest_in_stock(row)
-        lowest_note = "; ".join(
-            filter(
-                None,
-                (
-                    "Lowest verified in-stock matching price. "
-                    + _minimum_text(
-                        row,
-                        "Lowest_In_Stock_Price_Retailers",
-                        "Lowest_In_Stock_Notes",
-                        "Lowest_In_Stock_Basis",
-                    ),
-                    _minimum_basis(
-                        row.get("Lowest_In_Stock_Label", ""), row.get("Lowest_In_Stock_Basis", "")
-                    ),
-                ),
-            )
+        # The one caveat worth a note: the lowest price rests on a listed-spec match.
+        lowest_note = _minimum_basis(
+            row.get("Lowest_In_Stock_Label", ""), row.get("Lowest_In_Stock_Basis", "")
         )
         cells += competitiveness_cells(row, lowest, lowest_note=lowest_note)
         rows.append(tuple(cells))

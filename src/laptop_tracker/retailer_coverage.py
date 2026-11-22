@@ -107,6 +107,17 @@ class Coverage:
         names = ", ".join(r.name for r in self.not_checked)
         return f"{head} | {names} incomplete"
 
+    @property
+    def level(self) -> str:
+        """``ok`` (every retailer checked), ``warn`` (some not) or ``bad`` (none checked)."""
+        if self.complete:
+            return "ok"
+        return "bad" if not self.checked else "warn"
+
+    def line(self) -> str:
+        """The coverage line of the report header: the notice, or the plain count when complete."""
+        return self.notice() or f"Coverage: {self.checked}/{self.total} retailers checked"
+
     def as_dict(self) -> dict:
         return {
             "checked": self.checked,

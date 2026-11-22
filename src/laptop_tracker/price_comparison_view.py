@@ -108,10 +108,16 @@ SHOPEE_CHEAPER, RETAILER_CHEAPER, SAME_PRICE, NO_COMPARISON = (
 OOS_SUFFIX, STALE_SUFFIX, UNKNOWN_STOCK_SUFFIX = "(OOS)", "⚠ Stale", "(Stock unknown)"
 
 COMPETITIVENESS_FILL = {
-    SHOPEE_CHEAPER: "cmp_green",
-    RETAILER_CHEAPER: "cmp_red",
-    SAME_PRICE: "cmp_neutral",
-    NO_COMPARISON: "cmp_gray",
+    SHOPEE_CHEAPER: "d_cmp_green",
+    RETAILER_CHEAPER: "d_cmp_red",
+    SAME_PRICE: "d_cmp_same",
+    NO_COMPARISON: "d_cmp_none",
+}
+# The gap amounts of a row share the colour of its label (aligned right, like every amount).
+GAP_FILL = {
+    SHOPEE_CHEAPER: "d_gap_green",
+    RETAILER_CHEAPER: "d_gap_red",
+    SAME_PRICE: "d_gap_same",
 }
 
 # Number formats. The amount stays numeric; the suffix is display only.
@@ -299,64 +305,40 @@ def retailer_status(result: RetailerResult, reason: str = "") -> str:
     return NOT_CHECKED
 
 
-_STATUS_MEANING = {
-    NO_MATCH: "The search finished and no matching configuration was verified.",
-    REVIEW: "A candidate needs manual verification, or the search could not be completed "
-    "(result cap or unread pages); it is not shown as a price.",
-    NOT_CHECKED: "The search or observation was not completed for this retailer.",
-    UNAVAILABLE: "Not compared: the row has no trusted configuration context.",
-}
+# One style per displayed state. The state is decided above (``retailer_status``); this only
+# colours it, and a colour is never the only signal: every state keeps its own visible text.
+STATUS_STYLE = {REVIEW: "d_review", NOT_CHECKED: "d_unchecked", NO_MATCH: "d_nomatch",
+                UNAVAILABLE: "d_dash"}  # fmt: skip
+STOCK_STYLE = {"IN_STOCK": "d_price", "OUT_OF_STOCK": "d_oos"}  # any other stock: unknown
+LISTED_SPEC_NOTE = "Matched on listed specs: the specific Shopee model is unknown."
 
 
 def retailer_cell(
     row: Mapping[str, str], code: str, name: str, result: RetailerResult
 ) -> tuple[Cell, bool]:
-    """``(cell, shows_price)`` for one retailer of one row."""
+    """``(cell, shows_price)`` for one retailer of one row.
+
+    A verified matching price is a number (a link to the retailer's page) on a teal fill, peach
+    when out of stock; every other state is its short text on its own fill. Notes are kept for
+    the one limitation a reader needs next to the number (a listed-spec match); what a status
+    means is said once in the column header, and why it came out so is in the technical tab."""
     reason = row.get(f"{code}_Reason", "")
     status = retailer_status(result, reason)
     price = row.get(f"{code}_Price", "")
-    where = "Technical detail: hidden tab PILOT_PRICE_COMPARISON."
     if status == "PRICE" and price and row.get(f"{code}_Price_Status") == "SELECTED":
         value = Decimal(price)
         stock = row.get(f"{code}_Stock", "")
         suffix = {"IN_STOCK": "", "OUT_OF_STOCK": OOS_SUFFIX}.get(stock, UNKNOWN_STOCK_SUFFIX)
-        stock_words = {
-            "IN_STOCK": "in stock",
-            "OUT_OF_STOCK": "out of stock (never used for the lowest price)",
-        }.get(stock, "stock not verified (never used for the lowest price)")
-        basis = (
-            " Matched on listed specs (the specific Shopee model is unknown)."
-            if row.get(f"{code}_Match_Basis") == "LISTED_SPEC"
-            else ""
-        )
-        observed = row.get(f"{code}_Observed_At", "")
-        note = (
-            f"{name}: verified matching configuration, {stock_words}.{basis}"
-            + (f" Observed {observed} (Asia/Singapore)." if observed else "")
-            + " Click the price to open the retailer's page."
-        )
         cell = Cell(
             "number",
             price,
             row.get(f"{code}_Offer_URL", ""),
             peso_format(suffix, centavos=_has_centavos(value)),
-            note=note,
+            note=LISTED_SPEC_NOTE if row.get(f"{code}_Match_Basis") == "LISTED_SPEC" else "",
+            fill=STOCK_STYLE.get(stock, "d_stock_unknown"),
         )
         return cell, True
-    meaning = _STATUS_MEANING.get(status, _STATUS_MEANING[NOT_CHECKED])
-    extra = ""
-    if result.kind == KIND_ALT:
-        extra = (
-            f" Only a close alternative ({result.tag}) was found; it is a different configuration, "
-            "so its price is not shown."
-        )
-    if status == REVIEW and search_unsettled(reason):
-        extra += (
-            " The search hit a result cap or was cut short, so a matching configuration may exist "
-            "beyond the results read: check the retailer's site."
-        )
-    note = f"{name}: {meaning}{extra} Result: {result.one_line}. {where}"
-    return text(status, note=note), False
+    return text(status, fill=STATUS_STYLE.get(status, "d_unchecked")), False
 
 
 # Competitiveness
@@ -453,29 +435,20 @@ def lowest_in_stock_issues(row: Mapping[str, str]) -> list[str]:
 
 # Column notes and layout
 
+# Header notes: what a column or a state means, said once. Row cells carry no repeated notes.
 COLUMN_NOTES = {
-    "Rank": "Rank in the Top 100 Shopee variations (existing GMV ranking, unchanged). One row per "
-    "Shopee seller variation.",
-    "Laptop Model": "Brand, series and model of the mapped laptop configuration.",
-    "Variation": "The Shopee variation exactly as listed by the seller.",
-    "CPU": "Processor of the mapped configuration (recorded fields only).",
-    "Shopee Price": "This variation's own latest Shopee snapshot price from the sales extract, "
-    "never a live price. '⚠ Stale' = the snapshot is older than 7 days at the report cutoff; the "
-    "gap is still calculated. Click the price to open the Shopee listing.",
-    "DataBlitz": "Verified matching configuration price at this retailer. (OOS) = out of stock, "
-    "shown but never used for the lowest price. No match = searched, no matching configuration "
-    "verified. Review = a candidate needs manual verification. Not checked = search not "
-    "completed. Click a price to open the retailer's page. Close alternatives are not shown "
-    "as prices.",
-    "Lowest Retailer": "Retailer(s) with the lowest verified in-stock matching price; ties list "
-    "every retailer. — when no in-stock matching price exists.",
-    "Lowest Price": "The lowest verified in-stock matching retailer price. Out-of-stock prices "
-    "and similar-but-different configurations are never used.",
-    "Price Gap (₱)": "Shopee price minus the lowest price. Positive = Shopee is more expensive.",
-    "Price Gap (%)": "The gap as a percentage of the lowest retailer price.",
-    "Competitiveness": "Retailer cheaper = Shopee is above the lowest retailer price. Shopee "
-    "cheaper = below. Same price = equal. No comparison = no valid in-stock matching retailer "
-    "price or no Shopee price.",
+    "Shopee Price": "Latest Shopee snapshot price from the sales extract, not a live price. "
+    "⚠ Stale: older than 7 days at the report cutoff (the gap is still calculated).",
+    "DataBlitz": "A price is a verified matching configuration in stock (out of stock is peach and "
+    "never used for the lowest price). Review: needs a manual look, or the search was cut short. "
+    "Not checked: the search did not complete. No match: searched, nothing matching verified.",
+    "Lowest Retailer": "Retailer(s) with the lowest verified in-stock price; — when there is none.",
+    "Lowest Price": "Lowest verified in-stock price. Out-of-stock prices and other "
+    "configurations are never used.",
+    "Price Gap (₱)": "Shopee price minus the lowest price. Positive: Shopee is more expensive.",
+    "Price Gap (%)": "The gap as a percentage of the lowest price.",
+    "Competitiveness": "Retailer cheaper: Shopee is above the lowest price. Shopee cheaper: below. "
+    "No comparison: no verified in-stock price, or no Shopee price.",
 }
 for _code, _name in RETAILER_COLUMNS[1:]:
     COLUMN_NOTES[_name] = COLUMN_NOTES["DataBlitz"]
@@ -484,33 +457,38 @@ _NUMBER = {"align": "RIGHT"}
 
 
 def price_layout(header: Sequence[str]) -> TabLayout:
-    """Title rows, section labels, a frozen header, three frozen identifying columns, no filter."""
+    """The dashboard: a filled title row, a metadata and coverage row, section labels, a frozen
+    header, three frozen identifying columns, a thin rule between the sections, no filter."""
     styles: dict[str, ColumnStyle] = {
-        "Rank": ColumnStyle(44, "navy", **_NUMBER),
-        "Shopee Seller": ColumnStyle(120),
-        "Laptop Model": ColumnStyle(170),
-        "Variation": ColumnStyle(150),
-        "CPU": ColumnStyle(165),
-        "RAM": ColumnStyle(58, **_NUMBER),
-        "Storage": ColumnStyle(68, **_NUMBER),
-        "GPU": ColumnStyle(95),
-        "Shopee Price": ColumnStyle(140, "orange", **_NUMBER),
-        "Lowest Retailer": ColumnStyle(125, "navy"),
-        "Lowest Price": ColumnStyle(100, "navy", **_NUMBER),
-        "Price Gap (₱)": ColumnStyle(96, "navy", **_NUMBER),
-        "Price Gap (%)": ColumnStyle(86, "navy", **_NUMBER),
-        "Competitiveness": ColumnStyle(130, "navy"),
+        "Rank": ColumnStyle(48, "navy", align="CENTER"),
+        "Shopee Seller": ColumnStyle(130),
+        "Laptop Model": ColumnStyle(190),
+        "Variation": ColumnStyle(170),
+        "CPU": ColumnStyle(160),
+        "RAM": ColumnStyle(62, align="CENTER"),
+        "Storage": ColumnStyle(72, align="CENTER"),
+        "GPU": ColumnStyle(100),
+        "Shopee Price": ColumnStyle(125, "orange", "shopee", **_NUMBER),
+        "Lowest Retailer": ColumnStyle(135, "navy"),
+        "Lowest Price": ColumnStyle(104, "navy", **_NUMBER),
+        "Price Gap (₱)": ColumnStyle(100, "navy", **_NUMBER),
+        "Price Gap (%)": ColumnStyle(92, "navy", **_NUMBER),
+        "Competitiveness": ColumnStyle(132, "navy", align="CENTER"),
     }
-    for index, (_, name) in enumerate(RETAILER_COLUMNS):
-        styles[name] = ColumnStyle(118, ("navy_alt", "navy")[index % 2], **_NUMBER)
+    for _, name in RETAILER_COLUMNS:
+        styles[name] = ColumnStyle(124, "navy_alt", **_NUMBER)
+    first_retailer = header.index(RETAILER_COLUMNS[0][1])
+    first_result = header.index(COMPETITIVENESS_COLUMNS[0])
     return TabLayout(
         tuple(styles[name] for name in header),
         3,
-        42,
+        38,
         40,
-        preface_heights=(34, 24, 24),
+        preface_heights=(46, 28, 28),
         basic_filter=False,
-        title_size=15,
+        title_size=18,
+        theme="dashboard",
+        separators=(first_retailer, first_result),
     )
 
 
@@ -530,24 +508,23 @@ def shopee_cell(row: Mapping[str, str], *, stale: bool, note: str) -> Cell:
         row.get("shopee_listing_url", ""),
         peso_format(STALE_SUFFIX if stale else "", centavos=_has_centavos(value)),
         note=note,
-        fill="stale" if stale else "",
+        fill="d_stale" if stale else "",
     )
 
 
 def competitiveness_cells(
     row: Mapping[str, str], lowest: LowestOffer | None, *, lowest_note: str
 ) -> list[Cell]:
-    """Lowest Retailer, Lowest Price, Price Gap (₱), Price Gap (%), Competitiveness."""
+    """Lowest Retailer, Lowest Price, Price Gap (₱), Price Gap (%), Competitiveness.
+
+    The three result cells share one colour (green Shopee cheaper, red a retailer cheaper, blue
+    the same price); with no comparison the gaps are quiet dashes and only the label is slate."""
     price = lowest.price if lowest else ""
     result = compare(row.get("shopee_price_php", ""), price)
-    names = text(", ".join(lowest.names) if lowest else UNAVAILABLE)
     if lowest is None:
-        shown = text(
-            UNAVAILABLE,
-            note="No verified in-stock matching retailer price. Out-of-stock "
-            "prices and other configurations are never used.",
-        )
+        names = shown = text(UNAVAILABLE, fill="d_dash")
     else:
+        names = text(", ".join(lowest.names))
         shown = Cell(
             "number",
             lowest.price,
@@ -555,10 +532,11 @@ def competitiveness_cells(
             peso_format("", centavos=_has_centavos(Decimal(lowest.price))),
             note=lowest_note,
         )
-    fill = COMPETITIVENESS_FILL[result.label]
+    label = text(result.label, bold=True, fill=COMPETITIVENESS_FILL[result.label])
     if result.gap is None:
-        gap, percent = text(UNAVAILABLE), text(UNAVAILABLE)
+        gap = percent = text(UNAVAILABLE, fill="d_dash")
     else:
+        fill = GAP_FILL[result.label]
         gap = Cell(
             "number",
             format(result.gap, "f"),
@@ -566,4 +544,4 @@ def competitiveness_cells(
             fill=fill,
         )
         percent = Cell("number", format(result.percent, "f"), number_format=GAP_PERCENT, fill=fill)
-    return [names, shown, gap, percent, text(result.label, fill=fill)]
+    return [names, shown, gap, percent, label]

@@ -888,11 +888,12 @@ def discovery_dir(tmp_path: Path, down=frozenset(), name="discovery") -> Path:
     return folder
 
 
-def test_the_business_tab_states_incomplete_coverage_once_and_only_then(tmp_path, world) -> None:
+def test_the_business_tab_shows_coverage_beside_the_week_not_inside_it(tmp_path, world) -> None:
     from test_variation_publication import SpyingSpreadsheet, latest_report, run, template_tabs
 
-    from laptop_tracker.price_comparison_view import PRICE_TAB
+    from laptop_tracker.price_comparison_view import PRICE_TAB, SECTIONS
 
+    chip = SECTIONS[1][1]  # the first retailer column: the coverage sits over the retailers
     clock = iter(range(1, 50))
 
     def banner(**kw):
@@ -902,26 +903,29 @@ def test_the_business_tab_states_incomplete_coverage_once_and_only_then(tmp_path
             now=PUBLISHER_NOW + timedelta(seconds=next(clock)),
             **kw,
         )
-        return fake.values(PRICE_TAB)[1][0], fake
+        return fake.values(PRICE_TAB)[1], fake
 
-    plain, plain_fake = banner()
-    assert "Coverage" not in plain  # no discovery folder: the header is exactly as before
-    complete, _ = banner(extra=("--discovery-dir", str(discovery_dir(tmp_path, name="ok"))))
-    assert complete == plain  # a complete week keeps the plain header
+    plain, _ = banner()
+    assert plain[0].startswith("Week: ") and not any(plain[1:])  # no discovery folder: no chip
+    ok, _ = banner(extra=("--discovery-dir", str(discovery_dir(tmp_path, name="ok"))))
+    assert ok[0] == plain[0] and ok[chip] == "Coverage: 5/5 retailers checked"
     one, fake = banner(
         extra=("--discovery-dir", str(discovery_dir(tmp_path, {"laptop_factory"}, "lf")))
     )
-    assert one == f"{plain} | Coverage: 4/5 retailers checked | Laptop Factory incomplete"
-    note = fake.cell(PRICE_TAB, 1, 0)["note"]
+    # The week and the coverage are two separate cells, never one long line.
+    assert one[0] == plain[0] and "Coverage" not in one[0]
+    assert one[chip] == "Coverage: 4/5 retailers checked | Laptop Factory incomplete"
+    note = fake.cell(PRICE_TAB, 1, chip)["note"]
     assert "never assumed" in note and "verified in-stock prices" in note
+    assert fake.cell(PRICE_TAB, 1, 0).get("note", "") == ""
     assert latest_report(world)["retailer_coverage"]["checked"] == 4
-    everything, _ = banner(extra=("--discovery-dir", str(discovery_dir(tmp_path, ALL, "all"))))
-    assert everything.endswith(
+    everything, fake = banner(extra=("--discovery-dir", str(discovery_dir(tmp_path, ALL, "all"))))
+    assert everything[chip] == (
         "Coverage: 0/5 retailers checked | Retailer comparisons could not be verified this period"
     )
-    # Nothing else in the visible banner changes: still three rows above the table.
+    # Still three rows above the table.
     values = fake.values(PRICE_TAB)
-    assert all(not any(v) for v in values[1][1:]) and values[3][0] == "Rank"
+    assert values[3][0] == "Rank" and not any(v for v in values[1][1:] if v != everything[chip])
 
 
 def test_the_coverage_notice_does_not_change_the_publication_id(tmp_path, world) -> None:
