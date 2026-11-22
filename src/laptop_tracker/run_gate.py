@@ -21,10 +21,12 @@ import csv
 import json
 import os
 import sys
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 
+from . import retailer_coverage as rc
 from . import retailer_failure_policy as rfp
 
 PASS, PASS_WITH_WARNINGS, BLOCKED = "PASS", "PASS_WITH_WARNINGS", "BLOCKED"
@@ -187,6 +189,51 @@ def retailer_failures(summary: dict, retailers: dict[str, dict]) -> list[str]:
     return found
 
 
+BLOCK, WARN = "block", "warn"
+# Discovery statuses of a live run that can only come from retailers that did not answer: the
+# search found no page to collect, or collecting stored nothing.
+_SEARCH_ONLY = frozenset({"SEARCH_ONLY", "SEARCH_ONLY_WITH_ERRORS"})
+
+
+def discovery_status_check(run_dir: Path, summary: dict) -> tuple[str, str]:
+    """``(BLOCK | WARN, message)`` for a discovery status other than SUCCESS / PARTIAL_SUCCESS.
+
+    A retailer that does not answer is an availability problem: a live run that found nothing to
+    collect, or whose collection stored no observation because no page could be fetched, still
+    gives a valid (if empty) report. A collection that failed inside the pipeline (the observation
+    store refused the data), a manifest the run itself built wrongly, a replay or any status the
+    driver does not produce is an integrity failure and blocks."""
+    status = summary.get("run_status")
+    if status in _SEARCH_ONLY and summary.get("mode") == "LIVE":
+        return WARN, (
+            f"Discovery found no retailer page to collect ({status}): no retailer price was "
+            "verified this run."
+        )
+    if status == "COLLECTION_FAILED":
+        collection = _json(run_dir / "discovery" / "collection" / "collection_run_summary.json")
+        rounds = (collection or {}).get("rounds")
+        if not isinstance(rounds, list) or not rounds:
+            return BLOCK, (
+                "Discovery collection failed and its summary is missing, so an outage cannot be "
+                "told from an internal failure."
+            )
+        if any(isinstance(r, dict) and (r.get("store") or {}).get("error") for r in rounds):
+            return BLOCK, (
+                "Discovery collection failed inside the pipeline (the observation store reported "
+                "an error); see the discovery log."
+            )
+        statuses: dict[str, int] = {}
+        for item in rounds:
+            for name, count in ((item or {}).get("request_statuses") or {}).items():
+                statuses[name] = statuses.get(name, 0) + count
+        listed = ", ".join(f"{n} {name}" for name, n in sorted(statuses.items())) or "none"
+        return WARN, (
+            "Discovery collection stored no observation because no retailer page could be "
+            f"collected (requests: {listed})."
+        )
+    return BLOCK, f"Discovery finished with status {status!r}."
+
+
 def evaluate(
     run_dir: Path,
     *,
@@ -196,6 +243,7 @@ def evaluate(
     previous_counts: dict | None = None,
     max_matching_drop_pct: float | None = None,
     policy: rfp.FailurePolicy | None = None,
+    policy_warnings: Sequence[str] = (),
 ) -> GateResult:
     policy = policy or rfp.FailurePolicy()
     now = now or datetime.now(UTC)
@@ -250,16 +298,23 @@ def evaluate(
         metrics["discovery_status"] = run_status
         metrics["discovery_requests_sent"] = summary.get("requests_sent")
         metrics["discovery_exit_code"] = discovery_code
-        # PARTIAL_SUCCESS (exit 2) is the normal result of a bounded search: result caps and
-        # uncollected plausible candidates. The driver accepts it and so does the gate. Only
-        # request failures make the coverage untrustworthy.
+        # PARTIAL_SUCCESS (exit 2) is the normal result of a bounded search. A failed collection
+        # or a search-only run caused by retailers that did not answer is external and only warns;
+        # an internal failure or a status the pipeline does not produce blocks.
         if run_status not in {"SUCCESS", "PARTIAL_SUCCESS"}:
-            block(f"Discovery finished with status {run_status!r}.")
+            verdict, message = discovery_status_check(run_dir, summary)
+            (block if verdict == BLOCK else warn)(message)
+        if (summary.get("collection_rounds") or 0) > 0 and not (
+            run_dir / "discovery" / "collection" / "match_results.csv"
+        ).is_file():
+            block("discovery/collection/match_results.csv is missing although collection ran.")
         failures = retailer_failures(summary, metrics["retailers"])
         metrics["retailer_failures"] = failures
         assessment = rfp.assess(rfp.read_ledger(run_dir), summary, policy, plain_language=failures)
         for line in assessment.integrity:
             block(line)  # Missing or inconsistent discovery files: never accepted by a person.
+        # A person's acceptance clears only a finding that is acceptable at all (a bundle saved
+        # before the request files were kept); it never reaches the integrity problems above.
         acceptance = {
             "requested": accept_retailer_failures,
             "used": False,
@@ -278,12 +333,32 @@ def evaluate(
             )
             for line in assessment.blocking:
                 block(f"{line} {hint}")
-        acceptance["used"] = acceptance["used"] or bool(
-            accept_retailer_failures and assessment.warnings and not assessment.integrity
-        )
         for line in assessment.warnings:
-            warn(f"{line} Accepted explicitly by a person." if acceptance["used"] else line)
+            warn(line)
         metrics["retailer_failure_policy"] = assessment.metrics | {"manual_acceptance": acceptance}
+        coverage = rc.from_summary(summary)
+        if coverage is None:
+            block(
+                "discovery_summary.json records no search outcomes, so which retailers were "
+                "checked cannot be stated."
+            )
+        else:
+            metrics["retailer_coverage"] = coverage.as_dict()
+            if not coverage.complete:
+                warn(f"Report notice: {coverage.notice()}.")
+        steps = sum(
+            1
+            for job in summary.get("job_outcomes") or []
+            if isinstance(job, dict) and job.get("terminal_outcome") == "DISCOVERY_STEP_FAILED"
+        )
+        metrics["discovery_step_failures"] = steps
+        if steps:
+            warn(
+                f"{steps} discovery step(s) raised an internal error and were kept for review; "
+                "those target/retailer pairs are not verified. Look at the discovery log."
+            )
+        for line in policy_warnings:
+            warn(line)
 
     previews = sorted((run_dir / "publications").glob("*_preview/publication_report.json"))
     report = _json(previews[-1]) if previews else None
@@ -391,6 +466,7 @@ def render_summary(title: str, result: GateResult, extra: dict | None = None) ->
                 f"{v['inspection_failures']} | {v['http_429']} |"
             )
         lines.append("")
+    lines += _coverage_section(m.get("retailer_coverage"))
     lines += _policy_section(m.get("retailer_failure_policy"))
     if result.blocking:
         lines += ["**Blocking:**", *[f"- {b}" for b in result.blocking], ""]
@@ -431,16 +507,19 @@ def _policy_section(policy: dict | None) -> list[str]:
         f"- Planned searches never sent: {req['searches_not_executed']} of "
         f"{req['searches_planned']} (retailer failing: "
         f"{req['searches_not_sent_retailer_failing']})",
-        f"- Thresholds: at most {limits['max_total']} failed in total, "
-        f"{limits['max_per_retailer']} per retailer, {limits['max_retailer_pct']:g}% per "
-        f"retailer, {limits['max_total_pct']:g}% overall, {limits['max_unsent_pct']:g}% of the "
-        "plan unsent",
+        "- Failure classes: "
+        + (
+            ", ".join(f"{n}× {rfp.FAILURE_LABELS[c]}" for c, n in req["failure_classes"].items())
+            or "none"
+        ),
+        f"- Warning thresholds (never block publication): more than {limits['max_total']} failed "
+        f"in total, {limits['max_per_retailer']} per retailer, {limits['max_retailer_pct']:g}% "
+        f"per retailer, {limits['max_total_pct']:g}% overall or {limits['max_unsent_pct']:g}% of "
+        "the plan unsent mark a warning significant",
         "- Manual acceptance: "
         + (
-            "used to publish despite a blocking retailer-failure finding"
+            "used to publish a legacy run whose request files were not stored"
             if acceptance["overrode_block"]
-            else "requested; the run was within policy anyway"
-            if acceptance["used"]
             else "requested; nothing needed it"
             if acceptance["requested"]
             else "not used"
@@ -460,5 +539,28 @@ def _policy_section(policy: dict | None) -> list[str]:
                 f"| {name} | {v['attempted']} | {v['failed']} | {rate} | "
                 f"{v['search_failures']} | {v['inspection_failures']} |"
             )
+        lines.append("")
+    return lines
+
+
+def _coverage_section(coverage: dict | None) -> list[str]:
+    """Which retailers were checked, as the report notice states it (counts and names only)."""
+    if not coverage:
+        return []
+    lines = [
+        f"**{coverage['notice']}**"
+        if coverage["notice"]
+        else f"**Retailer coverage:** {coverage['checked']}/{coverage['total']} retailers checked",
+        "",
+    ]
+    rows = [v for v in coverage["retailers"].values() if v["status"] != "CHECKED"]
+    if rows:
+        lines += ["| Retailer | Status | Searches answered | Search failures | Never sent |"]
+        lines += ["|---|---|---|---|---|"]
+        lines += [
+            f"| {v['name']} | {v['status']} | {v['searches_answered']} | "
+            f"{v['search_failures']} | {v['searches_not_executed']} |"
+            for v in rows
+        ]
         lines.append("")
     return lines

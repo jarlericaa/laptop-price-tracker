@@ -1,39 +1,40 @@
-"""Risk-based policy for retailer request failures in a weekly discovery run.
+"""Retailer request failures in a weekly discovery run: counted, classified, reported, never fatal.
 
-The readiness gate used to block publication whenever *any* search or page fetch failed. One failed
-Octagon product page among about 770 requests (2026-11-22) therefore stopped an otherwise complete
-weekly report. This module replaces that all-or-nothing rule with a deterministic, unit-tested
-assessment of how much the failures can matter. It reads only the discovery run's own files
-(``search_requests.csv``, ``product_inspections.csv``, ``discovery_summary.json``) and never sends a
-request.
+A failed search or page fetch is an *external data-availability problem*: the report is then less
+complete, not less true. Retailer failures therefore never block publication. What the report must
+not do is pretend: the affected products stay ``Not checked`` or ``Review`` (never ``No match``,
+never a zero, never an older price presented as current), and the readiness gate says exactly what
+was not verified. Pipeline-integrity problems are a different category and still block: discovery
+files that are missing, unreadable or contradict each other (``Assessment.integrity``).
+
+History: until 2026-11-22 any failed request blocked; the first risk-based version (PR #7) still
+blocked on thresholds and on stopped or unavailable retailers. Both runs of 2026-11-22 (one failed
+Octagon page; Laptop Factory answering HTTP 500 and being stopped) collected, saved and previewed
+correctly and were still withheld. Here the former thresholds only grade the warning's severity.
 
 What counts as one failed request (each failure is counted exactly once)
 ------------------------------------------------------------------------
 * a row of ``search_requests.csv`` whose outcome is ``SEARCH_ERROR`` or ``UNSUPPORTED_LAYOUT`` (a
-  search request that was sent and gave no readable answer; its HTTP status, 429 included, is
-  an attribute of the same row, not a second failure);
+  search that was sent and gave no readable answer; its HTTP status, 429 included, is an attribute
+  of the same row, not a second failure);
 * a row of ``product_inspections.csv`` whose outcome is ``FETCH_FAILED``.
 
-Rows answered from a saved or same-run copy (``cache`` is set) and rows that were never sent
-(``NOT_SENT_*``, ``NOT_INSPECTED_BUDGET``) are not attempts and stay out of every denominator. The
-summary's ``PROVIDER_FAILURE`` and ``RETAILER_STOPPED_AFTER_ERRORS`` counters are job-level views of
-the same search errors: they are cross-checked against the rows, never added to them.
+Rows answered from a saved or same-run copy (``cache`` is set) and rows never sent (``NOT_SENT_*``,
+``NOT_INSPECTED_BUDGET``) are not attempts and stay out of every denominator. The summary's
+``PROVIDER_FAILURE`` and ``RETAILER_STOPPED_AFTER_ERRORS`` counters are job-level views of the same
+search errors: they are cross-checked against the rows, never added to them.
 
-Severity
---------
-* **A, minor** (warn, publish): every threshold of :class:`FailurePolicy` holds, no retailer was
-  stopped or unavailable, and every failed request is visible in the report as an unresolved
-  candidate or an incomplete search rather than as a confirmed absence.
-* **B, moderate** (warn or block by impact): failures concentrated on one target, a failed search
-  whose job still ended as "no result" (a silent negative), or a job whose impact cannot be read
-  from the discovery diagnostics. Impact that cannot be established blocks.
-* **C, significant** (block): a threshold is exceeded, a retailer was stopped after repeated errors
-  or answered nothing, too much of the plan was never sent, or provider failures exceed what the
-  failed requests explain.
+Each failure is classified (``classify_failure``) so that a temporary server error, a timeout, a
+rate limit, a refused request and an unsupported page layout stay distinguishable in diagnostics.
 
-Blocks of this policy may be accepted by a person (``accept_retailer_failures``). Missing,
-unreadable or mutually inconsistent discovery files are not retailer failures: they are reported as
-``integrity`` problems that nothing overrides.
+Severity of the warning (it never changes the decision)
+-------------------------------------------------------
+* ``minor``: every threshold of :class:`FailurePolicy` holds and no retailer was stopped or
+  unavailable;
+* ``moderate``: the failures touch jobs in a way worth a look (concentrated on one target, a failed
+  search whose job still ended as "nothing found", a job outcome that cannot be read);
+* ``significant``: a threshold is exceeded, a retailer was stopped after repeated errors or
+  answered nothing, or much of the plan was never executed.
 """
 
 from __future__ import annotations
@@ -41,6 +42,8 @@ from __future__ import annotations
 import csv
 import math
 import os
+import re
+from collections import Counter
 from collections.abc import Mapping
 from dataclasses import asdict, dataclass, field
 from fractions import Fraction
@@ -103,7 +106,7 @@ ABSENCE_TERMINAL = frozenset(
     }
 )
 
-# Failed requests on one target (all retailers together) that trigger the impact check.
+# Failed requests on one target (all retailers together) that trigger the impact note.
 CONCENTRATION_MIN_FAILURES = 2
 
 SEVERITY_NONE, SEVERITY_MINOR, SEVERITY_MODERATE, SEVERITY_SIGNIFICANT = (
@@ -113,6 +116,48 @@ SEVERITY_NONE, SEVERITY_MINOR, SEVERITY_MODERATE, SEVERITY_SIGNIFICANT = (
     "significant",
 )
 
+# Failure classes. ``code`` is the fetcher's error code (scraping.FetchError.code).
+RATE_LIMIT, SERVER_ERROR, TIMEOUT, NETWORK_ERROR = (
+    "RATE_LIMIT",
+    "SERVER_ERROR",
+    "TIMEOUT",
+    "NETWORK_ERROR",
+)
+ACCESS_DENIED, NOT_FOUND, CLIENT_ERROR, HTTP_ERROR = (
+    "ACCESS_DENIED",
+    "NOT_FOUND",
+    "CLIENT_ERROR",
+    "HTTP_ERROR",
+)
+UNSUPPORTED_LAYOUT, REQUEST_REFUSED, OTHER_ERROR = (
+    "UNSUPPORTED_LAYOUT",
+    "REQUEST_REFUSED",
+    "OTHER_ERROR",
+)
+FAILURE_LABELS = {
+    RATE_LIMIT: "rate limited",
+    SERVER_ERROR: "server error",
+    TIMEOUT: "timeout",
+    NETWORK_ERROR: "connection error",
+    ACCESS_DENIED: "access denied",
+    NOT_FOUND: "page not found",
+    CLIENT_ERROR: "HTTP client error",
+    HTTP_ERROR: "HTTP error",
+    UNSUPPORTED_LAYOUT: "unsupported page layout",
+    REQUEST_REFUSED: "request refused by a safeguard",
+    OTHER_ERROR: "other error",
+}
+_REFUSED_CODES = frozenset(
+    {
+        "INVALID_URL",
+        "HOST_NOT_ALLOWED",
+        "REDIRECT_HOST_NOT_ALLOWED",
+        "INVALID_REDIRECT",
+        "TOO_MANY_REDIRECTS",
+        "RESPONSE_TOO_LARGE",
+    }
+)
+
 ENV_NAMES = {
     "max_total": "RETAILER_FAILURE_MAX_TOTAL",
     "max_per_retailer": "RETAILER_FAILURE_MAX_PER_RETAILER",
@@ -120,15 +165,17 @@ ENV_NAMES = {
     "max_total_pct": "RETAILER_FAILURE_MAX_TOTAL_PCT",
     "max_unsent_pct": "RETAILER_FAILURE_MAX_UNSENT_PCT",
 }
+_COUNTS = frozenset({"max_total", "max_per_retailer"})
 
 
 class PolicyConfigError(ValueError):
-    """A threshold is malformed or out of range. The caller must refuse to publish."""
+    """A threshold is malformed or out of range."""
 
 
 @dataclass(frozen=True)
 class FailurePolicy:
-    """Thresholds of severity A. Defaults are documented in docs/GITHUB_ACTIONS_SETUP.md."""
+    """Warning-severity thresholds. Exceeding one marks the warning ``significant``; it never blocks
+    publication. Defaults are documented in docs/GITHUB_ACTIONS_SETUP.md."""
 
     max_total: int = 3  # failed requests across all retailers
     max_per_retailer: int = 2  # failed requests of any one retailer
@@ -137,7 +184,7 @@ class FailurePolicy:
     max_unsent_pct: float = 5.0  # planned searches never executed / planned searches
 
     def __post_init__(self) -> None:
-        for name in ("max_total", "max_per_retailer"):
+        for name in _COUNTS:
             value = getattr(self, name)
             if isinstance(value, bool) or not isinstance(value, int) or value < 0:
                 raise PolicyConfigError(f"{ENV_NAMES[name]} must be a whole number >= 0.")
@@ -157,26 +204,82 @@ class FailurePolicy:
     @classmethod
     def from_environment(cls, environ: Mapping[str, str] | None = None) -> FailurePolicy:
         """Defaults overridden by non-empty ``RETAILER_FAILURE_*`` variables. A set but invalid
-        value raises :class:`PolicyConfigError`; it is never silently replaced by a default."""
+        value raises :class:`PolicyConfigError`."""
         environ = os.environ if environ is None else environ
-        values: dict[str, int | float] = {}
-        for name, variable in ENV_NAMES.items():
-            text = (environ.get(variable) or "").strip()
-            if not text:
-                continue
-            try:
-                if name in {"max_total", "max_per_retailer"}:
-                    if not text.isascii() or not text.isdigit():
-                        raise ValueError(text)
-                    values[name] = int(text)
-                else:
-                    values[name] = float(text)
-            except ValueError:
-                raise PolicyConfigError(
-                    f"{variable} is {text!r}, which is not a valid "
-                    f"{'whole number' if name in {'max_total', 'max_per_retailer'} else 'number'}."
-                ) from None
+        values = {}
+        for name in ENV_NAMES:
+            parsed = _parse_setting(name, environ)
+            if parsed is not None:
+                values[name] = parsed
         return cls(**values)
+
+
+def _parse_setting(name: str, environ: Mapping[str, str]) -> int | float | None:
+    variable = ENV_NAMES[name]
+    text = (environ.get(variable) or "").strip()
+    if not text:
+        return None
+    try:
+        if name in _COUNTS:
+            if not text.isascii() or not text.isdigit():
+                raise ValueError(text)
+            value: int | float = int(text)
+        else:
+            value = float(text)
+        FailurePolicy(**{name: value})  # range check
+    except (ValueError, PolicyConfigError):
+        kind = "whole number >= 0" if name in _COUNTS else "number from 0 to 100"
+        raise PolicyConfigError(f"{variable} is {text!r}, not a {kind}.") from None
+    return value
+
+
+def load_policy(environ: Mapping[str, str] | None = None) -> tuple[FailurePolicy, list[str]]:
+    """``(policy, problems)``: each invalid threshold falls back to its default and is reported.
+    The thresholds only grade a warning, so a typo must neither stop the weekly publication nor
+    pass unnoticed: the caller shows every problem as a warning."""
+    environ = os.environ if environ is None else environ
+    values: dict[str, int | float] = {}
+    problems: list[str] = []
+    for name in ENV_NAMES:
+        try:
+            parsed = _parse_setting(name, environ)
+        except PolicyConfigError as exc:
+            problems.append(f"{exc} The default ({getattr(FailurePolicy(), name):g}) is used.")
+            continue
+        if parsed is not None:
+            values[name] = parsed
+    return FailurePolicy(**values), problems
+
+
+def classify_failure(outcome: str, http_status: str = "", message: str = "") -> str:
+    """The class of one failed request from its recorded outcome, HTTP status and error text
+    (``CODE: text``, or the bare code). A server error is never read as a missing product."""
+    if outcome == "UNSUPPORTED_LAYOUT":
+        return UNSUPPORTED_LAYOUT
+    code = message.split(":", 1)[0].strip()
+    status = int(http_status) if http_status.isdigit() else 0
+    if not status:
+        found = re.search(r"HTTP (\d{3})", message)
+        status = int(found.group(1)) if found else 0
+    if code in {"RATE_LIMITED", "RETAILER_DEFERRED"} or status == 429:
+        return RATE_LIMIT
+    if code == "TIMEOUT":
+        return TIMEOUT
+    if code == "CONNECTION_ERROR":
+        return NETWORK_ERROR
+    if status >= 500:
+        return SERVER_ERROR
+    if status in (401, 403):
+        return ACCESS_DENIED
+    if status in (404, 410):
+        return NOT_FOUND
+    if 400 <= status < 500:
+        return CLIENT_ERROR
+    if code in _REFUSED_CODES:
+        return REQUEST_REFUSED
+    if code == "HTTP_STATUS":
+        return HTTP_ERROR
+    return OTHER_ERROR
 
 
 def _exceeds(part: int, whole: int, pct: float) -> bool:
@@ -262,13 +365,15 @@ def read_ledger(run_dir: Path) -> Ledger:
             entry["searches_answered"] += outcome in SEARCH_ANSWERED
             if outcome in SEARCH_FAILED:
                 entry["search_failures"] += 1
+                status = row.get("http_status", "")
                 ledger.failures.append(
                     {
                         "kind": "search",
                         "retailer_id": row["retailer_id"],
                         "target_id": row.get("target_id", ""),
                         "outcome": outcome,
-                        "http_status": row.get("http_status", ""),
+                        "http_status": status,
+                        "class": classify_failure(outcome, status, row.get("message", "")),
                     }
                 )
     for row in _read_csv(
@@ -281,13 +386,15 @@ def read_ledger(run_dir: Path) -> Ledger:
         entry["inspections_attempted"] += 1
         if outcome == INSPECTION_FAILED:
             entry["inspection_failures"] += 1
+            status = row.get("http_status", "")
             ledger.failures.append(
                 {
                     "kind": "inspection",
                     "retailer_id": row["retailer_id"],
                     "target_id": row.get("target_id", ""),
                     "outcome": outcome,
-                    "http_status": "",
+                    "http_status": status,
+                    "class": classify_failure(outcome, status, row.get("message", "")),
                 }
             )
     return ledger
@@ -295,7 +402,9 @@ def read_ledger(run_dir: Path) -> Ledger:
 
 @dataclass
 class Assessment:
-    """Result of :func:`assess`. ``blocking`` may be accepted by a person; ``integrity`` may not."""
+    """Result of :func:`assess`. ``warnings`` never block. ``blocking`` holds the one finding a
+    person may accept (a legacy bundle whose request files were not stored); ``integrity`` holds
+    discovery files that cannot be trusted, which nothing overrides."""
 
     severity: str = SEVERITY_NONE
     blocking: list[str] = field(default_factory=list)
@@ -321,15 +430,29 @@ def _jobs(summary: Mapping) -> dict[tuple[str, str], Mapping] | None:
     }
 
 
-def _job_is_visible(job: Mapping) -> bool | None:
-    """True: the report shows the pair as priced, unresolved or incomplete. False: it would read
-    as a confirmed absence. None: not determinable."""
+def _job_is_visible(job: Mapping, kind: str) -> bool | None:
+    """True: the report shows the pair as priced, unverified or incomplete. False: it would read
+    as a confirmed absence. None: not determinable. A job whose search coverage records a provider
+    failure is displayed as ``Review`` (``result_labels.search_limited``), never ``No match``."""
     terminal, legacy = job.get("terminal_outcome", ""), job.get("discovery_outcome", "")
     if terminal in VISIBLE_TERMINAL or legacy in VISIBLE_LEGACY:
+        return True
+    if kind == "search" and "PROVIDER_FAILURE" in str(job.get("search_coverage", "")):
         return True
     if terminal in ABSENCE_TERMINAL or legacy == "QUERY_PLAN_EXHAUSTED":
         return False
     return None
+
+
+def _causes(failures: list[dict[str, str]]) -> str:
+    """``2× server error (HTTP 500), 1× timeout``."""
+    counts: Counter[tuple[str, str]] = Counter(
+        (f["class"], f["http_status"] if f["http_status"].isdigit() else "") for f in failures
+    )
+    return ", ".join(
+        f"{n}× {FAILURE_LABELS[cls]}" + (f" (HTTP {status})" if status else "")
+        for (cls, status), n in sorted(counts.items(), key=lambda item: (-item[1], item[0]))
+    )
 
 
 def assess(
@@ -339,7 +462,8 @@ def assess(
     *,
     plain_language: list[str] | None = None,
 ) -> Assessment:
-    """Classify the run's retailer request failures. Pure and deterministic."""
+    """Describe the run's retailer request failures. Pure and deterministic. Retailer failures only
+    produce warnings; only unreadable or contradictory discovery files produce ``integrity``."""
     result = Assessment()
     result.integrity.extend(ledger.problems)
     retailers = ledger.retailers
@@ -353,28 +477,41 @@ def assess(
     not_executed = sum(v["searches_not_executed"] for v in retailers.values())
     planned = sum(v["search_rows_planned"] for v in retailers.values())
     findings: list[dict] = []
+    lines: dict[str, list[str]] = {}  # retailer -> warning fragments
+    notes: list[str] = []  # warnings about the whole run
     severities: list[str] = []
 
-    def add(severity: str, key: str, message: str, *, blocks: bool) -> None:
-        findings.append({"severity": severity, "id": key, "blocks": blocks, "message": message})
+    def add(severity: str, key: str, message: str, retailer: str = "") -> None:
+        findings.append({"severity": severity, "id": key, "retailer": retailer, "message": message})
         severities.append(severity)
-        (result.blocking if blocks else result.warnings).append(message)
+        if retailer:
+            lines.setdefault(retailer, []).append(message)
+        else:
+            notes.append(message)
 
     if ledger.request_files_not_stored:
-        add(
-            SEVERITY_SIGNIFICANT,
-            "request_files_not_stored",
+        findings.append(
+            {
+                "severity": SEVERITY_SIGNIFICANT,
+                "id": "request_files_not_stored",
+                "retailer": "",
+                "message": "request files not stored",
+            }
+        )
+        severities.append(SEVERITY_SIGNIFICANT)
+        result.blocking.append(
             "This run bundle was saved before request files were kept with it, so its retailer "
             "request failures cannot be counted here; review the collection job's gate result "
-            "for this run.",
-            blocks=True,
+            "for this run."
         )
         summary = {}  # Nothing in the rows to compare the summary's counters with.
+
     # --- Cross-checks of the summary against the rows: inconsistent files are never accepted.
     outcomes = summary.get("search_outcomes") or {}
     for key, count in outcomes.items():
         retailer_id, _, outcome = str(key).partition(":")
-        if outcome in SEARCH_FAILED and count > _failed_search_rows(ledger, retailer_id):
+        known = ledger.retailers.get(retailer_id, {}).get("search_failures", 0)
+        if outcome in SEARCH_FAILED and count > known:
             result.integrity.append(
                 f"discovery_summary.json reports {count} {outcome} for {retailer_id} but "
                 "search_requests.csv shows fewer: the discovery files disagree."
@@ -399,37 +536,58 @@ def assess(
     # --- Per-retailer figures.
     per_retailer: dict[str, dict] = {}
     for retailer_id, v in sorted(retailers.items()):
-        failures = v["search_failures"] + v["inspection_failures"]
+        mine = [f for f in ledger.failures if f["retailer_id"] == retailer_id]
+        count = v["search_failures"] + v["inspection_failures"]
         tried = v["searches_attempted"] + v["inspections_attempted"]
+        classes = Counter(f["class"] for f in mine)
         per_retailer[retailer_id] = {
             "attempted": tried,
-            "failed": failures,
-            "failure_rate_pct": _pct(failures, tried),
+            "failed": count,
+            "failure_rate_pct": _pct(count, tried),
             "searches_attempted": v["searches_attempted"],
             "search_failures": v["search_failures"],
             "inspections_attempted": v["inspections_attempted"],
             "inspection_failures": v["inspection_failures"],
             "searches_not_sent_retailer_failing": v["searches_not_sent_retailer_failing"],
             "searches_not_executed": v["searches_not_executed"],
+            "failure_classes": dict(sorted(classes.items())),
+            "unavailable_for_the_run": bool(v["searches_attempted"] and not v["searches_answered"]),
+            "stopped_after_repeated_errors": bool(v["searches_not_sent_retailer_failing"]),
         }
 
-    # --- Severity C: significant.
+    # --- What happened to each retailer (warnings; severity grades them).
     for retailer_id, v in sorted(retailers.items()):
-        if v["searches_not_sent_retailer_failing"]:
-            add(
-                SEVERITY_SIGNIFICANT,
-                "retailer_stopped",
-                f"{retailer_id}: searching stopped after repeated errors "
-                f"({v['searches_not_sent_retailer_failing']} planned search(es) never sent).",
-                blocks=True,
-            )
-        if v["searches_attempted"] and not v["searches_answered"]:
+        p = per_retailer[retailer_id]
+        if p["unavailable_for_the_run"]:
             add(
                 SEVERITY_SIGNIFICANT,
                 "retailer_unavailable",
-                f"{retailer_id}: none of its {v['searches_attempted']} search request(s) was "
-                "answered; the retailer was unavailable.",
-                blocks=True,
+                f"unavailable (none of its {v['searches_attempted']} search request(s) was "
+                "answered)",
+                retailer_id,
+            )
+        if p["stopped_after_repeated_errors"]:
+            add(
+                SEVERITY_SIGNIFICANT,
+                "retailer_stopped",
+                "searching stopped after repeated errors "
+                f"({v['searches_not_sent_retailer_failing']} planned search(es) never sent)",
+                retailer_id,
+            )
+        if p["failed"] > policy.max_per_retailer:
+            add(
+                SEVERITY_SIGNIFICANT,
+                "retailer_count",
+                f"{p['failed']} request(s) failed (limit {policy.max_per_retailer})",
+                retailer_id,
+            )
+        if _exceeds(p["failed"], p["attempted"], policy.max_retailer_pct):
+            add(
+                SEVERITY_SIGNIFICANT,
+                "retailer_rate",
+                f"{p['failed']} of {p['attempted']} requests failed "
+                f"({p['failure_rate_pct']}%; limit {policy.max_retailer_pct:g}%)",
+                retailer_id,
             )
     if failed or unsent_failing:
         if _exceeds(not_executed, planned, policy.max_unsent_pct):
@@ -438,14 +596,12 @@ def assess(
                 "plan_not_executed",
                 f"{not_executed} of {planned} planned searches were never executed "
                 f"({_pct(not_executed, planned)}%; limit {policy.max_unsent_pct:g}%).",
-                blocks=True,
             )
     if failed > policy.max_total:
         add(
             SEVERITY_SIGNIFICANT,
             "total_count",
             f"{failed} request(s) failed across all retailers (limit {policy.max_total}).",
-            blocks=True,
         )
     if _exceeds(failed, attempted, policy.max_total_pct):
         add(
@@ -453,44 +609,40 @@ def assess(
             "total_rate",
             f"{failed} of {attempted} requests failed ({_pct(failed, attempted)}%; limit "
             f"{policy.max_total_pct:g}%).",
-            blocks=True,
         )
-    for retailer_id, p in per_retailer.items():
-        if p["failed"] > policy.max_per_retailer:
-            add(
-                SEVERITY_SIGNIFICANT,
-                "retailer_count",
-                f"{retailer_id}: {p['failed']} request(s) failed "
-                f"(limit {policy.max_per_retailer}).",
-                blocks=True,
-            )
-        if _exceeds(p["failed"], p["attempted"], policy.max_retailer_pct):
-            add(
-                SEVERITY_SIGNIFICANT,
-                "retailer_rate",
-                f"{retailer_id}: {p['failed']} of {p['attempted']} requests failed "
-                f"({p['failure_rate_pct']}%; limit {policy.max_retailer_pct:g}%).",
-                blocks=True,
-            )
+    # Say how each retailer failed, once, after its own findings.
+    for retailer_id in lines:
+        causes = _causes([f for f in ledger.failures if f["retailer_id"] == retailer_id])
+        if causes:
+            lines[retailer_id].append(f"causes: {causes}")
 
-    # --- Severity B: impact of the failures on the jobs they touched.
+    # --- Impact of the failures on the jobs they touched (information for the reader).
     affected: list[dict] = []
     if failed:
         affected, impact_findings = _impact(ledger, jobs)
-        for severity, key, message, blocks in impact_findings:
-            add(severity, key, message, blocks=blocks)
+        for severity, key, message in impact_findings:
+            add(severity, key, message)
 
-    # --- Severity A, or none.
-    if failed and not result.integrity and not any(f["blocks"] for f in findings):
+    # --- A failure inside every threshold: one plain line.
+    if failed and not any(f["severity"] != SEVERITY_MODERATE for f in findings):
         listed = "; ".join(plain_language or []) or f"{failed} failed request(s)"
         add(
             SEVERITY_MINOR,
             "within_policy",
-            f"Retailer request failures within policy ({failed} of {attempted} requests, "
-            f"{_pct(failed, attempted)}%): {listed}. Affected searches or pages are shown in the "
-            "report as unresolved candidates or incomplete searches, not as confirmed absences.",
-            blocks=False,
+            f"Retailer request failures within the warning thresholds ({failed} of {attempted} "
+            f"requests, {_pct(failed, attempted)}%): {listed}.",
         )
+
+    result.warnings.extend(
+        f"{retailer}: " + "; ".join(parts) + "." for retailer, parts in lines.items()
+    )
+    result.warnings.extend(notes)
+    if result.warnings:
+        result.warnings.append(
+            "Products that could not be verified are shown as Not checked or Review, never as No "
+            "match or a zero; competitiveness uses only verified prices."
+        )
+
     order = [SEVERITY_NONE, SEVERITY_MINOR, SEVERITY_MODERATE, SEVERITY_SIGNIFICANT]
     if result.integrity:
         severities.append(SEVERITY_SIGNIFICANT)
@@ -498,11 +650,11 @@ def assess(
     if result.integrity:
         reason = "The discovery request files are missing or inconsistent."
     elif result.blocking:
-        reason = " ".join(f["message"] for f in findings if f["blocks"])
-    elif not failed:
+        reason = " ".join(result.blocking)
+    elif not failed and not unsent_failing:
         reason = "No retailer request failed."
     else:
-        reason = next(f["message"] for f in findings if f["id"] == "within_policy")
+        reason = " ".join(result.warnings[:-1] or result.warnings)
     result.metrics = {
         "severity": result.severity,
         "automated_decision": result.decision,
@@ -519,6 +671,7 @@ def assess(
             "searches_not_sent_retailer_failing": unsent_failing,
             "searches_not_executed": not_executed,
             "searches_planned": planned,
+            "failure_classes": dict(sorted(Counter(f["class"] for f in ledger.failures).items())),
         },
         "retailers": per_retailer,
         "findings": findings,
@@ -528,13 +681,10 @@ def assess(
     return result
 
 
-def _failed_search_rows(ledger: Ledger, retailer_id: str) -> int:
-    return ledger.retailers.get(retailer_id, {}).get("search_failures", 0)
-
-
 def _impact(ledger: Ledger, jobs: Mapping | None):
-    """``(affected jobs, findings)``: what the failed requests did to the jobs they touched."""
-    findings: list[tuple[str, str, str, bool]] = []
+    """``(affected jobs, findings)``: what the failed requests did to the jobs they touched. A
+    finding is ``(severity, id, message)``; none of them blocks."""
+    findings: list[tuple[str, str, str]] = []
     affected: list[dict] = []
     if jobs is None:
         findings.append(
@@ -542,9 +692,7 @@ def _impact(ledger: Ledger, jobs: Mapping | None):
                 SEVERITY_MODERATE,
                 "impact_unknown",
                 "The discovery summary has no per-job outcomes, so the effect of "
-                f"{len(ledger.failures)} failed request(s) on coverage cannot be established; "
-                "manual review required.",
-                True,
+                f"{len(ledger.failures)} failed request(s) on individual products cannot be read.",
             )
         )
         return affected, findings
@@ -555,12 +703,11 @@ def _impact(ledger: Ledger, jobs: Mapping | None):
                 SEVERITY_MODERATE,
                 "impact_unknown",
                 f"{len(unattributed)} failed request(s) name no target in the discovery files, "
-                "so their effect on coverage cannot be established; manual review required.",
-                True,
+                "so their effect on individual products cannot be read.",
             )
         )
-    silent: list[tuple[str, str]] = []
-    unknown: list[tuple[str, str]] = []
+    silent: set[tuple[str, str]] = set()
+    unknown: set[tuple[str, str]] = set()
     per_target: dict[str, list[dict]] = {}
     for failure in ledger.failures:
         if not failure["target_id"]:
@@ -568,12 +715,13 @@ def _impact(ledger: Ledger, jobs: Mapping | None):
         per_target.setdefault(failure["target_id"], []).append(failure)
         key = (failure["target_id"], failure["retailer_id"])
         job = jobs.get(key)
-        visible = _job_is_visible(job) if job is not None else None
+        visible = _job_is_visible(job, failure["kind"]) if job is not None else None
         affected.append(
             {
                 "target_id": failure["target_id"],
                 "retailer_id": failure["retailer_id"],
                 "request": failure["kind"],
+                "failure_class": failure["class"],
                 "http_status": failure["http_status"],
                 "terminal_outcome": (job or {}).get("terminal_outcome", ""),
                 "discovery_outcome": (job or {}).get("discovery_outcome", ""),
@@ -583,18 +731,17 @@ def _impact(ledger: Ledger, jobs: Mapping | None):
             }
         )
         if visible is False:
-            silent.append(key)
+            silent.add(key)
         elif visible is None:
-            unknown.append(key)
+            unknown.add(key)
     if silent:
         findings.append(
             (
                 SEVERITY_MODERATE,
                 "silent_negative",
-                f"{len(set(silent))} target/retailer pair(s) had a failed request but ended as "
-                "'searched, nothing found': the failure would read as a confirmed absence; "
-                "manual review required.",
-                True,
+                f"{len(silent)} target/retailer pair(s) had a failed request but ended as "
+                "'searched, nothing found' without a recorded provider failure: check that the "
+                "report does not show them as No match.",
             )
         )
     if unknown:
@@ -602,10 +749,8 @@ def _impact(ledger: Ledger, jobs: Mapping | None):
             (
                 SEVERITY_MODERATE,
                 "impact_unknown",
-                f"{len(set(unknown))} target/retailer pair(s) with a failed request have no "
-                "readable job outcome, so the impact cannot be established; manual review "
-                "required.",
-                True,
+                f"{len(unknown)} target/retailer pair(s) with a failed request have no readable "
+                "job outcome, so their effect cannot be read.",
             )
         )
     priced = {t for (t, _), job in jobs.items() if job.get("terminal_outcome") in PRICED_OUTCOMES}
@@ -617,9 +762,8 @@ def _impact(ledger: Ledger, jobs: Mapping | None):
                 (
                     SEVERITY_MODERATE,
                     "concentrated_priced",
-                    f"{len(failures)} failed requests concentrated on one target "
-                    "that still has a retailer price from another page.",
-                    False,
+                    f"{len(failures)} failed requests concentrated on one target that still has "
+                    "a retailer price from another page.",
                 )
             )
         else:
@@ -628,8 +772,7 @@ def _impact(ledger: Ledger, jobs: Mapping | None):
                     SEVERITY_MODERATE,
                     "concentrated_unpriced",
                     f"{len(failures)} failed requests concentrated on one target that has no "
-                    "retailer price: the failures may be why; manual review required.",
-                    True,
+                    "retailer price.",
                 )
             )
     return affected, findings

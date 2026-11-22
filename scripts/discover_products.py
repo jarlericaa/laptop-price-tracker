@@ -1023,6 +1023,7 @@ def _inspect(job, url, fetcher, transport, args, state, evidence_dir, log):
             log(f"  inspect {job.retailer_id:14} {job.target.target_id}: FETCH_FAILED "
                 f"{error.code}")
             return None, row | {"outcome": "FETCH_FAILED", "message": error.code,
+                                "http_status": str(error.http_status or ""),
                                 "error": f"{error.code}: {error.message}"}
         state["product_fetches"] += 1
         source = ""
@@ -2243,7 +2244,7 @@ class DiscoveryRun:
         ], hit_rows)
         inspection_columns = [
             "target_id", "retailer_id", "product_url", "outcome", "variants", "retrieved_at",
-            "content_sha256", "evidence_file", "message", "cache",
+            "content_sha256", "evidence_file", "message", "cache", "http_status",
         ]
         write_csv(out / "product_inspections.csv", inspection_columns, (
             {column: row.get(column, "") for column in inspection_columns}

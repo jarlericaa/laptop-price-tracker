@@ -64,6 +64,7 @@ def readiness_record(gate: run_gate.GateResult) -> dict:
             if key in policy
         },
         "manual_acceptance": policy.get("manual_acceptance", {}),
+        "retailer_coverage": gate.metrics.get("retailer_coverage"),
     }
 
 
@@ -79,6 +80,10 @@ def publisher_inputs(run_dir: Path) -> list[str]:
     collection = run_dir / "discovery" / "collection"
     if collection.is_dir():
         args += ["--collection-dir", str(collection)]
+    discovery = run_dir / "discovery"
+    if (discovery / "discovery_summary.json").is_file():
+        # The report states which retailers were checked (the notice under its title).
+        args += ["--discovery-dir", str(discovery)]
     return args
 
 
@@ -114,13 +119,7 @@ def main(
     except ss.StateError as exc:
         print(f"State error: {exc}", file=sys.stderr)
         return 1
-    try:
-        policy = rfp.FailurePolicy.from_environment()
-    except rfp.PolicyConfigError as exc:
-        # A malformed threshold never falls back to a default: nothing is published.
-        print(f"BLOCKED: invalid retailer-failure policy configuration: {exc}", file=sys.stderr)
-        ss.write_step_summary(f"**Publication blocked:** invalid retailer-failure policy: {exc}")
-        return 1
+    policy, policy_problems = rfp.load_policy()
     gate = run_gate.evaluate(
         run_dir,
         accept_retailer_failures=args.accept_retailer_failures,
@@ -128,6 +127,7 @@ def main(
         max_matching_drop_pct=args.max_matching_drop_pct,
         previous_counts=previous,
         policy=policy,
+        policy_warnings=policy_problems,
     )
     run_gate.report_to_console(gate)
     if not gate.ok:

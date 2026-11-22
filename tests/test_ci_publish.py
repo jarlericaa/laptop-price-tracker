@@ -454,17 +454,23 @@ def test_production_mode_publishes_and_records_everything_durably(tmp_path, stor
 
 
 def test_a_blocked_gate_stops_before_the_publisher_is_even_called(tmp_path, storage) -> None:
-    run = prepare(tmp_path, discovery_code=2, run_status="PARTIAL_SUCCESS", failures=True)
+    # An invalid publication preview is a pipeline-integrity failure; retailer failures are not.
+    run = prepare(tmp_path, preview_status="DESTINATION_REFUSED")
     publisher = Publisher(tmp_path, report=good_report())
     assert invoke(tmp_path, run, publisher, FakeSheet(), storage) == 1
     assert publisher.calls == []
 
 
-def test_accepting_retailer_failures_is_an_explicit_choice(tmp_path, storage) -> None:
+def test_retailer_failures_publish_without_any_acceptance_and_are_recorded(
+    tmp_path, storage
+) -> None:
     run = prepare(tmp_path, discovery_code=2, run_status="PARTIAL_SUCCESS", failures=True)
     ss.save_bundle(*storage, run, run.name, {})
     publisher = Publisher(tmp_path, report=good_report())
-    assert invoke(tmp_path, run, publisher, FakeSheet(), storage, "--accept-retailer-failures") == 0
+    assert invoke(tmp_path, run, publisher, FakeSheet(), storage) == 0
+    (attempt,) = ss.read_publication_attempts(*storage, PUB)
+    assert attempt["readiness"]["decision"] == "PASS_WITH_WARNINGS"
+    assert attempt["readiness"]["warnings"] and attempt["readiness"]["retailer_coverage"]
 
 
 def test_a_live_preview_refusal_blocks_the_write(tmp_path, storage) -> None:

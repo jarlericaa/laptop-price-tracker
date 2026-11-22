@@ -96,6 +96,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--collection-dir", type=Path, help="collect_and_match.py run folder (optional)."
     )
     parser.add_argument(
+        "--discovery-dir",
+        type=Path,
+        help="Discovery run folder (optional): its summary states which retailers were checked, "
+        "shown as a notice under the PRICE COMPARISON title when coverage is incomplete.",
+    )
+    parser.add_argument(
         "--contract",
         type=Path,
         default=CONTRACT_PATH,
@@ -143,6 +149,7 @@ def main(
             args.reports_dir,
             args.context_report_dir,
             collection_dir=args.collection_dir,
+            discovery_dir=args.discovery_dir,
         )
         plan = build_variation_plan(report, contract)
     except (PublicationInputError, OSError, ValueError, KeyError) as exc:
@@ -181,6 +188,9 @@ def main(
         "retired_tabs_never_written": list(RETIRED_TABS),
         "input_fingerprints": report.fingerprints,
         "published_content_sha256": plan.content_sha256,
+        "retailer_coverage": report.retailer_coverage.as_dict()
+        if report.retailer_coverage
+        else None,
     }
 
     def finish(code: int) -> int:

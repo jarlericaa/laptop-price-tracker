@@ -65,8 +65,8 @@ Federation, no homelab, no always-on computer.**
 
 Findings that shaped the design (all still true): a read-quota 429 during the final run-log read was
 once reported as a failed publication after a successful write (handled by `SUCCEEDED_UNREPORTED`);
-discovery exit code 2 (`PARTIAL_SUCCESS`) is **normal**, so only significant retailer request failures block
-unattended publication (see [Retailer request failure policy](#retailer-request-failure-policy)); the throttled 2026-11-09 run was `READY_TO_PUBLISH` with 30 instead of 41
+discovery exit code 2 (`PARTIAL_SUCCESS`) is **normal**, so retailer fetch failures never block
+unattended publication (see [Retailer fetch failures](#retailer-fetch-failures-warnings-never-blockers)); the throttled 2026-11-09 run was `READY_TO_PUBLISH` with 30 instead of 41
 matching rows, which the gate now blocks; the compact dashboard layout has **never been written
 live** (adjacent column groups are written as one merged group, tested only against a fake that
 merges like Sheets).
@@ -188,8 +188,8 @@ not confirm the key on the official syntax page, so **the first scheduled week m
 Scheduled runs only start from the default branch and may be delayed by several minutes.
 `WEEKLY_AUTOMATION` is a repository Variable and is **inert until set**: unset or `off` skips the
 scheduled run before anything happens; `preview` runs mode A weekly; `publish` is the full unattended
-run. Scheduled runs never use the manual acceptance of retailer failures; minor failures publish with a
-warning under the [policy](#retailer-request-failure-policy).
+run. Scheduled runs never use the manual acceptance; retailer fetch failures publish with a warning
+(see [Retailer fetch failures](#retailer-fetch-failures-warnings-never-blockers)).
 
 Every mode saves the validated collection state (new observations are real evidence and the
 rate-limit cooldowns must carry over). Only the `publish` job writes to Sheets, and only in a run that
@@ -204,9 +204,9 @@ publisher's preview report, never console text. It blocks when:
   the driver does not accept (the stage list is tested against the driver);
 - a report folder is empty, the discovery summary or preview report is missing, or the preview is not
   `PREVIEW_ONLY`;
-- discovery failed outright, or **significant retailer request failures** occurred (graded by the
-  [policy below](#retailer-request-failure-policy): minor, isolated failures only warn). A person can
-  accept a blocking finding explicitly (`accept_retailer_failures`) after reading the diagnostics;
+- discovery failed for an **internal** reason (a status the pipeline does not produce, a collection
+  that failed inside the pipeline, request files that contradict the summary). **Retailer fetch
+  failures do not block**: see [Retailer fetch failures](#retailer-fetch-failures-warnings-never-blockers);
 - the run is older than 7 days;
 - optionally, `MAX_MATCHING_DROP_PCT` is set and matching rows fell by more than that percentage
   against the last successful publication. **Off by default**: no coverage threshold is invented.
@@ -223,33 +223,83 @@ Sheet was published, so it is never silent.
 The run bundle is stored **before** any publication starts, so a failed publication never needs
 another scrape.
 
-### Retailer request failure policy
+### Retailer fetch failures: warnings, never blockers
 
-The gate used to block on **any** failed request. One failed Octagon page among about 770 requests
-(2026-11-22) stopped an otherwise complete report. `src/laptop_tracker/retailer_failure_policy.py`
-now grades the failures instead; the decision is `PASS`, `PASS_WITH_WARNINGS` or `BLOCKED`
-(`gate.json` field `decision`; `ok`, `blocking`, `warnings` and `metrics` are unchanged).
+A failed search, a failed product page, a rate limit, a retailer that stops answering, even all five
+retailers unavailable, is an **external data-availability problem**. It makes the report less
+complete, not less true, so it **never blocks publication**. The gate says `PASS_WITH_WARNINGS`, the
+job summary and a workflow annotation list what was not verified, and the report says so too. A
+**pipeline-integrity problem** (below) still blocks. History: until 2026-11-22 any failed request
+blocked; PR #7 blocked on thresholds and on stopped or unavailable retailers. The two runs of that day
+(one failed Octagon page; Laptop Factory answering HTTP 500 and being stopped, 145 of 753 searches
+never sent) collected, saved and previewed correctly and were still withheld.
+
+`src/laptop_tracker/retailer_failure_policy.py` counts and classifies the failures,
+`src/laptop_tracker/retailer_coverage.py` states which retailers were checked, and
+`src/laptop_tracker/run_gate.py` applies both.
 
 **What is counted** (each failure once; `discovery/search_requests.csv`, `product_inspections.csv`):
 a search whose outcome is `SEARCH_ERROR` or `UNSUPPORTED_LAYOUT`, and a page inspection that is
 `FETCH_FAILED`. Rows answered from a saved copy and requests never sent are not attempts. A 429 is an
 attribute of the failed row, and the summary's `PROVIDER_FAILURE` / `RETAILER_STOPPED_AFTER_ERRORS`
-counters are cross-checked against the rows, never added to them.
+counters are cross-checked against the rows, never added to them. Every failure has a class (server
+error, rate limited, timeout, connection error, access denied, page not found, unsupported page
+layout, request refused by a safeguard, ...), so a temporary HTTP 500 is never read as a missing
+product. Failed page inspections now record their HTTP status (`product_inspections.csv`,
+`http_status`). Searches never sent are told apart: retailer failing, request budget or search limit
+(counted), and the plan's own query limit (not counted).
 
-| Level | Condition | Result |
-|---|---|---|
-| A, minor | all thresholds below hold, no retailer stopped or unavailable, and every failed request is visible in the report as an unresolved candidate or incomplete search | `PASS_WITH_WARNINGS`, publishes |
-| B, moderate | two or more failures on one target; or a failed search whose job still ended as "searched, nothing found" (it would read as a confirmed absence); or a failed request whose job outcome cannot be read | blocks when material (a target with no retailer price anywhere, a silent negative, unknown impact), otherwise warns |
-| C, significant | a threshold is exceeded; a retailer was stopped after repeated errors or answered no search; too much of the plan was never executed; provider failures the request files do not explain | `BLOCKED` |
+| Decision | When |
+|---|---|
+| `PASS` | every internal check passes and no retailer request failed and every retailer was checked |
+| `PASS_WITH_WARNINGS` | any retailer fetch failure, any retailer unavailable or stopped, any incomplete retailer coverage, whatever the number |
+| `BLOCKED` | a pipeline-integrity problem, below |
 
-Not retailer failures, and never accepted by anyone: missing, unreadable or mutually inconsistent
-discovery files, a failed stage, an invalid preview, a stale run, a coverage drop beyond
-`MAX_MATCHING_DROP_PCT`. If the diagnostics cannot establish that a failure is minor, the gate fails
-closed.
+**What blocks** (none of it is a retailer failure, and a person's acceptance clears none of it except
+the legacy bundle):
 
-**Thresholds** (optional repository Variables; unset or empty means the default; a set but invalid
-value, such as `-1`, `2.5` for a count, `101` or `nan` for a percentage, **blocks** instead of falling
-back):
+- `status.json` is not `READY_TO_PUBLISH`, or a stage is missing or exited with a code the driver does not accept;
+- a report folder is empty, the publication preview is missing or not `PREVIEW_ONLY`, the run is older than 7 days;
+- `discovery_summary.json` is missing, records no search outcomes, or has a status the pipeline does not produce for a live run (`FAILED`, `MANIFEST_INVALID`, `REPLAY_ONLY`, ...);
+- discovery status `COLLECTION_FAILED` with an observation-store error or without a readable collection summary (an outage cannot then be told from an internal failure), or collection that claims to have run without its `match_results.csv`;
+- request files that are missing, unreadable or contradict the summary (more search errors or provider failures than the rows show, stopped searches with nothing unsent);
+- `MAX_MATCHING_DROP_PCT`, when the owner sets it (it is **off by default**; leave it unset if retailer outages must never stop a week, since an outage lowers the matching count);
+- every failed Sheets write, readback, backup or rollback step, the idempotency check and the check for an unfinished earlier attempt of the same publication (the publish job, unchanged).
+
+**Retailer outage statuses that no longer block:** `SEARCH_ONLY` / `SEARCH_ONLY_WITH_ERRORS` of a live
+run (nothing to collect), `COLLECTION_FAILED` whose rounds stored nothing because no page could be
+fetched, and a run without any collection folder (the price stage and the publisher preview then run
+without it: `scripts/run_variation_week.sh` passes `--search-context` and `--collection-dir` only when
+a collection exists). A swallowed internal exception of one discovery step (`DISCOVERY_STEP_FAILED`) is
+shown as its own warning, never hidden.
+
+**What the report says.** `PRICE COMPARISON` keeps its layout. A retailer that could not be checked
+shows `Not checked` (the search or observation did not complete), or `Review` (a search cut short by
+a provider failure); it is never `No match`, never a zero and never an older price. A price older than
+the reporting week is a labelled reference in the technical tabs, not carried forward. The lowest
+price, the gap and the competitiveness use only verified in-stock prices of the retailers that were
+checked, and show `—` / `No comparison` when there is none. When a retailer was not fully checked the
+second header line gains one notice, and its cell note explains what the comparison covers:
+
+| Retailers not fully checked | Notice |
+|---|---|
+| none | no notice |
+| one or two | `Coverage: 4/5 retailers checked \| Laptop Factory incomplete` |
+| three or four | `Coverage: 2/5 retailers checked \| Partial comparison` |
+| all | `Coverage: 0/5 retailers checked \| Retailer comparisons could not be verified this period` |
+
+A retailer is *not fully checked* when no search of it was answered (`UNAVAILABLE`), its searching was
+stopped after repeated errors, or more than 10% of its jobs ended unverified or of its planned
+searches were never executed (`INCOMPLETE`). A few isolated failures leave it checked: their products
+show `Not checked` or `Review`, and the gate lists them. The notice is computed from
+`discovery_summary.json` alone (the publisher takes `--discovery-dir`), is not part of the publication
+ID, and therefore also applies to a run saved before this change. All five retailers unavailable still
+publishes the verified Shopee data and an explicitly incomplete comparison.
+
+**Warning thresholds** (optional repository Variables; unset or empty means the default). They no
+longer block: exceeding one marks the warning `significant`. A set but invalid value (such as `-1`,
+`2.5` for a count, `101` or `nan` for a percentage) is **reported as a warning and ignored**, so a
+typo cannot stop the weekly publication.
 
 | Variable | Default | Meaning |
 |---|---|---|
@@ -257,26 +307,28 @@ back):
 | `RETAILER_FAILURE_MAX_PER_RETAILER` | `2` | failed requests of any one retailer (whole number) |
 | `RETAILER_FAILURE_MAX_RETAILER_PCT` | `10` | failed / attempted of any one retailer, 0 to 100 |
 | `RETAILER_FAILURE_MAX_TOTAL_PCT` | `1` | failed / attempted over all retailers, 0 to 100 |
-| `RETAILER_FAILURE_MAX_UNSENT_PCT` | `5` | planned searches never executed (budget, search limit, retailer failing) / planned searches, 0 to 100; checked only when a request failed |
+| `RETAILER_FAILURE_MAX_UNSENT_PCT` | `5` | planned searches never executed / planned searches, 0 to 100; considered only when a request failed |
 
-Why these: with about 680 discovery requests, three failures is 0.4%, so the 1% overall limit is the
-binding one only for small runs and the counts are the real brake; two per retailer and 10% of a
-retailer's requests keep one flaky site from hiding behind a large total; a retailer that stopped
-searching after two consecutive errors, or answered nothing, is never "minor". The unsent limit
-catches a run whose request budget ran out, which the old gate ignored when nothing had failed.
 Percentages are compared exactly, not as rounded floats.
 
-**Manual acceptance** (`accept_retailer_failures`, scheduled runs never use it) lets a person publish
-a run whose retailer-failure findings block. It is recorded: `gate.json` and the publication attempt
-record carry `manual_acceptance` (`requested`, `used`, `overrode_block`) and the job summary says so.
-It cannot reach any other check (see above).
+**Diagnostics.** `gate.json` (the sanitized `diagnostics-*` artifact) carries `retailer_failure_policy`
+(requests attempted and failed, search versus inspection failures, failure classes per retailer,
+searches not sent, retailers unavailable or stopped, the affected target/retailer pairs with the job
+outcome, thresholds, severity, reason, manual acceptance) and `retailer_coverage` (status per
+retailer). The job summary and the log show counts and retailer names only: no target, URL or price.
+The warnings, the coverage and the decision are also kept in the publication attempt record, so the
+Publish job's `PASS_WITH_WARNINGS` can be traced to the same files as the Collect job's.
 
-**Bundles and the two jobs.** Collect and Publish evaluate the same files with the same Variables:
-run bundles now also keep `discovery/search_requests.csv` and `discovery/product_inspections.csv`
-(a few hundred KB, encrypted like the rest). A bundle saved before this change (for example
-`tracker-run-20261122T071112Z`) holds neither file, so its failures cannot be recounted; the gate
-blocks it with a message that **only** `accept_retailer_failures` clears (read that run's collection
-job summary first).
+**Manual acceptance** (`accept_retailer_failures`; scheduled runs never use it) is now needed for one
+case only: a run bundle saved before request files were kept with it (for example
+`tracker-run-20261122T071112Z`). Its failures cannot be recounted, so the gate blocks it with a
+message that only this acceptance clears; its coverage notice is still read from the summary. The use is
+recorded in `gate.json`, the job summary and the publication attempt record. It never reaches any
+other check.
+
+**Collect and Publish use one policy.** Both call `run_gate.evaluate` over the same files with the
+same Variables. Run bundles keep `discovery/search_requests.csv` and `discovery/product_inspections.csv`
+for that reason (a few hundred KB, encrypted like the rest).
 
 ## Secrets and Variables
 
@@ -292,7 +344,7 @@ Secrets are passed **only to the steps that need them** (never workflow-wide or 
 | `SPREADSHEET_ID` | Variable | yes | the part of the Sheet URL between `/d/` and `/edit` | Which workbook |
 | `WEEKLY_AUTOMATION` | Variable | no, **set last** | `preview` or `publish` | Activates the schedule |
 | `MAX_MATCHING_DROP_PCT` | Variable | no | `30` | Optional coverage-drop gate |
-| `RETAILER_FAILURE_MAX_TOTAL`, `_MAX_PER_RETAILER`, `_MAX_RETAILER_PCT`, `_MAX_TOTAL_PCT`, `_MAX_UNSENT_PCT` | Variable | no | defaults `3`, `2`, `10`, `1`, `5` | Thresholds of the [retailer failure policy](#retailer-request-failure-policy) |
+| `RETAILER_FAILURE_MAX_TOTAL`, `_MAX_PER_RETAILER`, `_MAX_RETAILER_PCT`, `_MAX_TOTAL_PCT`, `_MAX_UNSENT_PCT` | Variable | no | defaults `3`, `2`, `10`, `1`, `5` | Warning thresholds of the [retailer fetch failure policy](#retailer-fetch-failures-warnings-never-blockers); they never block |
 
 A missing or malformed Secret fails the run in its first step naming **only the setting**, never its
 value (an invalid service-account text or key is rejected without being echoed).
@@ -411,9 +463,9 @@ twice. Afterwards the Releases hold the authoritative copy: run
    tabs), open the copy, **Share** it with the service account as Editor, and copy its ID from the
    URL. Change the Variable `SPREADSHEET_ID` to the copy's ID. Run the workflow again with *publish*
    checked and *existing_run_id* = the folder name of the preview run (shown in its summary and in
-   the *Run bundle* step, like `20261110T010000Z`), which avoids another scrape. If the gate blocked
-   the run for retailer failures, read the table first; tick *accept_retailer_failures* only if you
-   accept that coverage. Approve the waiting `production` job if you required reviewers.
+   the *Run bundle* step, like `20261110T010000Z`), which avoids another scrape. Retailer
+   fetch failures do not block (read the coverage line of the summary); tick *accept_retailer_failures*
+   only for a run bundle saved before request files were kept. Approve the waiting `production` job if you required reviewers.
 6. **Verify the copy really was the destination.** The publish log prints `Destination spreadsheet:
    Copy of ...`; the **copy's** `PILOT_PRICE_RUN_LOG` has a row with the publication ID, `SUCCESS` and
    readback `PASSED`, and the copy has one visible `PRICE COMPARISON` tab (19 columns, one row per
