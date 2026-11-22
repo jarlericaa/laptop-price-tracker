@@ -57,8 +57,27 @@ def make_run(
         (run / folder).mkdir()
         (run / folder / "f.csv").write_text("a\n1\n")
     (run / "discovery").mkdir()
+    # Search outcomes as the discovery summary counts them, one answered search per retailer; the
+    # failure fixture below adds the failed and unsent searches its request rows show.
+    outcomes = {f"{r}:RESULTS": 1 for r in ("pcx", "oct", "datablitz", "pcc", "laptop_factory")}
+    if failures:  # exactly the rows of the failure fixture below
+        outcomes = {
+            "pcx:RESULTS": 1,
+            "pcx:SEARCH_ERROR": 1,
+            "pcx:NOT_SENT_RETAILER_FAILING": 1,
+            "oct:SEARCH_ERROR": 1,
+            "datablitz:SEARCH_ERROR": 1,
+        }
     (run / "discovery/discovery_summary.json").write_text(
-        json.dumps({"run_status": run_status, "requests_sent": 841})
+        json.dumps(
+            {
+                "run_status": run_status,
+                "mode": "LIVE",
+                "requests_sent": 841,
+                "scope": {"retailers": ["laptop_factory", "datablitz", "pcx", "pcc", "oct"]},
+                "search_outcomes": outcomes,
+            }
+        )
     )
     if failures:
         write_csv(
@@ -204,24 +223,24 @@ def test_the_normal_partial_success_of_a_bounded_search_does_not_block(tmp_path)
     assert not result.metrics["retailer_failures"]
 
 
-def test_retailer_request_failures_block_until_a_person_accepts_them(tmp_path) -> None:
+def test_retailer_request_failures_warn_and_never_need_a_person(tmp_path) -> None:
     run = make_run(tmp_path, discovery_code=2, run_status="PARTIAL_SUCCESS", failures=True)
-    blocked = evaluate(run)
-    assert not blocked.ok
-    assert any("pcx: searching stopped after repeated errors" in b for b in blocked.blocking)
-    assert any("failed across all retailers" in b for b in blocked.blocking)
+    result = evaluate(run)
+    assert result.ok and result.decision == "PASS_WITH_WARNINGS" and not result.blocking
+    assert any("pcx: searching stopped after repeated errors" in w for w in result.warnings)
+    assert any("datablitz: unavailable" in w for w in result.warnings)
     # The plain-language list of what failed stays in the metrics.
-    assert any(
-        "pcx: 1 search error(s), 1 search(es) not sent" in f
-        for f in blocked.metrics["retailer_failures"]
-    )
-    assert any(
-        "pcc: 1 page fetch(es) failed (1 HTTP 429)" in f
-        for f in blocked.metrics["retailer_failures"]
-    )
+    failed = result.metrics["retailer_failures"]
+    assert any("pcx: 1 search error(s), 1 search(es) not sent" in f for f in failed)
+    assert any("pcc: 1 page fetch(es) failed (1 HTTP 429)" in f for f in failed)
+    # Nothing needed a person, so a stray acceptance is recorded as unused.
     accepted = evaluate(run, accept_retailer_failures=True)
-    assert accepted.ok and any("Accepted explicitly" in w for w in accepted.warnings)
-    assert accepted.metrics["retailer_failure_policy"]["manual_acceptance"]["overrode_block"]
+    assert accepted.decision == "PASS_WITH_WARNINGS"
+    assert accepted.metrics["retailer_failure_policy"]["manual_acceptance"] == {
+        "requested": True,
+        "used": False,
+        "overrode_block": False,
+    }
 
 
 def test_provider_failures_in_the_summary_without_a_failed_request_block(tmp_path) -> None:
@@ -289,5 +308,6 @@ def test_the_optional_coverage_drop_guard_is_off_unless_configured(tmp_path) -> 
 def test_the_summary_is_markdown_without_secret_looking_content(tmp_path) -> None:
     result = evaluate(make_run(tmp_path, failures=True))
     text = run_gate.render_summary("Collection result", result, {"Extra": "value"})
-    assert "PUB-abc" in text and "| pcx |" in text and "BLOCKED" in text and "**Extra:**" in text
+    assert "PUB-abc" in text and "| pcx |" in text and "**Extra:**" in text
+    assert "PASS_WITH_WARNINGS" in text and "Coverage: " in text
     assert "Spreadsheet" not in text and "token" not in text.lower()

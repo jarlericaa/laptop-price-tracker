@@ -124,7 +124,14 @@ s_discovery() { python scripts/discover_products.py --live --collect "${disc_arg
 
 week_start="$(python -c 'from datetime import datetime, timedelta; from zoneinfo import ZoneInfo; t=datetime.now(ZoneInfo("Asia/Singapore")).date(); print(t - timedelta(days=t.weekday()))')"
 as_of_file="$weekly_run/as_of.txt"
+# A discovery run that found nothing to collect (every retailer unreachable, no candidate page, no
+# historical seed) has no collection folder. That is an outage, not a pipeline failure: the report
+# is then built without retailer observations. discovery_summary.json says whether collection ran
+# (the readiness gate refuses a run that claims it ran and has no folder).
 s_prices() {
+  local context_args=()
+  [ -f "$weekly_run/discovery/collection/match_results.csv" ] \
+    && context_args=(--search-context "$weekly_run/discovery/collection/match_results.csv")
   as_of="$(python -c 'from datetime import UTC, datetime; print(datetime.now(UTC).isoformat())')"
   echo "$as_of" > "$as_of_file"
   python scripts/track_prices.py --store "$STORE" \
@@ -134,7 +141,7 @@ s_prices() {
     --selected-list "$V/context_selected_list.csv" --contributions "$V/context_contributions.csv" \
     --sales-ranking "$weekly_run/inputs/eligible_model_ranking.csv" \
     --week-start "$week_start" --as-of "$as_of" --discovery-dir "$weekly_run/discovery" \
-    --search-context "$weekly_run/discovery/collection/match_results.csv" \
+    "${context_args[@]}" \
     --output-dir "$weekly_run/context_reports" > "$weekly_run/prices.log" 2>&1
 }
 s_alt_audit() { python scripts/audit_alternatives.py --report-dir "$weekly_run/context_reports" --store "$STORE" \
@@ -143,10 +150,15 @@ s_alt_audit() { python scripts/audit_alternatives.py --report-dir "$weekly_run/c
 s_var_reports() { python scripts/build_variation_reports.py --variation-dir "$V" \
   --context-report-dir "$weekly_run/context_reports" --output-dir "$weekly_run/variation_reports" \
   > "$weekly_run/variation_reports.log" 2>&1; }
-s_publish_preview() { python scripts/publish_variation_prices.py --preview --variation-dir "$V" \
-  --reports-dir "$weekly_run/variation_reports" --context-report-dir "$weekly_run/context_reports" \
-  --collection-dir "$weekly_run/discovery/collection" \
-  --output-root "$weekly_run/publications" > "$weekly_run/publish_preview.log" 2>&1; }
+s_publish_preview() {
+  local collection_args=()
+  [ -d "$weekly_run/discovery/collection" ] \
+    && collection_args=(--collection-dir "$weekly_run/discovery/collection")
+  python scripts/publish_variation_prices.py --preview --variation-dir "$V" \
+    --reports-dir "$weekly_run/variation_reports" --context-report-dir "$weekly_run/context_reports" \
+    "${collection_args[@]}" --discovery-dir "$weekly_run/discovery" \
+    --output-root "$weekly_run/publications" > "$weekly_run/publish_preview.log" 2>&1
+}
 
 stage sales_refresh 0 s_sales
 stage catalog_check 0 s_catalog_check

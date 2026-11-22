@@ -55,16 +55,8 @@ def main(
     ring: ss.sc.KeyRing | None = None,
 ) -> int:
     args = build_parser().parse_args(argv)
-    try:
-        policy = rfp.FailurePolicy.from_environment()
-    except rfp.PolicyConfigError as exc:
-        # A malformed threshold never falls back to a default: the gate refuses.
-        print(f"BLOCKED: invalid retailer-failure policy configuration: {exc}", file=sys.stderr)
-        if not args.no_summary:
-            ss.write_step_summary(
-                f"## {args.title}\n\n**Gate:** BLOCKED  \n- Invalid policy: {exc}"
-            )
-        return 1
+    # Thresholds only grade a warning: a malformed one falls back to its default and is reported.
+    policy, policy_problems = rfp.load_policy()
     previous = None
     if args.max_matching_drop_pct is not None:
         try:
@@ -81,6 +73,7 @@ def main(
         previous_counts=previous,
         max_matching_drop_pct=args.max_matching_drop_pct,
         policy=policy,
+        policy_warnings=policy_problems,
     )
     if args.output:
         args.output.parent.mkdir(parents=True, exist_ok=True)

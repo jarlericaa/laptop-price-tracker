@@ -48,6 +48,7 @@ from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 
+from . import retailer_coverage
 from .price_comparison_view import (
     COLUMN_NOTES,
     PRICE_HEADER,
@@ -487,6 +488,10 @@ class VariationPublicationReport:
     top_summary: dict
     legacy: object  # sheet_publication.PilotReport of the context report (history and review rows)
     fingerprints: dict[str, str]
+    # Which retailers the run checked (retailer_coverage.Coverage), when its discovery folder was
+    # given. Deliberately not part of ``fingerprints``: it is derived from the same run folder and
+    # only adds a notice, so it must not change the publication ID of a run saved without it.
+    retailer_coverage: object = None
 
     @property
     def week_start(self) -> date:
@@ -511,6 +516,7 @@ def load_variation_report(
     context_report_dir: Path,
     *,
     collection_dir: Path | None = None,
+    discovery_dir: Path | None = None,
 ) -> VariationPublicationReport:
     """Read and validate every input; nothing is partly accepted.
 
@@ -642,6 +648,13 @@ def load_variation_report(
     )
     fingerprints["variation/context_selected_list.csv"] = list_sha
     fingerprints |= {f"context/{k}": v for k, v in summary["context_report_sha256"].items()}
+    coverage_of_retailers = None
+    if discovery_dir is not None:
+        coverage_of_retailers = retailer_coverage.read(discovery_dir)
+        if coverage_of_retailers is None:
+            raise PublicationInputError(
+                [f"{discovery_dir} has no readable discovery summary with search outcomes"]
+            )
     return VariationPublicationReport(
         variation_dir,
         reports_dir,
@@ -657,6 +670,7 @@ def load_variation_report(
         top_summary,
         legacy,
         fingerprints,
+        coverage_of_retailers,
     )
 
 
@@ -1400,10 +1414,16 @@ def price_banner(report: VariationPublicationReport) -> tuple[tuple[Cell, ...], 
     first = [BLANK] * width
     first[0] = text(PRICE_TITLE, bold=True)
     second = [BLANK] * width
-    second[0] = text(
+    line = (
         f"Reporting Week: {report.week_start.isoformat()} \u2013 {last_day.isoformat()} | "
         f"Price Data As Of: {_local_short(report.as_of)} (Asia/Singapore)"
     )
+    coverage = report.retailer_coverage
+    if coverage is not None and coverage.notice():
+        # Only an incomplete comparison says so; a complete week keeps the plain header.
+        second[0] = text(f"{line} | {coverage.notice()}", note=retailer_coverage.NOTE)
+    else:
+        second[0] = text(line)
     third = [BLANK] * width
     for number_, (label, start, end) in enumerate(SECTIONS):
         fill = "section_a" if number_ % 2 == 0 else "section_b"
